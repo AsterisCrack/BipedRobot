@@ -10,7 +10,7 @@ There are plenty of configuration option in the program so feel free to change a
 I am no professional and there might be some errors or bad coding.
 
 ### The Build
-If you wish to build the robot, for this first version I used an ESP32 and an Adafruit 16-Channel 12-bit PWM/Servo Driver as main boards. My motors are x10 RDS3225 servos and x2 Mg996r servos for the hips. You can access all the 3D models which you will need to print for the build. You will also need x2 skateboard bearings to strengthen the hips. You might as well want to install 1 to 3 MPU6050 IMU sensors for future versions, although they have no use for now.
+If you wish to build the robot, for this first version I used an ESP32 and an Adafruit 16-Channel 12-bit PWM/Servo Driver as main boards. My motors are x10 RDS3225 servos and x2 Mg996r servos for the hips. You can access all the 3D models which you will need to print for the build. The 3D model "Pie" is just one foot, so you will need to print another mirrored version. You will also need x2 skateboard bearings to strengthen the hips. You might as well want to install 1 to 3 MPU6050 IMU sensors for future versions, although they have no use for now.
 
 The servos are attached to the PWM servo board like this:
 
