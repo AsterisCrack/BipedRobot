@@ -1,0 +1,9 @@
+<launch>
+
+<rosparam file="$(find Robot_description)/launch/controller.yaml" command="load"/>
+<node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen" ns="Robot" args="Revolución 24_position_controller Revolución 25_position_controller Revolución 26_position_controller Revolución 27_position_controller Revolución 28_position_controller Revolución 29_position_controller Revolución 31_position_controller Revolución 32_position_controller Revolución 33_position_controller Revolución 34_position_controller Revolución 35_position_controller Revolución 36_position_controller joint_state_controller "/>
+<node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" respawn="false" output="screen">
+  <remap from="/joint_states" to="/Robot/joint_states"/>
+</node>
+
+</launch>

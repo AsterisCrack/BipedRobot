@@ -1,0 +1,457 @@
+<?xml version="1.0" ?>
+<robot name="Robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find Robot_description)/urdf/materials.xacro" />
+<xacro:include filename="$(find Robot_description)/urdf/Robot.trans" />
+<xacro:include filename="$(find Robot_description)/urdf/Robot.gazebo" />
+<link name="base_link">
+  <inertial>
+    <origin xyz="-0.005040533856835968 0.0017075264289383818 0.377647941012072" rpy="0 0 0"/>
+    <mass value="0.19948685949274308"/>
+    <inertia ixx="0.001079" iyy="0.000819" izz="0.000384" ixy="-7e-06" iyz="-3e-06" ixz="3.8e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="r_upper_hip_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-0.006940826308810551 3.303704247670236e-07 -0.048583558590442055" rpy="0 0 0"/>
+    <mass value="0.029517604399239224"/>
+    <inertia ixx="2.7e-05" iyy="3.8e-05" izz="1.3e-05" ixy="0.0" iyz="-0.0" ixz="4e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.0006 0.037165 -0.335135" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_upper_hip_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.0006 0.037165 -0.335135" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_upper_hip_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="r_hip_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-0.02345005103472701 -0.010753404707305257 -0.004591794353820178" rpy="0 0 0"/>
+    <mass value="0.11190378382985884"/>
+    <inertia ixx="3.7e-05" iyy="3.1e-05" izz="3.6e-05" ixy="0.0" iyz="-1e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.0229 0.037165 -0.252135" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_hip_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.0229 0.037165 -0.252135" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_hip_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="r_upper_leg_1_1_1_1_1">
+  <inertial>
+    <origin xyz="4.883982369675421e-06 -0.02360855154332216 -0.017273991846314535" rpy="0 0 0"/>
+    <mass value="0.11165148449931507"/>
+    <inertia ixx="6.2e-05" iyy="4.2e-05" izz="2.7e-05" ixy="0.0" iyz="-0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.000577 0.023781 -0.212176" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_upper_leg_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000577 0.023781 -0.212176" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_upper_leg_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="r_lower_leg_1_1_1_1_1">
+  <inertial>
+    <origin xyz="3.6092517378052014e-06 -0.023554386096736858 -0.037116435089268374" rpy="0 0 0"/>
+    <mass value="0.19214527312191357"/>
+    <inertia ixx="0.000184" iyy="0.000161" izz="3.6e-05" ixy="0.0" iyz="0.0" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.000562 0.024214 -0.148178" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_lower_leg_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000562 0.024214 -0.148178" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_lower_leg_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="r_ankle_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-1.637204692931304e-07 -0.01999992422650285 -0.025000115899643426" rpy="0 0 0"/>
+    <mass value="0.03166256611192022"/>
+    <inertia ixx="1.9e-05" iyy="1.8e-05" izz="1.9e-05" ixy="-0.0" iyz="2e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.000562 0.022714 -0.073945" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_ankle_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000562 0.022714 -0.073945" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_ankle_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="r_foot_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-0.02131875000405359 -0.010089521606237668 -0.008219813770561035" rpy="0 0 0"/>
+    <mass value="0.15738105053571566"/>
+    <inertia ixx="4.8e-05" iyy="6e-05" izz="7.2e-05" ixy="-0.0" iyz="1e-06" ixz="4e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.022938 0.037714 -0.023945" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_foot_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.022938 0.037714 -0.023945" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_foot_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="l_upper_hip_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-0.006940591291365546 -9.129904038340797e-08 -0.04858372751598805" rpy="0 0 0"/>
+    <mass value="0.029517604399242624"/>
+    <inertia ixx="2.7e-05" iyy="3.8e-05" izz="1.3e-05" ixy="-0.0" iyz="0.0" ixz="4e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.0005 -0.037352 -0.334234" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_upper_hip_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.0005 -0.037352 -0.334234" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_upper_hip_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="l_lower_hip_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-0.023449815802675203 0.010753643624445267 -0.004591963285883627" rpy="0 0 0"/>
+    <mass value="0.1119037838298176"/>
+    <inertia ixx="3.7e-05" iyy="3.1e-05" izz="3.6e-05" ixy="-0.0" iyz="1e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.023 -0.037352 -0.251234" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_lower_hip_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.023 -0.037352 -0.251234" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_lower_hip_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="l_upper_leg_1_1_1_1_1">
+  <inertial>
+    <origin xyz="5.119203356998981e-06 0.02360779046092393 -0.017274160775468755" rpy="0 0 0"/>
+    <mass value="0.11165148448362779"/>
+    <inertia ixx="6.2e-05" iyy="4.2e-05" izz="2.7e-05" ixy="-0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.000477 -0.023969 -0.211275" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_upper_leg_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000477 -0.023969 -0.211275" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_upper_leg_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="l_lower_leg_1_1_1_1_1">
+  <inertial>
+    <origin xyz="3.844480630624681e-06 0.023554625014160974 -0.037116604021336236" rpy="0 0 0"/>
+    <mass value="0.19214527312191365"/>
+    <inertia ixx="0.000184" iyy="0.000161" izz="3.6e-05" ixy="-0.0" iyz="0.0" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.000462 -0.024401 -0.147277" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_lower_leg_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000462 -0.024401 -0.147277" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_lower_leg_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="l_ankle_1_1_1_1_1">
+  <inertial>
+    <origin xyz="7.318293451672115e-08 0.020000160055257548 -0.02500028478499644" rpy="0 0 0"/>
+    <mass value="0.031662566313155345"/>
+    <inertia ixx="1.9e-05" iyy="1.8e-05" izz="1.9e-05" ixy="0.0" iyz="-2e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.000462 -0.022901 -0.073044" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_ankle_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.000462 -0.022901 -0.073044" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_ankle_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="l_foot_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-0.021318514684325794 0.010174594713652188 -0.008219983175734236" rpy="0 0 0"/>
+    <mass value="0.1573810504162199"/>
+    <inertia ixx="4.8e-05" iyy="6e-05" izz="7.2e-05" ixy="0.0" iyz="-0.0" ixz="4e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.023038 -0.037901 -0.023044" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_foot_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.023038 -0.037901 -0.023044" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_foot_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="l_hip_motor_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-0.004499753898478431 0.024324983856166986 -0.007230892107673914" rpy="0 0 0"/>
+    <mass value="0.085034070049935"/>
+    <inertia ixx="2.2e-05" iyy="1.3e-05" izz="1.5e-05" ixy="-0.0" iyz="-0.0" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.004 -0.003052 -0.31772" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_hip_motor_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.004 -0.003052 -0.31772" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/l_hip_motor_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="r_hip_motor_1_1_1_1_1">
+  <inertial>
+    <origin xyz="-0.004499926471875854 -0.024336249586503798 -0.0072041298786318375" rpy="0 0 0"/>
+    <mass value="0.08512859139212398"/>
+    <inertia ixx="2.2e-05" iyy="1.3e-05" izz="1.5e-05" ixy="-0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.004 0.002866 -0.31772" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_hip_motor_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.004 0.002866 -0.31772" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/r_hip_motor_1_1_1_1_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="board_simplified_1">
+  <inertial>
+    <origin xyz="0.012050520098500436 -0.027850426418901616 -0.04424378903270265" rpy="0 0 0"/>
+    <mass value="0.24131032038202732"/>
+    <inertia ixx="0.000219" iyy="0.000111" izz="0.000142" ixy="-1.2e-05" iyz="-0.0" ixz="-1e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.007064 -0.020371 -0.441632" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/board_simplified_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.007064 -0.020371 -0.441632" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/board_simplified_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="Revolución 24" type="revolute">
+  <origin xyz="-0.0046 -0.034299 0.017415" rpy="0 0 0"/>
+  <parent link="r_hip_motor_1_1_1_1_1"/>
+  <child link="r_upper_hip_1_1_1_1_1"/>
+  <axis xyz="-0.0 0.0 1.0"/>
+  <limit upper="1.570796" lower="-0.698132" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 25" type="revolute">
+  <origin xyz="0.0235 0.0 -0.083" rpy="0 0 0"/>
+  <parent link="r_upper_hip_1_1_1_1_1"/>
+  <child link="r_hip_1_1_1_1_1"/>
+  <axis xyz="1.0 0.0 -0.0"/>
+  <limit upper="1.570796" lower="-0.785398" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 26" type="revolute">
+  <origin xyz="-0.023477 0.013384 -0.039959" rpy="0 0 0"/>
+  <parent link="r_hip_1_1_1_1_1"/>
+  <child link="r_upper_leg_1_1_1_1_1"/>
+  <axis xyz="-0.0 1.0 0.0"/>
+  <limit upper="2.007129" lower="-2.007129" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 27" type="revolute">
+  <origin xyz="1.5e-05 -0.000433 -0.063998" rpy="0 0 0"/>
+  <parent link="r_upper_leg_1_1_1_1_1"/>
+  <child link="r_lower_leg_1_1_1_1_1"/>
+  <axis xyz="0.0 1.0 0.0"/>
+  <limit upper="2.356194" lower="-2.268928" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 28" type="revolute">
+  <origin xyz="0.0 0.0015 -0.074233" rpy="0 0 0"/>
+  <parent link="r_lower_leg_1_1_1_1_1"/>
+  <child link="r_ankle_1_1_1_1_1"/>
+  <axis xyz="0.0 1.0 0.0"/>
+  <limit upper="1.919862" lower="-1.919862" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 29" type="revolute">
+  <origin xyz="0.0235 -0.015 -0.05" rpy="0 0 0"/>
+  <parent link="r_ankle_1_1_1_1_1"/>
+  <child link="r_foot_1_1_1_1_1"/>
+  <axis xyz="1.0 -0.0 -0.0"/>
+  <limit upper="1.570796" lower="-0.436332" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 31" type="revolute">
+  <origin xyz="-0.0045 0.0343 0.016514" rpy="0 0 0"/>
+  <parent link="l_hip_motor_1_1_1_1_1"/>
+  <child link="l_upper_hip_1_1_1_1_1"/>
+  <axis xyz="-0.0 0.0 1.0"/>
+  <limit upper="0.698132" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 32" type="revolute">
+  <origin xyz="0.0235 0.0 -0.083" rpy="0 0 0"/>
+  <parent link="l_upper_hip_1_1_1_1_1"/>
+  <child link="l_lower_hip_1_1_1_1_1"/>
+  <axis xyz="1.0 -0.0 0.0"/>
+  <limit upper="0.785398" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 33" type="revolute">
+  <origin xyz="-0.023477 -0.013383 -0.039959" rpy="0 0 0"/>
+  <parent link="l_lower_hip_1_1_1_1_1"/>
+  <child link="l_upper_leg_1_1_1_1_1"/>
+  <axis xyz="0.0 1.0 0.0"/>
+  <limit upper="2.007129" lower="-2.007129" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 34" type="revolute">
+  <origin xyz="1.5e-05 0.000432 -0.063998" rpy="0 0 0"/>
+  <parent link="l_upper_leg_1_1_1_1_1"/>
+  <child link="l_lower_leg_1_1_1_1_1"/>
+  <axis xyz="0.0 1.0 0.0"/>
+  <limit upper="2.356194" lower="-2.356194" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 35" type="revolute">
+  <origin xyz="0.0 -0.0015 -0.074233" rpy="0 0 0"/>
+  <parent link="l_lower_leg_1_1_1_1_1"/>
+  <child link="l_ankle_1_1_1_1_1"/>
+  <axis xyz="0.0 1.0 0.0"/>
+  <limit upper="1.919862" lower="-1.919862" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Revolución 36" type="revolute">
+  <origin xyz="0.0235 0.015 -0.05" rpy="0 0 0"/>
+  <parent link="l_ankle_1_1_1_1_1"/>
+  <child link="l_foot_1_1_1_1_1"/>
+  <axis xyz="1.0 -0.0 0.0"/>
+  <limit upper="0.436332" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+<joint name="Rígida 37" type="fixed">
+  <origin xyz="0.004 0.003052 0.31772" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="l_hip_motor_1_1_1_1_1"/>
+</joint>
+
+<joint name="Rígida 38" type="fixed">
+  <origin xyz="0.004 -0.002866 0.31772" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="r_hip_motor_1_1_1_1_1"/>
+</joint>
+
+<joint name="Rígida 40" type="fixed">
+  <origin xyz="-0.007064 0.020371 0.441632" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="board_simplified_1"/>
+</joint>
+
+</robot>
