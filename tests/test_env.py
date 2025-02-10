@@ -26,7 +26,7 @@ def test_env():
             env.render()
 
             # Debugging information
-            print(f"Step: {step}, Action: {action}, Observation: {obs}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}")
+            # print(f"Step: {step}, Action: {action}, Observation: {obs}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}")
 
             if terminated or truncated:
                 obs, info = env.reset()

@@ -48,6 +48,15 @@ class BasicEnv(gym.Env):
         return obs, {}
 
     def step(self, action):
+        """
+        Apply action and step the simulation.
+        returns observation, reward, done, truncated, and info.
+        observation is composed of a concatenation of positions and velocities.
+        Positions, length = 7 + n joints.
+            First 3 are x, y, z, next 4 are rotation quaternion, finally n joints with the position of each joint.
+        Velocities, length = 6 + n joints.
+            First 3 are linear velocities, next 3 are angular velocities, finally n joints with the velocity of each joint.
+        """
         # print("Action received:", action)
         action = np.clip(action, self.action_space.low, self.action_space.high)
         self.data.ctrl[:] = action
