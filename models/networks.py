@@ -11,7 +11,7 @@ class PolicyNetwork(nn.Module):
     :param layer1: (int) size of the first hidden layer (default = 100)
     :param layer2: (int) size of the first hidden layer (default = 100)
     """
-    def __init__(self, env, layer1=100, layer2=100):
+    def __init__(self, env, layer1=256, layer2=256):
         super(PolicyNetwork, self).__init__()
         self.state_shape = env.observation_space.shape[0]
         self.action_shape = env.action_space.shape[0]
@@ -20,8 +20,8 @@ class PolicyNetwork(nn.Module):
         self.lin1 = nn.Linear(self.state_shape, layer1, True)
         self.lin2 = nn.Linear(layer1, layer2, True)
         self.mean_layer = nn.Linear(layer2, self.action_shape, True)
-        # self.cholesky_layer = nn.Linear(layer2, self.action_shape, True)
-        self.cholesky_layer = nn.Linear(layer2, int((self.action_shape*self.action_shape + self.action_shape)/2), True)
+        self.cholesky_layer = nn.Linear(layer2, self.action_shape, True)
+        # self.cholesky_layer = nn.Linear(layer2, int((self.action_shape*self.action_shape + self.action_shape)/2), True)
         self.cholesky = torch.zeros(self.action_shape, self.action_shape)
 
     def forward(self, states):
@@ -34,14 +34,20 @@ class PolicyNetwork(nn.Module):
         x = F.relu(self.lin2(x))
         mean = self.action_range * torch.tanh(self.mean_layer(x))
         cholesky_vector = F.softplus(self.cholesky_layer(x))
-        #cholesky = torch.stack([i * torch.eye(self.action_shape) for i in cholesky_vector])
-        cholesky = []
+        # Make cholesky a diagonal matrix where the diagonal is cholesky_vector
+        # If a batch
+        if cholesky_vector.dim() == 1:
+            cholesky = torch.diag(cholesky_vector)
+        else:
+            cholesky = torch.diag_embed(cholesky_vector)
+        """cholesky = []
         if cholesky_vector.dim() == 1 and cholesky_vector.shape[0] > 1:
             cholesky.append(self.to_cholesky_matrix(cholesky_vector))
         else:
             for a in cholesky_vector:
                 cholesky.append(self.to_cholesky_matrix(a))
-        cholesky = torch.stack(cholesky)
+        cholesky = torch.stack(cholesky)"""
+        
         return mean, cholesky
 
     def action(self, state):
@@ -53,7 +59,7 @@ class PolicyNetwork(nn.Module):
         with torch.no_grad():
             mean, cholesky = self.forward(state)
             # Reshape cholesky to [12, 12]
-            cholesky = cholesky.view(12, 12)
+            # cholesky = cholesky.view(12, 12)
             action_distribution = MultivariateNormal(mean, scale_tril=cholesky)
             action = action_distribution.sample()
         
@@ -92,7 +98,7 @@ class QNetwork(nn.Module):
     :param layer1: (int) size of the first hidden layer (default = 200)
     :param layer2: (int) size of the first hidden layer (default = 200)
     """
-    def __init__(self, env, layer1=200, layer2=200):
+    def __init__(self, env, layer1=256, layer2=256):
         super(QNetwork, self).__init__()
         self.state_shape = env.observation_space.shape[0]
         self.action_shape = env.action_space.shape[0]

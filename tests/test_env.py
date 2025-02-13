@@ -13,6 +13,15 @@ def sinusoidal_action_pattern(step, frequency=0.1, amplitude=1.0, action_dim=6):
     """
     return amplitude * np.sin(frequency * step + np.linspace(0, np.pi, action_dim))
 
+def no_action_pattern(step, action_dim=6):
+    """
+    Generates a no action pattern.
+    :param step: Current time step.
+    :param action_dim: Number of actions (dimensionality of action space).
+    :return: Array of zeros.
+    """
+    return np.zeros(action_dim)
+
 def test_env():
     env = basic_env.BasicEnv(render_mode="human")
     obs, info = env.reset()
@@ -21,8 +30,10 @@ def test_env():
     print("Testing Basic Environment. Press Ctrl+C to stop.")
     try:
         for step in range(1000):  # Run for a fixed number of steps or until manually interrupted
-            action = sinusoidal_action_pattern(step, frequency=0.05, amplitude=0.5, action_dim=action_dim)
+            # action = sinusoidal_action_pattern(step, frequency=0.05, amplitude=0.5, action_dim=action_dim)
+            action = no_action_pattern(step, action_dim=action_dim)
             obs, reward, terminated, truncated, info = env.step(action)
+            print("Observation:", obs)
             env.render()
 
             # Debugging information

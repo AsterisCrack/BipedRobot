@@ -130,6 +130,7 @@ class MPO(object):
                     observation, info = self.env.reset()
                 else:
                     observation = new_observation
+        mean_reward = mean_reward / episode_length / episodes
         states = np.array(states)
         # states = torch.tensor(states)
         actions = np.array(actions)
@@ -345,12 +346,15 @@ class MPO(object):
                         self.policy_net_optimizer.step()
 
             self._update_param()
-
+            
+            mean_q_loss = mean_q_loss / self.rerun_mb
+            mean_lagrange = mean_lagrange / self.lagrange_it / self.rerun_mb
+            
             print(
                 "\n Episode:\t", episode,
-                "\n Mean reward:\t", mean_reward / episode_length / sample_episodes,
-                "\n Mean Q loss:\t", mean_q_loss / 50,
-                "\n Mean Lagrange:\t", mean_lagrange / 50,
+                "\n Mean reward:\t", mean_reward,
+                "\n Mean Q loss:\t", mean_q_loss,
+                "\n Mean Lagrange:\t", mean_lagrange,
                 "\n lagrange:\t", self.lagrange,
                 "\n lagrange_mean:\t", self.lagrange_mean,
                 "\n lagrange_covariance:\t", self.lagrange_covariance,
@@ -365,9 +369,8 @@ class MPO(object):
                 writer.add_scalar('target/mean_rew_10_ep', reward_target,
                                   episode + 1)
                 writer.add_scalar('data/mean_reward', mean_reward, episode + 1)
-                writer.add_scalar('data/mean_lagrangeloss', mean_lagrange
-                                  / self.lagrange_it/ self.rerun_mb/ number_mb, episode + 1)
-                writer.add_scalar('data/mean_qloss', mean_q_loss / self.rerun_mb / number_mb, episode + 1)
+                writer.add_scalar('data/mean_lagrangeloss', mean_lagrange / number_mb, episode + 1)
+                writer.add_scalar('data/mean_qloss', mean_q_loss / number_mb, episode + 1)
 
         # end training
         if log:

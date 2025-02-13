@@ -37,6 +37,9 @@ class BasicEnv(gym.Env):
         
         if self.render_mode == "human" or self.render_mode == "rgb_array":
             self._initialize_renderer()
+            
+        # Initialize variables for differentiation
+        self.prev_joint_pos = np.zeros(12)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -71,8 +74,41 @@ class BasicEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def _compute_reward(self):
-        # Example: Reward for moving forward
-        forward_reward = self.data.qvel[0]  # Velocity in X direction
+        """Observation: [ 8.88922950e-04  8.71229102e-04 -1.61353627e-03  9.99990106e-01
+        3.67753324e-03 -2.47385376e-03 -3.08103248e-04  1.07131324e-04
+        -5.55411307e-03  1.77131838e-03  2.08842405e-03  2.39029061e-03
+        -1.33043516e-03 -1.63827252e-04 -1.45398232e-03  1.44785584e-03
+        1.74693763e-03  2.38776486e-03 -5.59406681e-03  1.13315750e-02
+        -4.62242728e-03 -1.28024130e-03 -2.43785023e-03 -1.40542369e-02
+        -9.40201432e-02 -8.93840261e-05  1.18226651e-02  2.17969771e-02
+        5.71652614e-02  1.00348510e-01  5.91178350e-02  1.35074295e-02
+        1.43485302e-02  2.09552273e-02  9.93347075e-03  4.23588557e-03
+        -3.58647597e-03]"""
+        # Reward function consists of:
+        # velx + fixed reward for each step - (height-desired height)^2
+        # - (minimize control effort) - y^2 (deviation from y axis, keep straight)
+        velx = self.data.qvel[0]  # Velocity in X direction
+        height = np.square(self.data.qpos[2])  # Height of the robot, original height = 0
+        servo_diff = np.sum(np.square(self.data.qpos[7:]))  # Servo position difference
+        self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
+        axis_deviation = np.square(self.data.qpos[1])
+        
+        # Multipliers for each term
+        step_reward = 0.0625
+        vx_reward = 1
+        height_reward = -50
+        effort_reward = -0.02
+        axis_reward = -3
+        
+        # Compute reward
+        forward_reward = \
+            (velx * vx_reward) + \
+            step_reward + \
+            (height * height_reward) + \
+            (servo_diff * effort_reward) + \
+            (axis_deviation * axis_reward)
+        #forward_reward = velx + step_reward
+            
         return forward_reward
 
     def _is_terminated(self):
