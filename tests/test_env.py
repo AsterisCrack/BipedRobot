@@ -24,23 +24,24 @@ def no_action_pattern(step, action_dim=6):
 
 def test_env():
     env = basic_env.BasicEnv(render_mode="human")
-    obs, info = env.reset()
+    obs = env.reset()
     action_dim = env.action_space.shape[0]
 
     print("Testing Basic Environment. Press Ctrl+C to stop.")
     try:
         for step in range(1000):  # Run for a fixed number of steps or until manually interrupted
-            # action = sinusoidal_action_pattern(step, frequency=0.05, amplitude=0.5, action_dim=action_dim)
-            action = no_action_pattern(step, action_dim=action_dim)
-            obs, reward, terminated, truncated, info = env.step(action)
-            print("Observation:", obs)
+            action = sinusoidal_action_pattern(step, frequency=0.05, amplitude=0.5, action_dim=action_dim)
+            # action = no_action_pattern(step, action_dim=action_dim)
+            obs, reward, terminated, info = env.step(action)
+            print("Height:", obs[1])  # Print height of the robot
+            print()
             env.render()
 
             # Debugging information
             # print(f"Step: {step}, Action: {action}, Observation: {obs}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}")
 
-            if terminated or truncated:
-                obs, info = env.reset()
+            if terminated:
+                obs = env.reset()
                 
             time.sleep(1 / env.metadata["render_fps"])  # Add delay to match rendering FPS
     except KeyboardInterrupt:

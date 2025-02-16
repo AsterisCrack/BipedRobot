@@ -14,6 +14,8 @@ class BasicEnv(gym.Env):
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
         self.render_mode = render_mode
+        self.max_episode_steps = 1000000  # Large number of steps
+        self.name = "BasicEnv"
 
         # Observation space: Full state (joint positions and velocities)
         obs_dim = self.model.nq + self.model.nv  # Positions + velocities
@@ -40,7 +42,7 @@ class BasicEnv(gym.Env):
             
         # Initialize variables for differentiation
         self.prev_joint_pos = np.zeros(12)
-
+    
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
@@ -48,7 +50,7 @@ class BasicEnv(gym.Env):
         self.data.qvel[:] = 0  # Initialize velocities
         mujoco.mj_forward(self.model, self.data)
         obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
-        return obs, {}
+        return obs
 
     def step(self, action):
         """
@@ -68,10 +70,10 @@ class BasicEnv(gym.Env):
         obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
         reward = self._compute_reward()
         terminated = self._is_terminated()
-        truncated = False  # Update if you implement truncation logic
-        info = {}
-
-        return obs, reward, terminated, truncated, info
+        """if terminated:
+            reward = -100  # Penalize falling"""
+        
+        return obs, reward, terminated, {}
 
     def _compute_reward(self):
         """Observation: [ 8.88922950e-04  8.71229102e-04 -1.61353627e-03  9.99990106e-01
@@ -113,7 +115,7 @@ class BasicEnv(gym.Env):
 
     def _is_terminated(self):
         # Example: Terminate if the robot falls
-        return self.data.qpos[2] < -2  # Z position too low
+        return self.data.qpos[2] < 0.1 # Z position too low
     
     def _initialize_renderer(self):
         if not glfw.init():
