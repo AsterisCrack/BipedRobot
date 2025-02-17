@@ -30,10 +30,11 @@ def test_env():
     print("Testing Basic Environment. Press Ctrl+C to stop.")
     try:
         for step in range(1000):  # Run for a fixed number of steps or until manually interrupted
-            # action = sinusoidal_action_pattern(step, frequency=0.05, amplitude=0.5, action_dim=action_dim)
-            action = no_action_pattern(step, action_dim=action_dim)
+            action = sinusoidal_action_pattern(step, frequency=0.05, amplitude=0.5, action_dim=action_dim)
+            # action = no_action_pattern(step, action_dim=action_dim)
             obs, reward, terminated, truncated, info = env.step(action)
-            print("Observation:", obs)
+            #print("Observation:", obs)
+            print("Action:", action)
             env.render()
 
             # Debugging information

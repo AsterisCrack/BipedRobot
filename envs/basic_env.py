@@ -40,6 +40,8 @@ class BasicEnv(gym.Env):
             
         # Initialize variables for differentiation
         self.prev_joint_pos = np.zeros(12)
+        self.original_height = 0
+        self.reset()
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -48,6 +50,8 @@ class BasicEnv(gym.Env):
         self.data.qvel[:] = 0  # Initialize velocities
         mujoco.mj_forward(self.model, self.data)
         obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
+        self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
+        self.original_height = self.data.qpos[2]  # Store original height for reward computation
         return obs, {}
 
     def step(self, action):
@@ -88,8 +92,8 @@ class BasicEnv(gym.Env):
         # velx + fixed reward for each step - (height-desired height)^2
         # - (minimize control effort) - y^2 (deviation from y axis, keep straight)
         velx = self.data.qvel[0]  # Velocity in X direction
-        height = np.square(self.data.qpos[2])  # Height of the robot, original height = 0
-        servo_diff = np.sum(np.square(self.data.qpos[7:]))  # Servo position difference
+        height = np.square(self.original_height - self.data.qpos[2])  # Height difference of the robot
+        servo_diff = np.sum(np.square(self.data.qpos[7:] - self.prev_joint_pos))  # Control effort
         self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
         axis_deviation = np.square(self.data.qpos[1])
         
@@ -113,7 +117,7 @@ class BasicEnv(gym.Env):
 
     def _is_terminated(self):
         # Example: Terminate if the robot falls
-        return self.data.qpos[2] < -2  # Z position too low
+        return self.data.qpos[2] < 0.1  # Z position too low
     
     def _initialize_renderer(self):
         if not glfw.init():

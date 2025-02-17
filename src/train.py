@@ -32,7 +32,7 @@ def train():
         target_q_net=target_q_net,
         policy_net=policy_net,
         target_policy_net=target_policy_net,
-        policy_optimizer=Adam(policy_net.parameters(), lr=1e-4),
+        policy_optimizer=Adam(policy_net.parameters(), lr=1e-3),
         q_optimizer=Adam(q_net.parameters(), lr=1e-4),
         episodes=1000,
         episode_length=200,

@@ -384,7 +384,6 @@ class MPO(object):
         :param render: (bool) flag if to render while evaluating
         :return: (float) meaned reward achieved in the episodes
         """
-
         total_rewards = 0
         for episode in range(episodes):
             reward = 0

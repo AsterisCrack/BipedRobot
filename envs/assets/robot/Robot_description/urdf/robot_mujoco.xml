@@ -35,75 +35,83 @@
     </default>
 
     <worldbody>
-        <geom name="floor" size="0 0 .05" type="plane" material="grid" condim="3"/>
+        <geom name="floor" size="0 0 .05" type="plane" material="grid" condim="3" pos="0 0 0"/>
         <light name="spotlight" mode="targetbodycom" target="torso" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -6 4" cutoff="30"/>
         
-        <body name="torso" pos="0 0 0">
-            <light name="top" pos="0 0 2" mode="trackcom"/>
-            <camera name="back" pos="-3 0 1" xyaxes="0 -1 0 1 0 2" mode="trackcom"/>
-            <camera name="side" pos="0 -3 1" xyaxes="1 0 0 0 1 2" mode="trackcom"/>
-            <freejoint name="root"/>
-            <geom name="torso" type="mesh" mesh="base_link" class="visual"/>
-            <geom type="mesh" mesh="l_hip_motor" class="visual"/>
-            <geom type="mesh" mesh="r_hip_motor" class="visual"/>
-            <geom type="mesh" mesh="board_simplified_1" class="visual"/>
-            <body name="l_upper_hip" pos="-0.0005 0.037352 0.334234">
-                <inertial pos="-0.00694059 -9.1299e-08 -0.0485837" quat="0.70116 -0.0915155 -0.0915155 0.70116" mass="0.0295176" diaginertia="3.8e-05 2.80623e-05 1.19377e-05"/>
-                <joint name="r_hip_z" pos="0 0 0" axis="0 0 1" range="-1.5708 0.698132"/>
-                <geom pos="0.0005 -0.037352 -0.334234" quat="1 0 0 0" type="mesh" mesh="l_upper_hip" class="visual"/>
-                <body name="l_lower_hip" pos="0.0235 0 -0.083">
-                    <inertial pos="-0.0234498 0.0107536 -0.00459196" quat="0.771073 0.636747 0 0" mass="0.111904" diaginertia="3.7e-05 3.61926e-05 3.08074e-05"/>
-                    <joint name="r_hip_y" pos="0 0 0" axis="1 0 0" range="-1.5708 0.785398"/>
-                    <geom pos="-0.023 -0.037352 -0.251234" quat="1 0 0 0" type="mesh" mesh="l_lower_hip" class="visual"/>
-                    <body name="l_upper_leg" pos="-0.023477 -0.013383 -0.039959">
-                    <inertial pos="5.1192e-06 0.0236078 -0.0172742" mass="0.111651" diaginertia="6.2e-05 4.2e-05 2.7e-05"/>
-                    <joint name="r_hip_x" pos="0 0 0" axis="0 1 0" range="-2.00713 2.00713"/>
-                    <geom pos="0.000477 -0.023969 -0.211275" type="mesh" mesh="l_upper_leg" class="visual"/>
-                    <body name="l_lower_leg" pos="1.5e-05 0.000432 -0.063998">
-                        <inertial pos="3.84448e-06 0.0235546 -0.0371166" mass="0.192145" diaginertia="0.000184 0.000161 3.6e-05"/>
-                        <joint name="r_knee" pos="0 0 0" axis="0 1 0" range="-2.35619 2.35619"/>
-                        <geom pos="0.000462 -0.024401 -0.147277" type="mesh" mesh="l_lower_leg" class="visual"/>
-                        <body name="l_ankle" pos="0 -0.0015 -0.074233">
-                        <inertial pos="7.31829e-08 0.0200002 -0.0250003" quat="0.310076 0.635494 -0.635494 0.310076" mass="0.0316626" diaginertia="2.05616e-05 1.9e-05 1.64384e-05"/>
-                        <joint name="r_ankle_y" pos="0 0 0" axis="0 1 0" range="-1.91986 1.91986"/>
-                        <geom pos="0.000462 -0.022901 -0.073044" quat="1 0 0 0" type="mesh" mesh="l_ankle" class="visual"/>
-                        <body name="l_foot" pos="0.0235 0.015 -0.05">
-                            <inertial pos="-0.0213185 0.0101746 -0.00821998" quat="0 0.761637 0 0.648004" mass="0.157381" diaginertia="7.26491e-05 6e-05 4.73509e-05"/>
-                            <joint name="r_ankle_x" pos="0 0 0" axis="1 0 0" range="-1.5708 0.436332"/>
-                            <geom pos="-0.023038 -0.037901 -0.023044" quat="1 0 0 0" type="mesh" mesh="l_foot" class="visual"/>
+        <!-- The meshes are placed so that the robot is already built, but the origin is in the floor -->
+        <!-- we need to displace the free joint so that we get position measurments from the torso -->
+        <body name="base" pos="0 0 0.3">  <!-- Move the free joint higher -->
+            <joint armature="0" damping="0" limited="false" name="root" pos="0 0 0" stiffness="0" type="free"/> <!-- Free joint at the base body's origin -->
+            <body name="torso" pos="0 0 0"> <!-- Render the body at the correct position -->
+                <inertial pos="-0.0050405 0.0017075 0.3776479" mass="0.1994868" diaginertia="0.001079 0.000819 0.000384"/>
+                <light name="top" pos="0 0 2" mode="trackcom"/>
+                <camera name="back" pos="-3 0 1" xyaxes="0 -1 0 1 0 2" mode="trackcom"/>
+                <camera name="side" pos="0 -3 1" xyaxes="1 0 0 0 1 2" mode="trackcom"/>
+                <geom name="torso" type="mesh" mesh="base_link" class="visual"/>
+                <!--<inertial pos="-0.0044997 0.0243249 -0.0072309" mass="0.0850340" diaginertia="2.2e-05 1.3e-05 1.5e-05"/>-->
+                <geom type="mesh" mesh="l_hip_motor" class="visual"/>
+                <!-- <inertial pos="-0.0044999 -0.0243362 -0.0072041" mass="0.0851285" diaginertia="2.2e-05 1.3e-05 1.5e-05"/>-->
+                <geom type="mesh" mesh="r_hip_motor" class="visual"/>
+                <!--<inertial pos="0.0120505 -0.0278504 -0.0442437" mass="0.2413103" diaginertia="0.000219 0.000111 0.000142"/>-->
+                <geom type="mesh" mesh="board_simplified_1" class="visual"/>
+                <body name="l_upper_hip" pos="-0.0005 0.037352 0.334234">
+                    <inertial pos="-0.00694059 -9.1299e-08 -0.0485837" mass="0.0295176" diaginertia="3.8e-05 2.80623e-05 1.19377e-05"/>
+                    <joint name="r_hip_z" pos="0 0 0" axis="0 0 1" range="-1.5708 0.698132"/>
+                    <geom pos="0.0005 -0.037352 -0.334234" quat="1 0 0 0" type="mesh" mesh="l_upper_hip" class="visual"/>
+                    <body name="l_lower_hip" pos="0.0235 0 -0.083">
+                        <inertial pos="-0.0234498 0.0107536 -0.00459196" mass="0.111904" diaginertia="3.7e-05 3.61926e-05 3.08074e-05"/>
+                        <joint name="r_hip_y" pos="0 0 0" axis="1 0 0" range="-1.5708 0.785398"/>
+                        <geom pos="-0.023 -0.037352 -0.251234" quat="1 0 0 0" type="mesh" mesh="l_lower_hip" class="visual"/>
+                        <body name="l_upper_leg" pos="-0.023477 -0.013383 -0.039959">
+                        <inertial pos="5.1192e-06 0.0236078 -0.0172742" mass="0.111651" diaginertia="6.2e-05 4.2e-05 2.7e-05"/>
+                        <joint name="r_hip_x" pos="0 0 0" axis="0 1 0" range="-2.00713 2.00713"/>
+                        <geom pos="0.000477 -0.023969 -0.211275" type="mesh" mesh="l_upper_leg" class="visual"/>
+                        <body name="l_lower_leg" pos="1.5e-05 0.000432 -0.063998">
+                            <inertial pos="3.84448e-06 0.0235546 -0.0371166" mass="0.192145" diaginertia="0.000184 0.000161 3.6e-05"/>
+                            <joint name="r_knee" pos="0 0 0" axis="0 1 0" range="-2.35619 2.35619"/>
+                            <geom pos="0.000462 -0.024401 -0.147277" type="mesh" mesh="l_lower_leg" class="visual"/>
+                            <body name="l_ankle" pos="0 -0.0015 -0.074233">
+                            <inertial pos="7.31829e-08 0.0200002 -0.0250003" mass="0.0316626" diaginertia="2.05616e-05 1.9e-05 1.64384e-05"/>
+                            <joint name="r_ankle_y" pos="0 0 0" axis="0 1 0" range="-1.91986 1.91986"/>
+                            <geom pos="0.000462 -0.022901 -0.073044" quat="1 0 0 0" type="mesh" mesh="l_ankle" class="visual"/>
+                            <body name="l_foot" pos="0.0235 0.015 -0.05">
+                                <inertial pos="-0.0213185 0.0101746 -0.00821998" mass="0.157381" diaginertia="7.26491e-05 6e-05 4.73509e-05"/>
+                                <joint name="r_ankle_x" pos="0 0 0" axis="1 0 0" range="-1.5708 0.436332"/>
+                                <geom pos="-0.023038 -0.037901 -0.023044" quat="1 0 0 0" type="mesh" mesh="l_foot" class="visual"/>
+                            </body>
+                            </body>
                         </body>
                         </body>
-                    </body>
                     </body>
                 </body>
-            </body>
-            <body name="r_upper_hip" pos="-0.0006 -0.037165 0.335135">
-                <inertial pos="-0.00694083 3.3037e-07 -0.0485836" quat="0.70116 -0.0915155 -0.0915155 0.70116" mass="0.0295176" diaginertia="3.8e-05 2.80623e-05 1.19377e-05"/>
-                <joint name="l_hip_z" pos="0 0 0" axis="0 0 1" range="-0.698132 1.5708"/>
-                <geom pos="0.0006 0.037165 -0.335135" quat="1 0 0 0" type="mesh" mesh="r_upper_hip" class="visual"/>
-                <body name="r_hip" pos="0.0235 0 -0.083">
-                    <inertial pos="-0.0234501 -0.0107534 -0.00459179" quat="0.636747 0.771073 0 0" mass="0.111904" diaginertia="3.7e-05 3.61926e-05 3.08074e-05"/>
-                    <joint name="l_hip_y" pos="0 0 0" axis="1 0 0" range="-0.785398 1.5708"/>
-                    <geom pos="-0.0229 0.037165 -0.252135" quat="1 0 0 0" type="mesh" mesh="r_hip" class="visual"/>
-                    <body name="r_upper_leg" pos="-0.023477 0.013384 -0.039959">
-                    <inertial pos="4.88398e-06 -0.0236086 -0.017274" mass="0.111651" diaginertia="6.2e-05 4.2e-05 2.7e-05"/>
-                    <joint name="l_hip_x" pos="0 0 0" axis="0 1 0" range="-2.00713 2.00713"/>
-                    <geom pos="0.000577 0.023781 -0.212176" type="mesh" mesh="r_upper_leg" class="visual"/>
-                    <body name="r_lower_leg" pos="1.5e-05 -0.000433 -0.063998">
-                        <inertial pos="3.60925e-06 -0.0235544 -0.0371164" mass="0.192145" diaginertia="0.000184 0.000161 3.6e-05"/>
-                        <joint name="l_knee" pos="0 0 0" axis="0 1 0" range="-2.26893 2.35619"/>
-                        <geom pos="0.000562 0.024214 -0.148178" type="mesh" mesh="r_lower_leg" class="visual"/>
-                        <body name="r_ankle" pos="0 0.0015 -0.074233">
-                        <inertial pos="-1.6372e-07 -0.0199999 -0.0250001" quat="0.635494 0.310076 -0.310076 0.635494" mass="0.0316626" diaginertia="2.05616e-05 1.9e-05 1.64384e-05"/>
-                        <joint name="l_ankle_y" pos="0 0 0" axis="0 1 0" range="-1.91986 1.91986"/>
-                        <geom pos="0.000562 0.022714 -0.073945" quat="1 0 0 0" type="mesh" mesh="r_ankle" class="visual"/>
-                        <body name="r_foot" pos="0.0235 -0.015 -0.05">
-                            <inertial pos="-0.0213188 -0.0100895 -0.00821981" quat="0.0202379 0.761052 0.0335931 0.647504" mass="0.157381" diaginertia="7.27257e-05 5.99255e-05 4.73489e-05"/>
-                            <joint name="l_ankle_x" pos="0 0 0" axis="1 0 0" range="-0.436332 1.5708"/>
-                            <geom pos="-0.022938 0.037714 -0.023945" quat="1 0 0 0" type="mesh" mesh="r_foot" class="visual"/>
+                <body name="r_upper_hip" pos="-0.0006 -0.037165 0.335135">
+                    <inertial pos="-0.00694083 3.3037e-07 -0.0485836" mass="0.0295176" diaginertia="3.8e-05 2.80623e-05 1.19377e-05"/>
+                    <joint name="l_hip_z" pos="0 0 0" axis="0 0 1" range="-0.698132 1.5708"/>
+                    <geom pos="0.0006 0.037165 -0.335135" quat="1 0 0 0" type="mesh" mesh="r_upper_hip" class="visual"/>
+                    <body name="r_hip" pos="0.0235 0 -0.083">
+                        <inertial pos="-0.0234501 -0.0107534 -0.00459179" mass="0.111904" diaginertia="3.7e-05 3.61926e-05 3.08074e-05"/>
+                        <joint name="l_hip_y" pos="0 0 0" axis="1 0 0" range="-0.785398 1.5708"/>
+                        <geom pos="-0.0229 0.037165 -0.252135" quat="1 0 0 0" type="mesh" mesh="r_hip" class="visual"/>
+                        <body name="r_upper_leg" pos="-0.023477 0.013384 -0.039959">
+                        <inertial pos="4.88398e-06 -0.0236086 -0.017274" mass="0.111651" diaginertia="6.2e-05 4.2e-05 2.7e-05"/>
+                        <joint name="l_hip_x" pos="0 0 0" axis="0 1 0" range="-2.00713 2.00713"/>
+                        <geom pos="0.000577 0.023781 -0.212176" type="mesh" mesh="r_upper_leg" class="visual"/>
+                        <body name="r_lower_leg" pos="1.5e-05 -0.000433 -0.063998">
+                            <inertial pos="3.60925e-06 -0.0235544 -0.0371164" mass="0.192145" diaginertia="0.000184 0.000161 3.6e-05"/>
+                            <joint name="l_knee" pos="0 0 0" axis="0 1 0" range="-2.26893 2.35619"/>
+                            <geom pos="0.000562 0.024214 -0.148178" type="mesh" mesh="r_lower_leg" class="visual"/>
+                            <body name="r_ankle" pos="0 0.0015 -0.074233">
+                            <inertial pos="-1.6372e-07 -0.0199999 -0.0250001" mass="0.0316626" diaginertia="2.05616e-05 1.9e-05 1.64384e-05"/>
+                            <joint name="l_ankle_y" pos="0 0 0" axis="0 1 0" range="-1.91986 1.91986"/>
+                            <geom pos="0.000562 0.022714 -0.073945" quat="1 0 0 0" type="mesh" mesh="r_ankle" class="visual"/>
+                            <body name="r_foot" pos="0.0235 -0.015 -0.05">
+                                <inertial pos="-0.0213188 -0.0100895 -0.00821981" mass="0.157381" diaginertia="7.27257e-05 5.99255e-05 4.73489e-05"/>
+                                <joint name="l_ankle_x" pos="0 0 0" axis="1 0 0" range="-0.436332 1.5708"/>
+                                <geom pos="-0.022938 0.037714 -0.023945" quat="1 0 0 0" type="mesh" mesh="r_foot" class="visual"/>
+                            </body>
+                            </body>
                         </body>
                         </body>
-                    </body>
                     </body>
                 </body>
             </body>
