@@ -34,7 +34,6 @@ def test_env():
             # action = no_action_pattern(step, action_dim=action_dim)
             obs, reward, terminated, truncated, info = env.step(action)
             #print("Observation:", obs)
-            print("Action:", action)
             env.render()
 
             # Debugging information
