@@ -4,20 +4,14 @@ import numpy as np
 import mujoco
 from mujoco.glfw import glfw
 from utils import free_camera_movement
-from scipy.spatial.transform import Rotation as R
+import scipy.spatial.transform
 
-class Data:
-    def __init__(self, env, qpos=None, qvel=None):
-        self.qpos = qpos if qpos is not None else np.zeros(env.model.nq)
-        self.qvel = qvel if qvel is not None else np.zeros(env.model.nv)
-        
 class BasicEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
     def __init__(self, render_mode=None):
         # Path to robot XML
         xml_path = "envs/assets/robot/Robot_description/urdf/robot_mujoco.xml"
-        self.free_joint_displacement = 0.3  # Displacement of the free joint in the torso
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
         self.render_mode = render_mode
@@ -50,46 +44,18 @@ class BasicEnv(gym.Env):
         # Initialize variables for differentiation
         self.prev_joint_pos = np.zeros(12)
         self.original_height = 0
-        self.corrected_data = Data(self)
         self.reset()
-    
-    def _correct_free_joint(self, data_original):
-        
-        data = Data(self, self.data.qpos.copy(), self.data.qvel.copy())
-        # Extract position and quaternion of the torso
-        qpos = data.qpos  # Full state
-        torso_pos = qpos[:3]  # Current free joint position
-        torso_quat = qpos[3:7]  # Rotation quaternion
-        # Define the displacement vector in local coordinates
-        local_offset = np.array([0, 0, -self.free_joint_displacement])  # Move up by d in torso's local +Z axis
-        # Ensure the quaternion is valid (normalize if necessary)
-        norm = np.linalg.norm(torso_quat)
-        if norm == 0:
-            return
-        torso_quat /= norm  # Normalize the quaternion
-        # Convert local offset to global coordinates using the quaternion rotation
-        global_offset = R.from_quat(torso_quat).apply(local_offset)
-
-        # Apply the correction
-        corrected_pos = torso_pos + global_offset
-
-        # Update qpos
-        data.qpos[:3] = corrected_pos  # Move the free joint up
-        self.corrected_data = data  # Store corrected data
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
-        self.data.qpos[:] = 0  # Initialize positions
-        self.data.qvel[:] = 0  # Initialize velocities
         mujoco.mj_forward(self.model, self.data)
-        self._correct_free_joint(self.data)  # Move the free joint up
-        obs = np.concatenate([self.corrected_data.qpos, self.corrected_data.qvel]).astype(np.float32)  # Convert to float32
-        self.prev_joint_pos = self.corrected_data.qpos[7:].copy()  # Store previous joint positions for next step
-        self.original_height = self.corrected_data.qpos[2]  # Store original height for reward computation
-        return obs, {}
+        obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
+        self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
+        self.original_height = self.data.qpos[2]  # Store original height for reward computation
+        return obs
 
-    def step(self, action):
+    def step(self, action, render_ref_point=False):
         """
         Apply action and step the simulation.
         returns observation, reward, done, truncated, and info.
@@ -103,9 +69,8 @@ class BasicEnv(gym.Env):
         action = np.clip(action, self.action_space.low, self.action_space.high)
         self.data.ctrl[:] = action
         mujoco.mj_step(self.model, self.data)
-        self._correct_free_joint(self.data)  # Move the free joint up
-        
-        obs = np.concatenate([self.corrected_data.qpos, self.corrected_data.qvel]).astype(np.float32)  # Convert to float32
+            
+        obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
         reward = self._compute_reward()
         terminated = self._is_terminated()
         """if terminated:
@@ -127,11 +92,11 @@ class BasicEnv(gym.Env):
         # Reward function consists of:
         # velx + fixed reward for each step - (height-desired height)^2
         # - (minimize control effort) - y^2 (deviation from y axis, keep straight)
-        velx = self.corrected_data.qvel[0]  # Velocity in X direction
-        height = np.square(self.original_height - self.corrected_data.qpos[2])  # Height difference of the robot
-        servo_diff = np.sum(np.square(self.corrected_data.qpos[7:] - self.prev_joint_pos))  # Control effort
-        self.prev_joint_pos = self.corrected_data.qpos[7:].copy()  # Store previous joint positions for next step
-        axis_deviation = np.square(self.corrected_data.qpos[1])
+        velx = self.data.qvel[0]  # Velocity in X direction
+        height = np.square(self.original_height - self.data.qpos[2])  # Height difference of the robot
+        servo_diff = np.sum(np.square(self.data.qpos[7:] - self.prev_joint_pos))  # Control effort
+        self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
+        axis_deviation = np.square(self.data.qpos[1])
         
         # Multipliers for each term
         step_reward = 0.0625
@@ -153,7 +118,7 @@ class BasicEnv(gym.Env):
 
     def _is_terminated(self):
         # Example: Terminate if the robot falls
-        return self.corrected_data.qpos[2] < 0.15  # Z position too low
+        return self.data.qpos[2] < 0.2  # Z position too low
     
     def _initialize_renderer(self):
         if not glfw.init():

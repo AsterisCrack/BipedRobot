@@ -79,7 +79,7 @@ class Trainer:
     '''Trainer used to train and evaluate an agent on an environment.'''
 
     def __init__(
-        self, agent, environment, test_environment=None, steps=int(1e7), epoch_steps=int(2e4), save_steps=int(5e5),
+        self, agent, environment, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3),
         test_episodes=5, show_progress=True, replace_checkpoint=False,
     ):
         self.max_steps = steps
@@ -103,6 +103,7 @@ class Trainer:
 
         num_workers = len(observations)
         scores = np.zeros(num_workers)
+        total_scores = np.zeros(num_workers)
         lengths = np.zeros(num_workers, int)
         self.steps, epoch_steps, epochs, episodes = 0, 0, 0, 0
         steps_since_save = 0
@@ -133,7 +134,8 @@ class Trainer:
                 if infos['resets'][i]:
                     # logger.store('train/episode_score', scores[i], stats=True)
                     # logger.store('train/episode_length', lengths[i], stats=True)
-                    print(f"Episode {episodes} finished with score {scores[i]} and length {lengths[i]}")
+                    # print(f"Episode {episodes} finished with score {scores[i]} and length {lengths[i]}")
+                    total_scores[i] += scores[i]
                     scores[i] = 0
                     lengths[i] = 0
                     episodes += 1
@@ -158,7 +160,7 @@ class Trainer:
                 # logger.store('train/worker_steps', self.steps // num_workers)
                 # logger.store('train/steps_per_second', sps)
                 # logger.dump()
-                print(f"Epoch time: {epoch_time}, Steps per second: {sps}")
+                print(f"Epoch time: {epoch_time}, Steps per second: {sps}, Mean score: {total_scores / episodes}")
                 last_epoch_time = time.time()
                 epoch_steps = 0
 

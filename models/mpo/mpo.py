@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.distributions import MultivariateNormal
@@ -359,6 +360,15 @@ class MPO():
         self.critic_updater = ExpectedSARSA(self.model) \
             if critic_updater is None else critic_updater
 
+    def save(self, path):
+        path = path + '.pt'
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(self.model.state_dict(), path)
+
+    def load(self, path):
+        path = path + '.pt'
+        self.model.load_state_dict(torch.load(path))
+        
     def step(self, observations, steps):
         actions = self._step(observations)
         actions = actions.numpy()

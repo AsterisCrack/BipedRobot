@@ -1,48 +1,35 @@
-import torch
-from models.mpo import MPO
-from models.networks import PolicyNetwork, QNetwork
+from models.mpo.networks import ActorCriticWithTargets
 from envs.basic_env import BasicEnv
+from models.mpo.mpo import MPO
+import torch
 
-def test_model(model_path, episodes=10, episode_length=200):
+def test_model(model_path, episodes=10, episode_length=int(2e4)):
     # Initialize environment with rendering
     env = BasicEnv(render_mode="human")
     
     # Initialize networks
-    policy_net = PolicyNetwork(env)
-    target_policy_net = PolicyNetwork(env)
-    q_net = QNetwork(env)
-    target_q_net = QNetwork(env)
-
-    # Initialize MPO algorithm
-    mpo = MPO(
-        env=env,
-        dual_constraint=0.1,
-        mean_constraint=0.1,
-        var_constraint=0.1,
-        learning_rate=1e-4,
-        alpha=0.1,
-        q_net=q_net,
-        target_q_net=target_q_net,
-        policy_net=policy_net,
-        target_policy_net=target_policy_net,
-        episodes=1000,
-        episode_length=200,
-        lagrange_it=10,
-        mb_size=64,
-        rerun_mb=10,
-        add_act=10
-    )
+    model = ActorCriticWithTargets(env.observation_space, env.action_space, [256, 256], [256, 256])
 
     # Load the saved model
-    mpo.load_model(model_path)
+    model.load_state_dict(torch.load(model_path))
 
     # Evaluate the model
-    mean_reward = mpo.eval(episodes, episode_length, render=True)
-    print(f"Mean reward over {episodes} episodes: {mean_reward}")
+    mean_reward = 0
+    for episode in range(episodes):
+        obs = env.reset()
+        for step in range(episode_length):
+            action = model.actor.forward(torch.tensor(obs).float()).sample().numpy()
+            obs, reward, done, _ = env.step(action)
+            print("Height: ", obs[2])
+            env.render()
+            mean_reward += reward
+            if done:
+                break
+    print(f"Mean reward over {episodes} episodes: {mean_reward / episodes}")
 
     # Close environment
     env.close()
 
 if __name__ == "__main__":
-    model_path = "mpo_model.pt"
+    model_path = "models\mpo\checkpoints\step_3665000.pt"
     test_model(model_path)
