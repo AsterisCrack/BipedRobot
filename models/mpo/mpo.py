@@ -287,6 +287,8 @@ class MaximumAPosterioriPolicyOptimization:
                 penalty_temperature.detach()
 
         return dict(
+            dual_loss=dual_loss.detach(),
+            total_loss=loss.detach(),
             policy_mean_loss=policy_mean_loss.detach(),
             policy_std_loss=policy_std_loss.detach(),
             kl_mean_loss=kl_mean_loss.detach(),
@@ -397,8 +399,11 @@ class MPO():
             self.model.return_normalizer.record(rewards)
 
         # Update the model if the replay is ready.
+        infos = dict()
         if self.replay.ready(steps):
-            self._update(steps)
+            infos = self._update(steps)
+            
+        return infos
 
     def _step(self, observations):
         observations = torch.as_tensor(observations, dtype=torch.float32)
@@ -414,21 +419,30 @@ class MPO():
         keys = ('observations', 'actions', 'next_observations', 'rewards',
                 'discounts')
 
+        actor_dual_loss = 0
+        actor_loss = 0
+        critic_loss = 0
         # Update both the actor and the critic multiple times.
         for batch in self.replay.get(*keys, steps=steps):
             batch = {k: torch.as_tensor(v) for k, v in batch.items()}
             infos = self._update_actor_critic(**batch)
 
-            for key in infos:
-                for k, v in infos[key].items():
-                    #print(key + '/' + k, v.numpy())
-                    pass
+            actor_dual_loss += infos['actor']['dual_loss']
+            actor_loss += infos['actor']['total_loss']
+            critic_loss += infos['critic']['loss']
+        actor_dual_loss /= self.replay.batch_iterations
+        actor_loss /= self.replay.batch_iterations
+        critic_loss /= self.replay.batch_iterations
 
         # Update the normalizers.
         if self.model.observation_normalizer:
             self.model.observation_normalizer.update()
         if self.model.return_normalizer:
             self.model.return_normalizer.update()
+        
+        return dict(
+            actor_dual_loss=actor_dual_loss.detach(),
+            actor_loss=actor_loss.detach(), critic_loss=critic_loss.detach())
 
     def _update_actor_critic(
         self, observations, actions, next_observations, rewards, discounts

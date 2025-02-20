@@ -2,6 +2,8 @@ import numpy as np
 import torch
 import os
 import time
+from tensorboardX import SummaryWriter
+from tqdm import tqdm
 
 class MeanStd(torch.nn.Module):
     def __init__(self, mean=0, std=1, clip=None, shape=None):
@@ -80,7 +82,8 @@ class Trainer:
 
     def __init__(
         self, agent, environment, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3),
-        test_episodes=5, show_progress=True, replace_checkpoint=False,
+        test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None,
+        chekpoint_path=None
     ):
         self.max_steps = steps
         self.epoch_steps = epoch_steps
@@ -88,99 +91,129 @@ class Trainer:
         self.test_episodes = test_episodes
         self.show_progress = show_progress
         self.replace_checkpoint = replace_checkpoint
-
+        # Log the training data to tensorboard.
+        self.log = log
+        log_dir = log_dir if log_dir is not None else "runs"
+        # Logname is dd/MM/YYYY HH:MM:SS if not provided
+        self.log_name = log_name if log_name is not None else str(time.strftime("%d-%m-%Y %H:%M:%S")).replace(" ", "_").replace(":", "-")
+        self.log_dir = os.path.join(log_dir, self.log_name)
+        
         self.agent = agent
         self.environment = environment
         self.test_environment = test_environment
+        self.checkpoint_path = chekpoint_path if chekpoint_path is not None else f"models/mpo/checkpoints/{time.strftime('%d-%m-%Y_%H:%M:%S')}".replace(" ", "_").replace(":", "-")
+        if not os.path.exists(self.checkpoint_path):
+            os.makedirs(self.checkpoint_path)
 
+    def _save_checkpoint(self, name):
+        '''Saves a checkpoint of the agent.'''
+        path = self.checkpoint_path
+        if os.path.isdir(path) and self.replace_checkpoint:
+            for file in os.listdir(path):
+                # If name is the same as the checkpoint name, delete it
+                if file.startswith(name):
+                    os.remove(os.path.join(path, file))
+        save_path = os.path.join(path, name)
+        self.agent.save(save_path)
+        
     def run(self):
         '''Runs the main training loop.'''
 
-        start_time = last_epoch_time = time.time()
+        print(f"Training started at {time.strftime('%d-%m-%Y %H:%M:%S')}")
 
         # Start the environments.
         observations = self.environment.start()
 
         num_workers = len(observations)
         scores = np.zeros(num_workers)
-        total_scores = np.zeros(num_workers)
+        total_reward = np.zeros(num_workers)
         lengths = np.zeros(num_workers, int)
         self.steps, epoch_steps, epochs, episodes = 0, 0, 0, 0
         steps_since_save = 0
+        last_epoch_time = time.time()
+        
+        if self.log:
+            writer = SummaryWriter(self.log_dir)
+        progress_bar = tqdm(total=self.max_steps, desc="Training", unit="step")
+        
+        try:
+            while True:
+                # Select actions.
+                actions = self.agent.step(observations, self.steps)
+                assert not np.isnan(actions.sum())
 
-        while True:
-            # Select actions.
-            actions = self.agent.step(observations, self.steps)
-            assert not np.isnan(actions.sum())
-            # logger.store('train/action', actions, stats=True)
+                # Take a step in the environments.
+                observations, infos = self.environment.step(actions)
+                agent_infos = self.agent.update(**infos, steps=self.steps)
+                if self.log:
+                    for key, value in agent_infos.items():
+                        if isinstance(value, np.ndarray):
+                            value = value.mean()
+                        writer.add_scalar(f'train/{key}', value, self.steps)
 
-            # Take a step in the environments.
-            observations, infos = self.environment.step(actions)
-            self.agent.update(**infos, steps=self.steps)
+                scores += infos['rewards']
+                lengths += 1
+                self.steps += num_workers
+                epoch_steps += num_workers
+                steps_since_save += num_workers
+                
+                # Update the progress bar
+                progress_bar.update(num_workers)
 
-            scores += infos['rewards']
-            lengths += 1
-            self.steps += num_workers
-            epoch_steps += num_workers
-            steps_since_save += num_workers
+                # Check the finished episodes.
+                for i in range(num_workers):
+                    if infos['resets'][i]:
+                        if self.log:
+                            writer.add_scalar('train/episode_score', scores[i], self.steps)
+                            writer.add_scalar('train/episode_length', lengths[i], self.steps)
+                        total_reward[i] += scores[i]
+                        scores[i] = 0
+                        lengths[i] = 0
+                        episodes += 1
 
-            # Show the progress bar.
-            if self.show_progress:
-                # logger.show_progress(self.steps, self.epoch_steps, self.max_steps)
-                #print(f"Step: {self.steps}/{self.max_steps}, Epoch step: {epoch_steps}/{self.epoch_steps}, Epoch: {epochs}, Episode: {episodes}")
-                pass
-            # Check the finished episodes.
-            for i in range(num_workers):
-                if infos['resets'][i]:
-                    # logger.store('train/episode_score', scores[i], stats=True)
-                    # logger.store('train/episode_length', lengths[i], stats=True)
-                    # print(f"Episode {episodes} finished with score {scores[i]} and length {lengths[i]}")
-                    total_scores[i] += scores[i]
-                    scores[i] = 0
-                    lengths[i] = 0
-                    episodes += 1
+                # End of the epoch.
+                if epoch_steps >= self.epoch_steps:
+                    # Evaluate the agent on the test environment.
+                    if self.test_environment:
+                        self._test()
 
-            # End of the epoch.
-            if epoch_steps >= self.epoch_steps:
-                # Evaluate the agent on the test environment.
-                if self.test_environment:
-                    self._test()
+                    # Log the data.
+                    epochs += 1
+                    current_time = time.time()
+                    epoch_time = current_time - last_epoch_time
+                    sps = epoch_steps / epoch_time
 
-                # Log the data.
-                epochs += 1
-                current_time = time.time()
-                epoch_time = current_time - last_epoch_time
-                sps = epoch_steps / epoch_time
-                # logger.store('train/episodes', episodes)
-                # logger.store('train/epochs', epochs)
-                # logger.store('train/seconds', current_time - start_time)
-                # logger.store('train/epoch_seconds', epoch_time)
-                # logger.store('train/epoch_steps', epoch_steps)
-                # logger.store('train/steps', self.steps)
-                # logger.store('train/worker_steps', self.steps // num_workers)
-                # logger.store('train/steps_per_second', sps)
-                # logger.dump()
-                print(f"Epoch time: {epoch_time}, Steps per second: {sps}, Mean score: {total_scores / episodes}")
-                last_epoch_time = time.time()
-                epoch_steps = 0
+                    if self.log:
+                        writer.add_scalar('train/epoch_time', epoch_time, self.steps)
+                        writer.add_scalar('train/steps_per_second', sps, self.steps)
+                        writer.add_scalar('train/epoch_mean_reward', np.mean(total_reward / episodes), self.steps)
+                    
+                    last_epoch_time = time.time()
+                    epoch_steps = 0
 
-            # End of training.
-            stop_training = self.steps >= self.max_steps
+                # End of training.
+                stop_training = self.steps >= self.max_steps
 
-            # Save a checkpoint.
-            if stop_training or steps_since_save >= self.save_steps:
-                path = "models/mpo/checkpoints"
-                if os.path.isdir(path) and self.replace_checkpoint:
-                    for file in os.listdir(path):
-                        if file.startswith('step_'):
-                            os.remove(os.path.join(path, file))
-                checkpoint_name = f'step_{self.steps}'
-                save_path = os.path.join(path, checkpoint_name)
-                self.agent.save(save_path)
-                steps_since_save = self.steps % self.save_steps
+                # Save a checkpoint.
+                if stop_training or steps_since_save >= self.save_steps:
+                    name = f'step_{self.steps}'
+                    self._save_checkpoint(name)
+                    steps_since_save = self.steps % self.save_steps
 
-            if stop_training:
-                break
+                if stop_training:
+                    # end training
+                    if self.log:
+                        writer.close()
+                    break
+                
+        except KeyboardInterrupt:
+            print("\nTraining interrupted by user.")
+            # Save the model
+            name = f'step_{self.steps}_interrupted'
+            self._save_checkpoint(name)
+            
+            if self.log:
+                writer.close()
 
     def _test(self):
         '''Tests the agent on the test environment.'''
