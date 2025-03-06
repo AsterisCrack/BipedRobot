@@ -32,5 +32,5 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
 
 if __name__ == "__main__":
     #model_path = "models/mpo/checkpoints/Working/step_3665000.pt"
-    model_path = "models/mpo/checkpoints/04-03-2025_00-09-16/step_1535000.pt"
+    model_path = "models/mpo/checkpoints/final_model_2/step_7540000.pt"
     test_model(model_path)

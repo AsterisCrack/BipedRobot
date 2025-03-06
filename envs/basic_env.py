@@ -348,7 +348,7 @@ class BasicEnv(gym.Env):
         if self.data.qpos[2] < 0.2:
             terminated = 1
             
-        # Multipliers for each term
+        """# Multipliers for each term
         step_reward = 0.1
         vx_reward = 2
         height_reward = 0
@@ -371,6 +371,27 @@ class BasicEnv(gym.Env):
             (pitch_roll_orient * pitch_roll_reward) + \
             (base_accel * acceleration_reward) + \
             (feet_yaw_orient * feet_yaw_orient_reward) + \
+            (terminated * terminated_reward)"""
+            
+        # Multipliers for each term
+        step_reward = 0.1
+        vx_reward = 2
+        height_reward = 0
+        effort_reward = 0
+        axis_reward = -3
+        yaw_reward = -0.05
+        pitch_roll_reward = -0.05
+        terminated_reward = 0
+        
+        # Compute reward
+        forward_reward = \
+            (velx * vx_reward) + \
+            step_reward + \
+            (height * height_reward) + \
+            (servo_diff * effort_reward) + \
+            (axis_deviation * axis_reward) + \
+            (yaw_orient * yaw_reward) + \
+            (pitch_roll_orient * pitch_roll_reward) + \
             (terminated * terminated_reward)
         #forward_reward = velx + step_reward
             
