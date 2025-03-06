@@ -1,4 +1,4 @@
-from models.mpo.networks import ActorCriticWithTargets
+from models.networks import ActorCriticWithTargets
 from envs.basic_env import BasicEnv
 from models.mpo.mpo import MPO
 import torch
@@ -19,8 +19,8 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
         obs = env.reset()
         for step in range(episode_length):
             action = model.actor.forward(torch.tensor(obs).float()).sample().numpy()
+            # action = model.actor.get_action(torch.from_numpy(obs).float())
             obs, reward, done, _ = env.step(action)
-            print("Height: ", obs[2])
             env.render()
             mean_reward += reward
             if done:
@@ -31,5 +31,6 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     env.close()
 
 if __name__ == "__main__":
-    model_path = "models\mpo\checkpoints\step_3665000.pt"
+    #model_path = "models/mpo/checkpoints/Working/step_3665000.pt"
+    model_path = "models/mpo/checkpoints/04-03-2025_00-09-16/step_1535000.pt"
     test_model(model_path)

@@ -54,6 +54,13 @@ class MeanStd(torch.nn.Module):
         new_mean_sq = self.new_sum_sq / self.new_count
         w_old = self.count / new_count
         w_new = self.new_count / new_count
+        
+        # If we have a sequential model new_mean and new_std will have size obs_shape * seq_length
+        # We need to reshape them to obs_shape (seq_lenght, obs_shape) and then take the mean over the seq_length dimension
+        if new_mean.shape != self.mean.shape:
+            new_mean = new_mean.reshape(-1, self.mean.shape[0]).mean(axis=0)
+            new_mean_sq = new_mean_sq.reshape(-1, self.mean.shape[0]).mean(axis=0)
+        
         self.mean = w_old * self.mean + w_new * new_mean
         self.mean_sq = w_old * self.mean_sq + w_new * new_mean_sq
         self.std = self._compute_std(self.mean, self.mean_sq)
@@ -115,6 +122,20 @@ class Trainer:
                     os.remove(os.path.join(path, file))
         save_path = os.path.join(path, name)
         self.agent.save(save_path)
+    
+    def save_trainer_state(self):
+        '''Saves the state of the trainer.'''
+        path = self.checkpoint_path + "/trainer_state/"
+        print(f"Saving trainer state to {path}...")
+        os.makedirs(path, exist_ok=True)
+        self.agent.save_train_state(path)
+        
+    def load_trainer_state(self, path):
+        '''Loads the state of the trainer.'''
+        assert os.path.exists(path), f"Path {path} does not exist."
+        
+        self.agent.load_train_state(path)
+        
         
     def run(self):
         '''Runs the main training loop.'''
@@ -163,6 +184,8 @@ class Trainer:
                 # Check the finished episodes.
                 for i in range(num_workers):
                     if infos['resets'][i]:
+                        # Reset the observations for the worker.
+                        self.agent.reset_observations(i)
                         if self.log:
                             writer.add_scalar('train/episode_score', scores[i], self.steps)
                             writer.add_scalar('train/episode_length', lengths[i], self.steps)
@@ -208,12 +231,10 @@ class Trainer:
                 
         except KeyboardInterrupt:
             print("\nTraining interrupted by user.")
-            # Save the model
-            name = f'step_{self.steps}_interrupted'
-            self._save_checkpoint(name)
-            
-            if self.log:
-                writer.close()
+            print(f"Saving checkpoint at step {self.steps}...")
+            # Save the trainer state
+            self.save_trainer_state()
+            print(f"Checkpoint saved at {self.checkpoint_path}")
 
     def _test(self):
         '''Tests the agent on the test environment.'''

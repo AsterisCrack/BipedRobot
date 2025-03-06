@@ -1,13 +1,6 @@
 import os
 import torch
-import torch.nn as nn
-from torch.distributions import MultivariateNormal
-from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 import numpy as np
-from scipy.optimize import minimize
-
-from models.mpo.networks import ActorCriticWithTargets
-from tensorboardX import SummaryWriter
 
 FLOAT_EPSILON = 1e-8
 
@@ -17,7 +10,7 @@ class Buffer:
 
     def __init__(
         self, size=int(1e6), return_steps=1, batch_iterations=50,
-        batch_size=100, discount_factor=0.99, steps_before_batches=int(1e4),
+        batch_size=1024, discount_factor=0.99, steps_before_batches=int(1e4),
         steps_between_batches=50, seed=None
     ):
         self.full_max_size = size
@@ -55,7 +48,6 @@ class Buffer:
         # Store the new values.
         for key, val in kwargs.items():
             self.buffers[key][self.index] = val
-
         # Accumulate values for n-step returns.
         if self.return_steps > 1:
             self.accumulate_n_steps(kwargs)
@@ -68,12 +60,11 @@ class Buffer:
         next_observations = kwargs['next_observations']
         discounts = kwargs['discounts']
         masks = np.ones(self.num_workers, np.float32)
-
         for i in range(min(self.size, self.return_steps - 1)):
             index = (self.index - i - 1) % self.max_size
             masks *= (1 - self.buffers['resets'][index])
             new_rewards = (self.buffers['rewards'][index] +
-                           self.buffers['discounts'][index] * rewards)
+                        self.buffers['discounts'][index] * rewards)
             self.buffers['rewards'][index] = (
                 (1 - masks) * self.buffers['rewards'][index] +
                 masks * new_rewards)
@@ -97,15 +88,32 @@ class Buffer:
             yield {k: self.buffers[k][rows, columns] for k in keys}
 
         self.last_steps = steps
+    
+    def save(self, path):
+        path = path + '.pt'
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(self.buffers, path)
+        
+    def load(self, path):
+        path = path + '.pt'
+        self.buffers = torch.load(path)
+        self.size = self.buffers['observations'].shape[0]
+        self.index = 0
+        self.max_size = self.size
+        self.full_max_size = self.size
+        self.num_workers = self.buffers['observations'].shape[1]
+        self.last_steps = 0
+        print(f"Loaded buffer from {path}")
 
 class MaximumAPosterioriPolicyOptimization:
     def __init__(
-        self, model, action_space, num_samples=20, epsilon=1e-1, epsilon_penalty=1e-3,
+        self, model, action_space, device=torch.device("cpu"), seq_length=1 , num_samples=20, epsilon=1e-1, epsilon_penalty=1e-3,
         epsilon_mean=1e-3, epsilon_std=1e-6, initial_log_temperature=1.,
         initial_log_alpha_mean=1., initial_log_alpha_std=10.,
         min_log_dual=-18., per_dim_constraining=True, action_penalization=True,
-        actor_optimizer=None, dual_optimizer=None, gradient_clip=0
+        actor_optimizer=None, dual_optimizer=None, gradient_clip=0, recurrent_model = False
     ):
+        self.device = device
         self.num_samples = num_samples
         self.epsilon = epsilon
         self.epsilon_mean = epsilon_mean
@@ -117,11 +125,13 @@ class MaximumAPosterioriPolicyOptimization:
         self.action_penalization = action_penalization
         self.epsilon_penalty = epsilon_penalty
         self.per_dim_constraining = per_dim_constraining
+        self.seq_length = seq_length
         self.actor_optimizer = actor_optimizer or (
             lambda params: torch.optim.Adam(params, lr=3e-4))
         self.dual_optimizer = dual_optimizer or (
-            lambda params: torch.optim.Adam(params, lr=1e-2))
+            lambda params: torch.optim.Adam(params, lr=1e-3))
         self.gradient_clip = gradient_clip
+        self.recurrent_model = recurrent_model
         
         # Init the model and the actor optimizer
         self.model = model
@@ -146,7 +156,37 @@ class MaximumAPosterioriPolicyOptimization:
             self.dual_variables.append(self.log_penalty_temperature)
         self.dual_optimizer = self.dual_optimizer(self.dual_variables)
         
-
+        # Move dual variables to the same device as the model
+        self.log_temperature = self.log_temperature.to(device)
+        self.log_alpha_mean = self.log_alpha_mean.to(device)
+        self.log_alpha_std = self.log_alpha_std.to(device)
+        
+    def save_train_state(self, path):
+        # Save the model and the dual variables
+        # Also save optimizers
+        path = path + '.pt'
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save({
+            'model': self.model.state_dict(),
+            'dual_variables': [v.detach() for v in self.dual_variables],
+            'actor_optimizer': self.actor_optimizer.state_dict(),
+            'dual_optimizer': self.dual_optimizer.state_dict()
+        }, path)
+        print(f"Saved mpo model to {path}")
+    
+    def load_train_state(self, path):
+        # Load the model and the dual variables
+        # Also load optimizers
+        path = path + '.pt'
+        checkpoint = torch.load(path)
+        self.model.load_state_dict(checkpoint['model'])
+        self.model.to(self.device)
+        for v, state in zip(self.dual_variables, checkpoint['dual_variables']):
+            v.data.copy_(state)
+        self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer'])
+        self.dual_optimizer.load_state_dict(checkpoint['dual_optimizer'])
+        print(f"Loaded mpo model from {path}")
+        
     def __call__(self, observations):
         def parametric_kl_and_dual_losses(kl, alpha, epsilon):
             kl_mean = kl.mean(dim=0)
@@ -156,6 +196,7 @@ class MaximumAPosterioriPolicyOptimization:
 
         def weights_and_temperature_loss(q_values, epsilon, temperature):
             tempered_q_values = q_values.detach() / temperature
+            
             weights = torch.nn.functional.softmax(tempered_q_values, dim=0)
             weights = weights.detach()
 
@@ -172,9 +213,13 @@ class MaximumAPosterioriPolicyOptimization:
         # Use independent normals to satisfy KL constraints per-dimension.
         def independent_normals(distribution_1, distribution_2=None):
             distribution_2 = distribution_2 or distribution_1
+            
+            mean = distribution_1.mean
+            std = distribution_2.stddev
+            
             return torch.distributions.independent.Independent(
                 torch.distributions.normal.Normal(
-                    distribution_1.mean, distribution_2.stddev), -1)
+                    mean, std), -1)
 
         with torch.no_grad():
             self.log_temperature.data.copy_(
@@ -187,7 +232,18 @@ class MaximumAPosterioriPolicyOptimization:
                 self.log_penalty_temperature.data.copy_(torch.maximum(
                     self.min_log_dual, self.log_penalty_temperature))
 
-            target_distributions = self.model.target_actor(observations)
+            if self.recurrent_model:
+                observations_copy = observations.clone()
+                # observations now has 2 dimensions: (batch_size, observation_size)
+                # But in reality it is 3 dimensional data: (seq_length, batch_size, observation_size)
+                # So we need to undo the combination made to store them
+                observations_copy = observations_copy.reshape(observations_copy.shape[0], self.seq_length, -1)
+                observations_copy = observations_copy.transpose(0, 1)
+                
+                target_distributions = self.model.target_actor(observations_copy)
+            else:
+                target_distributions = self.model.target_actor(observations)
+                
             actions = target_distributions.sample((self.num_samples,))
 
             # Tile the observations and actions for the critic.
@@ -195,6 +251,16 @@ class MaximumAPosterioriPolicyOptimization:
             # Merge the first two dimensions for the observations and actions.
             flat_observations = tiled_observations.reshape(tiled_observations.shape[0] * tiled_observations.shape[1], *tiled_observations.shape[2:])
             flat_actions = actions.reshape(actions.shape[0] * actions.shape[1], *actions.shape[2:])
+            
+            # If recurrent model, we need to revert the flattening of observations
+            if self.recurrent_model:
+                flat_observations = flat_observations.reshape(flat_observations.shape[0], self.seq_length, -1)
+                flat_observations = flat_observations.transpose(0, 1)
+                
+                # Do the same for observations
+                observations = observations.reshape(observations.shape[0], self.seq_length, -1)
+                observations = observations.transpose(0, 1)
+                
             values = self.model.target_critic(flat_observations, flat_actions)
             values = values.view(self.num_samples, -1)
 
@@ -226,7 +292,8 @@ class MaximumAPosterioriPolicyOptimization:
             penalty_weights, penalty_temperature_loss = \
                 weights_and_temperature_loss(
                     action_bound_costs,
-                    self.epsilon_penalty, penalty_temperature)
+                    self.epsilon_penalty, penalty_temperature.to(self.device))
+            
             weights += penalty_weights
             temperature_loss += penalty_temperature_loss
 
@@ -237,11 +304,12 @@ class MaximumAPosterioriPolicyOptimization:
             target_distributions.base_dist, distributions.base_dist)
 
         # Compute the decomposed policy losses.
+        
         policy_mean_losses = (fixed_std_distribution.base_dist.log_prob(
-            actions).sum(dim=-1) * weights).sum(dim=0)
+            actions).sum(dim=-1).view(self.num_samples, -1) * weights).sum(dim=0)
         policy_mean_loss = -(policy_mean_losses).mean()
         policy_std_losses = (fixed_mean_distribution.base_dist.log_prob(
-            actions).sum(dim=-1) * weights).sum(dim=0)
+            actions).sum(dim=-1).view(self.num_samples, -1) * weights).sum(dim=0)
         policy_std_loss = -policy_std_losses.mean()
 
         # Compute the decomposed KL between the target and online policies.
@@ -288,7 +356,7 @@ class MaximumAPosterioriPolicyOptimization:
 
         return dict(
             dual_loss=dual_loss.detach(),
-            total_loss=loss.detach(),
+            total_loss=policy_loss.detach(),
             policy_mean_loss=policy_mean_loss.detach(),
             policy_std_loss=policy_std_loss.detach(),
             kl_mean_loss=kl_mean_loss.detach(),
@@ -300,9 +368,12 @@ class MaximumAPosterioriPolicyOptimization:
 
 class ExpectedSARSA:
     def __init__(
-        self, model, num_samples=20, loss=None, optimizer=None, gradient_clip=0
+        self, model, num_samples=20, batch_size=1, loss=None, optimizer=None, gradient_clip=0, device=torch.device("cpu"), recurrent_model = False, seq_length=1
     ):
+        self.device = device
         self.num_samples = num_samples
+        self.seq_length = seq_length
+        self.batch_size = batch_size
         self.loss = loss or torch.nn.MSELoss()
         self.optimizer = optimizer or (
             lambda params: torch.optim.Adam(params, lr=3e-4))
@@ -311,26 +382,55 @@ class ExpectedSARSA:
         self.model = model
         self.variables = [p for p in self.model.critic.parameters() if p.requires_grad]
         self.optimizer = self.optimizer(self.variables)
+        self.recurrent_model = recurrent_model
 
+    def save_train_state(self, path):
+        # Save the model and the optimizer
+        path = path + '.pt'
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save({
+            'model': self.model.state_dict(),
+            'optimizer': self.optimizer.state_dict()
+        }, path)
+        print(f"Saved mpo model to {path}")
+        
+    def load_train_state(self, path):
+        # Load the model and the optimizer
+        path = path + '.pt'
+        checkpoint = torch.load(path)
+        self.model.load_state_dict(checkpoint['model'])
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        print(f"Loaded mpo model from {path}")
+        
     def __call__(
         self, observations, actions, next_observations, rewards, discounts
     ):
         # Approximate the expected next values.
         with torch.no_grad():
-            next_target_distributions = self.model.target_actor(
-                next_observations)
+            # If recurrent model, we need to revert the flattening of observations
+            if self.recurrent_model:
+                observations = observations.reshape(observations.shape[0], self.seq_length, -1)
+                observations = observations.transpose(0, 1)
+                
+                next_target_distributions = self.model.target_actor(observations)
+            else:
+                next_target_distributions = self.model.target_actor(next_observations)
+                
             next_actions = next_target_distributions.rsample(
                 (self.num_samples,))
+        
             # Merge the first two dimensions
-            next_actions = next_actions.reshape(next_actions.shape[0] * next_actions.shape[1], *next_actions.shape[2:])  
-            
-            # Repeat the observations for each sample, creating a batch.    
+            next_actions = next_actions.reshape(next_actions.shape[0] * next_actions.shape[1], *next_actions.shape[2:])
+            # Repeat the observations for each sample, creating a batch.
             next_observations = next_observations.unsqueeze(0).expand(self.num_samples, *next_observations.shape)
             # Merge the first two dimensions
             next_observations = next_observations.reshape(next_observations.shape[0] * next_observations.shape[1], *next_observations.shape[2:])
-            
-            next_values = self.model.target_critic(
-                next_observations, next_actions)
+            # If recurrent model, we need to get the correct observations for the critic
+            if self.recurrent_model:
+                next_observations = next_observations.reshape(next_observations.shape[0], self.seq_length, -1)
+                next_observations = next_observations.transpose(0, 1)
+                
+            next_values = self.model.target_critic(next_observations, next_actions)
             next_values = next_values.view(self.num_samples, -1)
             next_values = next_values.mean(dim=0)
             returns = rewards + discounts * next_values
@@ -353,15 +453,21 @@ class MPO():
     '''
 
     def __init__(
-        self, action_space, model, seed=None, replay=None, actor_updater=None, critic_updater=None
+        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, device=torch.device("cpu")
     ):
         self.model = model
+        self.recurrent_model = recurrent_model
+        self.max_seq_length = max_seq_length
+        self.observation_memory = torch.zeros((max_seq_length, num_workers, model.actor.observation_size), dtype=torch.float32).to(device) if recurrent_model else None
+        self.action_memory = np.zeros((max_seq_length, num_workers, model.actor.action_size), dtype=np.float32) if recurrent_model else None
+        self.device = device
+        self.num_workers = num_workers
         self.replay = Buffer(return_steps=5, seed=seed) if replay is None else replay
-        self.actor_updater = MaximumAPosterioriPolicyOptimization(self.model, action_space) \
+        self.actor_updater = MaximumAPosterioriPolicyOptimization(self.model, action_space, device, recurrent_model = recurrent_model, seq_length=max_seq_length) \
             if actor_updater is None else actor_updater
-        self.critic_updater = ExpectedSARSA(self.model) \
+        self.critic_updater = ExpectedSARSA(self.model, batch_size=num_workers, recurrent_model = recurrent_model, seq_length=max_seq_length) \
             if critic_updater is None else critic_updater
-
+        
     def save(self, path):
         path = path + '.pt'
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -370,14 +476,53 @@ class MPO():
     def load(self, path):
         path = path + '.pt'
         self.model.load_state_dict(torch.load(path))
+    
+    def save_train_state(self, path):
+        print(f"Saving mpo model to {path}")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Save the model and the replay
+        self.replay.save(path+'replay')
+        # Save the model and the dual variables
+        self.actor_updater.save_train_state(path+'actor')
+        self.critic_updater.save_train_state(path+'critic')
+        # Save the model
+        self.save(path+'model')
         
+    def load_train_state(self, path):
+        # Load the model and the replay
+        self.replay.load(path+'replay')
+        # Load the model and the dual variables
+        self.actor_updater.load_train_state(path+'actor')
+        self.critic_updater.load_train_state(path+'critic')
+        # Load the model
+        self.load(path+'model')
+        print(f"Loaded mpo model from {path}")
+    
+    def reset_observations(self, workers):
+        '''Reset the observations for the recurrent model.'''
+        if self.recurrent_model:
+            self.observation_memory[:, workers, :] = 0
+            self.action_memory[:, workers, :] = 0
+            
     def step(self, observations, steps):
         actions = self._step(observations)
-        actions = actions.numpy()
-
-        # Keep some values for the next update.
-        self.last_observations = observations.copy()
+        actions = actions.cpu().numpy()
         self.last_actions = actions.copy()
+        
+        # Keep some values for the next update.
+        if not self.recurrent_model:
+            self.last_observations = observations.copy()
+        else:
+            # First, store action into last actions
+            self.action_memory = np.roll(self.action_memory, shift=-1, axis=0)  # Shift all past obs up
+            self.action_memory[-1] = actions  # Insert new observations at the last position
+            
+            self.last_observations = self.observation_memory.cpu().numpy().copy()
+            # Now, observations has 3 dimensions: (sequence_length, batch_size, observation_size)
+            # But buffer only stores 2 dimensional data: (batch_size, observation_size)
+            # So we need to combine dimensions 0 and 2
+            self.last_observations = self.last_observations.transpose(1, 0, 2)
+            self.last_observations = self.last_observations.reshape(self.last_observations.shape[0], -1)
 
         return actions
 
@@ -387,6 +532,19 @@ class MPO():
 
     def update(self, observations, rewards, resets, terminations, steps):
         # Store the last transitions in the replay.
+        # If the model is recurrent we need to change the observations to include it correctly in the replay.
+        if self.recurrent_model:
+            # We need to reshape the observations to be of size (sequence_length, batch_size, observation_size)
+            observations = torch.as_tensor(observations, dtype=torch.float32)
+            observations = torch.cat((self.observation_memory.cpu().clone(), observations.unsqueeze(0)), dim=0)
+            observations = observations[1:].cpu().numpy()
+            
+            # Now, observations has 3 dimensions: (sequence_length, batch_size, observation_size)
+            # But buffer only stores 2 dimensional data: (batch_size, observation_size)
+            # So we need to combine dimensions 0 and 2
+            observations = observations.transpose(1, 0, 2)
+            observations = observations.reshape(observations.shape[0], -1)
+
         self.replay.store(
             observations=self.last_observations, actions=self.last_actions,
             next_observations=observations, rewards=rewards, resets=resets,
@@ -406,19 +564,31 @@ class MPO():
         return infos
 
     def _step(self, observations):
-        observations = torch.as_tensor(observations, dtype=torch.float32)
-        with torch.no_grad():
-            return self.model.actor(observations).sample()
+        observations = torch.as_tensor(observations, dtype=torch.float32).to(self.device)
+        if self.recurrent_model:
+            # Update the list of last observations for the recurrent model. Last observations must be of size:
+            # (sequence_length, batch_size, observation_size)
+            self.observation_memory = torch.cat((self.observation_memory, observations.unsqueeze(0)), dim=0)
+            self.observation_memory = self.observation_memory[1:]
+            with torch.no_grad():
+                # Get the action from the model
+                actions = self.model.actor(self.observation_memory).sample()
+                return actions
 
+        else: 
+            with torch.no_grad():
+                return self.model.actor(observations).sample()
+            
     def _test_step(self, observations):
         observations = torch.as_tensor(observations, dtype=torch.float32)
         with torch.no_grad():
-            return self.model.actor(observations).loc
+            actions = self.model.actor(observations).sample()
+            return actions
 
     def _update(self, steps):
         keys = ('observations', 'actions', 'next_observations', 'rewards',
                 'discounts')
-
+        
         actor_dual_loss = 0
         actor_loss = 0
         critic_loss = 0
@@ -447,8 +617,13 @@ class MPO():
     def _update_actor_critic(
         self, observations, actions, next_observations, rewards, discounts
     ):
-        critic_infos = self.critic_updater(
-            observations, actions, next_observations, rewards, discounts)
+        observations = torch.as_tensor(observations, dtype=torch.float32).to(self.device)
+        actions = torch.as_tensor(actions, dtype=torch.float32).to(self.device)
+        next_observations = torch.as_tensor(next_observations, dtype=torch.float32).to(self.device)
+        rewards = torch.as_tensor(rewards, dtype=torch.float32).to(self.device)
+        discounts = torch.as_tensor(discounts, dtype=torch.float32).to(self.device)
+        
+        critic_infos = self.critic_updater(observations, actions, next_observations, rewards, discounts)
         actor_infos = self.actor_updater(observations)
         self.model.update_targets()
         return dict(critic=critic_infos, actor=actor_infos)

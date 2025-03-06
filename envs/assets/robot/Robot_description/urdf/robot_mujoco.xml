@@ -72,7 +72,7 @@
                         <geom pos="0.000477 -0.023969 -0.211275" type="mesh" mesh="l_upper_leg" class="visual"/>
                         <body name="l_lower_leg" pos="1.5e-05 0.000432 -0.063998">
                             <inertial pos="3.84448e-06 0.0235546 -0.0371166" mass="0.192145" diaginertia="0.000184 0.000161 3.6e-05"/>
-                            <joint name="r_knee" pos="0 0 0" axis="0 1 0" range="-2.35619 2.35619"/>
+                            <joint name="r_knee" pos="0 0 0" axis="0 1 0" range="0 2.35619"/>
                             <geom pos="0.000462 -0.024401 -0.147277" type="mesh" mesh="l_lower_leg" class="visual"/>
                             <body name="l_ankle" pos="0 -0.0015 -0.074233">
                             <inertial pos="7.31829e-08 0.0200002 -0.0250003" mass="0.0316626" diaginertia="2.05616e-05 1.9e-05 1.64384e-05"/>
@@ -102,7 +102,7 @@
                         <geom pos="0.000577 0.023781 -0.212176" type="mesh" mesh="r_upper_leg" class="visual"/>
                         <body name="r_lower_leg" pos="1.5e-05 -0.000433 -0.063998">
                             <inertial pos="3.60925e-06 -0.0235544 -0.0371164" mass="0.192145" diaginertia="0.000184 0.000161 3.6e-05"/>
-                            <joint name="l_knee" pos="0 0 0" axis="0 1 0" range="-2.26893 2.35619"/>
+                            <joint name="l_knee" pos="0 0 0" axis="0 1 0" range="0 2.35619"/>
                             <geom pos="0.000562 0.024214 -0.148178" type="mesh" mesh="r_lower_leg" class="visual"/>
                             <body name="r_ankle" pos="0 0.0015 -0.074233">
                             <inertial pos="-1.6372e-07 -0.0199999 -0.0250001" mass="0.0316626" diaginertia="2.05616e-05 1.9e-05 1.64384e-05"/>
