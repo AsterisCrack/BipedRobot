@@ -1,109 +1,9 @@
 import os
 import torch
 import numpy as np
+from models.utils import Buffer
 
 FLOAT_EPSILON = 1e-8
-
-class Buffer:
-    '''Replay storing a large number of transitions for off-policy learning
-    and using n-step returns.'''
-
-    def __init__(
-        self, size=int(1e6), return_steps=1, batch_iterations=50,
-        batch_size=1024, discount_factor=0.99, steps_before_batches=int(1e4),
-        steps_between_batches=50, seed=None
-    ):
-        self.full_max_size = size
-        self.return_steps = return_steps
-        self.batch_iterations = batch_iterations
-        self.batch_size = batch_size
-        self.discount_factor = discount_factor
-        self.steps_before_batches = steps_before_batches
-        self.steps_between_batches = steps_between_batches
-        self.np_random = np.random.RandomState(seed)
-        self.buffers = None
-        self.index = 0
-        self.size = 0
-        self.last_steps = 0
-
-    def ready(self, steps):
-        if steps < self.steps_before_batches:
-            return False
-        return (steps - self.last_steps) >= self.steps_between_batches
-
-    def store(self, **kwargs):
-        if 'terminations' in kwargs:
-            continuations = np.float32(1 - kwargs['terminations'])
-            kwargs['discounts'] = continuations * self.discount_factor
-
-        # Create the named buffers.
-        if self.buffers is None:
-            self.num_workers = len(list(kwargs.values())[0])
-            self.max_size = self.full_max_size // self.num_workers
-            self.buffers = {}
-            for key, val in kwargs.items():
-                shape = (self.max_size,) + np.array(val).shape
-                self.buffers[key] = np.full(shape, np.nan, np.float32)
-
-        # Store the new values.
-        for key, val in kwargs.items():
-            self.buffers[key][self.index] = val
-        # Accumulate values for n-step returns.
-        if self.return_steps > 1:
-            self.accumulate_n_steps(kwargs)
-
-        self.index = (self.index + 1) % self.max_size
-        self.size = min(self.size + 1, self.max_size)
-
-    def accumulate_n_steps(self, kwargs):
-        rewards = kwargs['rewards']
-        next_observations = kwargs['next_observations']
-        discounts = kwargs['discounts']
-        masks = np.ones(self.num_workers, np.float32)
-        for i in range(min(self.size, self.return_steps - 1)):
-            index = (self.index - i - 1) % self.max_size
-            masks *= (1 - self.buffers['resets'][index])
-            new_rewards = (self.buffers['rewards'][index] +
-                        self.buffers['discounts'][index] * rewards)
-            self.buffers['rewards'][index] = (
-                (1 - masks) * self.buffers['rewards'][index] +
-                masks * new_rewards)
-            new_discounts = self.buffers['discounts'][index] * discounts
-            self.buffers['discounts'][index] = (
-                (1 - masks) * self.buffers['discounts'][index] +
-                masks * new_discounts)
-            self.buffers['next_observations'][index] = (
-                (1 - masks)[:, None] *
-                self.buffers['next_observations'][index] +
-                masks[:, None] * next_observations)
-
-    def get(self, *keys, steps):
-        '''Get batches from named buffers.'''
-
-        for _ in range(self.batch_iterations):
-            total_size = self.size * self.num_workers
-            indices = self.np_random.randint(total_size, size=self.batch_size)
-            rows = indices // self.num_workers
-            columns = indices % self.num_workers
-            yield {k: self.buffers[k][rows, columns] for k in keys}
-
-        self.last_steps = steps
-    
-    def save(self, path):
-        path = path + '.pt'
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(self.buffers, path)
-        
-    def load(self, path):
-        path = path + '.pt'
-        self.buffers = torch.load(path)
-        self.size = self.buffers['observations'].shape[0]
-        self.index = 0
-        self.max_size = self.size
-        self.full_max_size = self.size
-        self.num_workers = self.buffers['observations'].shape[1]
-        self.last_steps = 0
-        print(f"Loaded buffer from {path}")
 
 class MaximumAPosterioriPolicyOptimization:
     def __init__(
@@ -132,6 +32,7 @@ class MaximumAPosterioriPolicyOptimization:
             lambda params: torch.optim.Adam(params, lr=1e-3))
         self.gradient_clip = gradient_clip
         self.recurrent_model = recurrent_model
+        
         
         # Init the model and the actor optimizer
         self.model = model
@@ -217,9 +118,10 @@ class MaximumAPosterioriPolicyOptimization:
             mean = distribution_1.mean
             std = distribution_2.stddev
             
-            return torch.distributions.independent.Independent(
+            dist = torch.distributions.independent.Independent(
                 torch.distributions.normal.Normal(
                     mean, std), -1)
+            return dist
 
         with torch.no_grad():
             self.log_temperature.data.copy_(
@@ -233,14 +135,13 @@ class MaximumAPosterioriPolicyOptimization:
                     self.min_log_dual, self.log_penalty_temperature))
 
             if self.recurrent_model:
-                observations_copy = observations.clone()
-                # observations now has 2 dimensions: (batch_size, observation_size)
-                # But in reality it is 3 dimensional data: (seq_length, batch_size, observation_size)
-                # So we need to undo the combination made to store them
-                observations_copy = observations_copy.reshape(observations_copy.shape[0], self.seq_length, -1)
-                observations_copy = observations_copy.transpose(0, 1)
+                observations = observations.reshape(observations.shape[0], self.seq_length, -1)
+                observations = observations.transpose(0, 1)
+                target_distributions = self.model.target_actor(observations)
+                # Now undo the flattening of the observations
+                observations = observations.transpose(0, 1)
+                observations = observations.reshape(observations.shape[0], -1)
                 
-                target_distributions = self.model.target_actor(observations_copy)
             else:
                 target_distributions = self.model.target_actor(observations)
                 
@@ -390,6 +291,7 @@ class ExpectedSARSA:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         torch.save({
             'model': self.model.state_dict(),
+            'variables': [v.detach() for v in self.variables],
             'optimizer': self.optimizer.state_dict()
         }, path)
         print(f"Saved mpo model to {path}")
@@ -399,6 +301,11 @@ class ExpectedSARSA:
         path = path + '.pt'
         checkpoint = torch.load(path)
         self.model.load_state_dict(checkpoint['model'])
+        if 'variables' in checkpoint:
+            for v, state in zip(self.variables, checkpoint['variables']):
+                v.data.copy_(state)
+        else:
+            print("Warning: No variables found in the checkpoint. Loading model only.")
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         print(f"Loaded mpo model from {path}")
         
@@ -412,7 +319,12 @@ class ExpectedSARSA:
                 observations = observations.reshape(observations.shape[0], self.seq_length, -1)
                 observations = observations.transpose(0, 1)
                 
-                next_target_distributions = self.model.target_actor(observations)
+                next_observations = next_observations.reshape(next_observations.shape[0], self.seq_length, -1)
+                next_observations = next_observations.transpose(0, 1)
+                next_target_distributions = self.model.target_actor(next_observations)
+                # Undo the flattening of the observations
+                next_observations = next_observations.transpose(0, 1)
+                next_observations = next_observations.reshape(next_observations.shape[0], -1)
             else:
                 next_target_distributions = self.model.target_actor(next_observations)
                 
@@ -625,6 +537,8 @@ class MPO():
         
         critic_infos = self.critic_updater(observations, actions, next_observations, rewards, discounts)
         actor_infos = self.actor_updater(observations)
+        
+        
         self.model.update_targets()
         return dict(critic=critic_infos, actor=actor_infos)
 

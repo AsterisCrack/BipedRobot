@@ -5,6 +5,136 @@ import time
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
+class Buffer:
+    '''Replay storing a large number of transitions for off-policy learning
+    and using n-step returns.'''
+
+    def __init__(
+        self, size=int(1e6), return_steps=1, batch_iterations=50,
+        batch_size=1024, discount_factor=0.99, steps_before_batches=int(1e4),
+        steps_between_batches=50, seed=None
+    ):
+        self.full_max_size = size
+        self.return_steps = return_steps
+        self.batch_iterations = batch_iterations
+        self.batch_size = batch_size
+        self.discount_factor = discount_factor
+        self.steps_before_batches = steps_before_batches
+        self.steps_between_batches = steps_between_batches
+        self.np_random = np.random.RandomState(seed)
+        self.buffers = None
+        self.index = 0
+        self.size = 0
+        self.last_steps = 0
+
+    def ready(self, steps):
+        if steps < self.steps_before_batches:
+            return False
+        return (steps - self.last_steps) >= self.steps_between_batches
+
+    def store(self, **kwargs):
+        if 'terminations' in kwargs:
+            continuations = np.float32(1 - kwargs['terminations'])
+            kwargs['discounts'] = continuations * self.discount_factor
+
+        # Create the named buffers.
+        if self.buffers is None:
+            self.num_workers = len(list(kwargs.values())[0])
+            self.max_size = self.full_max_size // self.num_workers
+            self.buffers = {}
+            for key, val in kwargs.items():
+                shape = (self.max_size,) + np.array(val).shape
+                self.buffers[key] = np.full(shape, np.nan, np.float32)
+
+        # Store the new values.
+        for key, val in kwargs.items():
+            self.buffers[key][self.index] = val
+        # Accumulate values for n-step returns.
+        if self.return_steps > 1:
+            self.accumulate_n_steps(kwargs)
+
+        self.index = (self.index + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+    def accumulate_n_steps(self, kwargs):
+        rewards = kwargs['rewards']
+        next_observations = kwargs['next_observations']
+        discounts = kwargs['discounts']
+        masks = np.ones(self.num_workers, np.float32)
+        for i in range(min(self.size, self.return_steps - 1)):
+            index = (self.index - i - 1) % self.max_size
+            masks *= (1 - self.buffers['resets'][index])
+            new_rewards = (self.buffers['rewards'][index] +
+                        self.buffers['discounts'][index] * rewards)
+            self.buffers['rewards'][index] = (
+                (1 - masks) * self.buffers['rewards'][index] +
+                masks * new_rewards)
+            new_discounts = self.buffers['discounts'][index] * discounts
+            self.buffers['discounts'][index] = (
+                (1 - masks) * self.buffers['discounts'][index] +
+                masks * new_discounts)
+            self.buffers['next_observations'][index] = (
+                (1 - masks)[:, None] *
+                self.buffers['next_observations'][index] +
+                masks[:, None] * next_observations)
+
+    def get(self, *keys, steps):
+        '''Get batches from named buffers.'''
+
+        for _ in range(self.batch_iterations):
+            total_size = self.size * self.num_workers
+            indices = self.np_random.randint(total_size, size=self.batch_size)
+            rows = indices // self.num_workers
+            columns = indices % self.num_workers
+            yield {k: self.buffers[k][rows, columns] for k in keys}
+
+        self.last_steps = steps
+    
+    def save(self, path):
+        path = path + '.pt'
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(self.buffers, path)
+        
+    def load(self, path):
+        path = path + '.pt'
+        self.buffers = torch.load(path)
+        self.size = self.buffers['observations'].shape[0]
+        self.index = 0
+        self.max_size = self.size
+        self.full_max_size = self.size
+        self.num_workers = self.buffers['observations'].shape[1]
+        self.last_steps = 0
+        print(f"Loaded buffer from {path}")
+
+class SquashedMultivariateNormalDiag:
+    def __init__(self, loc, scale):
+        self._distribution = torch.distributions.normal.Normal(loc, scale)
+
+    def rsample_with_log_prob(self, shape=()):
+        samples = self._distribution.rsample(shape)
+        squashed_samples = torch.tanh(samples)
+        log_probs = self._distribution.log_prob(samples)
+        log_probs -= torch.log(1 - squashed_samples ** 2 + 1e-6)
+        return squashed_samples, log_probs
+
+    def rsample(self, shape=()):
+        samples = self._distribution.rsample(shape)
+        return torch.tanh(samples)
+
+    def sample(self, shape=()):
+        samples = self._distribution.sample(shape)
+        return torch.tanh(samples)
+
+    def log_prob(self, samples):
+        '''Required unsquashed samples cannot be accurately recovered.'''
+        raise NotImplementedError(
+            'Not implemented to avoid approximation errors. '
+            'Use sample_with_log_prob directly.')
+
+    @property
+    def loc(self):
+        return torch.tanh(self._distribution.mean)
+    
 class MeanStd(torch.nn.Module):
     def __init__(self, mean=0, std=1, clip=None, shape=None):
         super().__init__()
@@ -81,9 +211,46 @@ class MeanStd(torch.nn.Module):
         self._mean.data.copy_(torch.as_tensor(self.mean, dtype=torch.float32))
         self._std.data.copy_(torch.as_tensor(self.std, dtype=torch.float32))
 
+class NormalActionNoise:
+    def __init__(self, policy, action_space, scale=0.1, start_steps=10000, seed=None):
+        self.scale = scale
+        self.start_steps = start_steps
+        self.policy = policy
+        self.action_size = action_space.shape[0]
+        self.np_random = np.random.RandomState(seed)
 
+    def __call__(self, observations, steps):
+        if steps > self.start_steps:
+            actions = self.policy(observations)
+            noises = self.scale * self.np_random.normal(size=actions.shape)
+            actions = (actions + noises).astype(np.float32)
+            actions = np.clip(actions, -1, 1)
+        else:
+            shape = (len(observations), self.action_size)
+            actions = self.np_random.uniform(-1, 1, shape)
+        return actions
 
+    def update(self, resets):
+        pass
 
+class NoActionNoise:
+    def __init__(self, policy, action_space, seed=None, start_steps=20000):
+        self.start_steps = start_steps
+        self.policy = policy
+        self.action_size = action_space.shape[0]
+        self.np_random = np.random.RandomState(seed)
+
+    def __call__(self, observations, steps):
+        if steps > self.start_steps:
+            actions = self.policy(observations)
+        else:
+            shape = (len(observations), self.action_size)
+            actions = self.np_random.uniform(-np.pi, np.pi, shape)
+        return actions
+
+    def update(self, resets):
+        pass
+    
 class Trainer:
     '''Trainer used to train and evaluate an agent on an environment.'''
 

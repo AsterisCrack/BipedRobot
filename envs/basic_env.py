@@ -54,7 +54,7 @@ class BasicEnv(gym.Env):
 
         # Action space: Control position of servos
         action_dim = self.model.nu
-        self.action_space = Box(low=-1.0, high=1.0, shape=(action_dim,), dtype=np.float32)
+        self.action_space = Box(low=-np.pi, high=np.pi, shape=(action_dim,), dtype=np.float32)
 
         # Rendering attributes
         self.window = None
@@ -377,7 +377,7 @@ class BasicEnv(gym.Env):
         step_reward = 0.1
         vx_reward = 2
         height_reward = 0
-        effort_reward = 0
+        effort_reward = -0.02
         axis_reward = -3
         yaw_reward = -0.05
         pitch_roll_reward = -0.05

@@ -1,10 +1,9 @@
 import numpy as np
-from torch.optim import Adam
-from models.mpo.mpo import MPO
-from models.networks import ActorCriticWithTargets
+from models.mpo.train import MPOTrainer, MPOTrainerLSTM
+from models.ddpg.train import DDPGTrainer
+from models.sac.train import SACTrainer
 from envs.distributed import distribute
 from envs.basic_env import BasicEnv
-from models.utils import Trainer
 import torch
 
 def train():
@@ -18,24 +17,36 @@ def train():
     # Initialize environment
     # env = BasicEnv(render_mode="human")
     env = distribute(BasicEnv, 8)
-    
-    # Initialize networks
-    print("Initializing model")
-    model = ActorCriticWithTargets(env.observation_space, env.action_space, [256, 256], [256, 256], device=device)
-    model.to(device)
-    
-    # Initialize MPO algorithm
-    mpo = MPO(
-        action_space=env.action_space,
-        model=model,
+    steps=11000
+    """trainer = MPOTrainer(
+        env=env,
+        model_sizes=[[256, 256], [256, 256]],
         device=device,
-    )
-
-    trainer = Trainer(mpo, env)
+        steps=steps,
+        seed=seed)
+    
+    trainer1 = MPOTrainerLSTM(
+        env=env,
+        model_sizes=[[256, 256], [256, 256]],
+        num_workers=8,
+        device=device,
+        steps=steps,
+        seed=seed)"""
+        
+    """trainer = DDPGTrainer(
+        env=env,
+        model_sizes=[[256, 256], [256, 256]],
+        device=device,
+        seed=seed)"""
+    
+    trainer = SACTrainer(
+        env=env,
+        model_sizes=[[256, 256], [256, 256]],
+        device=device,
+        seed=seed)
     
     # Train agent
     trainer.run()
-    
     
 if __name__ == "__main__":
     train()
