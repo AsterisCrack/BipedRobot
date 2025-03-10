@@ -335,13 +335,13 @@ class BasicEnv(gym.Env):
         pitch_roll_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="pitch_roll")))
         
         # Feet orientation
-        l_foot_orientation_command = np.array([0, 0, 0]) # Desired orientation of the left foot in yaw, pitch, roll
+        """l_foot_orientation_command = np.array([0, 0, 0]) # Desired orientation of the left foot in yaw, pitch, roll
         r_foot_orientation_command = np.array([0, 0, 0]) # Desired orientation of the right foot in yaw, pitch, roll
         r_foot_jaw = self._get_geom_orientation(self.r_feet_geom)
         l_foot_jaw = self._get_geom_orientation(self.l_feet_geom)
         l_foot_yaw_orient = np.exp(-300*(self._quaternion_distance(l_foot_jaw, l_foot_orientation_command, axis="yaw")))
         r_foot_yaw_orient = np.exp(-300*(self._quaternion_distance(r_foot_jaw, r_foot_orientation_command, axis="yaw")))
-        feet_yaw_orient = l_foot_yaw_orient + r_foot_yaw_orient
+        feet_yaw_orient = l_foot_yaw_orient + r_foot_yaw_orient"""
         
         # The robot fell
         terminated = 0

@@ -145,7 +145,7 @@ class DDPG():
         self.device = device
         self.num_workers = num_workers
         self.replay = Buffer(return_steps=5, seed=seed) if replay is None else replay
-        self.exploration = exploration or NormalActionNoise(self._policy, action_space, seed)
+        self.exploration = exploration or NormalActionNoise(self._policy, action_space, seed=seed)
         self.actor_updater = DeterministicPolicyGradient(model=model, device=device) if actor_updater is None else actor_updater
         self.critic_updater = DeterministicQLearning(model=model, device=device) if critic_updater is None else critic_updater
 
@@ -187,7 +187,7 @@ class DDPG():
 
     def step(self, observations, steps):
         # Get actions from the actor and exploration method.
-        actions = self.exploration(observations, steps)
+        actions = self.exploration(torch.as_tensor(observations, dtype=torch.float32).to(self.device), steps)
         self.last_actions = actions.copy()
         
         # Keep some values for the next update.
@@ -247,7 +247,7 @@ class DDPG():
             return self.model.actor(observations)
 
     def _policy(self, observations):
-        return self._greedy_actions(observations).numpy()
+        return self._greedy_actions(observations).cpu().numpy()
 
     def _update(self, steps):
         keys = ('observations', 'actions', 'next_observations', 'rewards',

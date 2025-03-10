@@ -1,17 +1,17 @@
-from models.sac.sac import SAC
-from models.networks import ActorTwinCriticWithTargets
+from models.d4pg.d4pg import D4PG
+from models.networks import ActorCriticWithTargets
 from models.utils import Trainer
 import torch
 
-class SACTrainer(Trainer):
+class D4PGTrainer(Trainer):
     def __init__(self, env, model_sizes=[[256, 256], [256, 256]], device=torch.device("cpu"), seed=42, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3), test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None, checkpoint_path=None):
         
         # Initialize networks
-        model = ActorTwinCriticWithTargets(env.observation_space, env.action_space, model_sizes[0], model_sizes[1], device=device, actor_type="gaussian_multivariate")
+        model = ActorCriticWithTargets(env.observation_space, env.action_space, model_sizes[0], model_sizes[1], device=device, actor_type="deterministic", critic_type="distributional")
         model.to(device)
         
         # Initialize MPO algorithm
-        mpo = SAC(
+        mpo = D4PG(
             action_space=env.action_space,
             model=model,
             device=device,

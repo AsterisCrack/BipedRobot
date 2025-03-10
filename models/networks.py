@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
 import copy
-from models.utils import MeanStd, SquashedMultivariateNormalDiag
+from models.utils import MeanStd, SquashedMultivariateNormalDiag, CategoricalWithSupport
 
 class Actor(nn.Module):
     def __init__(self, observation_space, action_space, hidden_sizes, observation_normalizer=None, head_type="gaussian"):
@@ -66,8 +66,33 @@ class Actor(nn.Module):
         actions = self.mean_layer(out)
         return actions.detach().cpu().numpy()
 
+class DistributionalValueHead(torch.nn.Module):
+    def __init__(self, vmin, vmax, num_atoms, input_size, return_normalizer=None, fn=None, device=torch.device("cpu")):
+        super().__init__()
+        self.num_atoms = num_atoms
+        self.fn = fn
+        self.values = torch.linspace(vmin, vmax, num_atoms).float().to(device)
+        if return_normalizer:
+            raise ValueError(
+                'Return normalizers cannot be used with distributional value'
+                'heads.')
+        self.distributional_layer = torch.nn.Linear(input_size, self.num_atoms)
+        if self.fn:
+            self.distributional_layer.apply(self.fn)
+            
+    def to(self, device):
+        """ Moves all components to a specific device """
+        super().to(device)
+        self.values = self.values.to(device)
+        self.distributional_layer.to(device)
+        return self
+    
+    def forward(self, inputs):
+        logits = self.distributional_layer(inputs)
+        return CategoricalWithSupport(values=self.values, logits=logits)
+    
 class Critic(nn.Module):
-    def __init__(self, observation_space, action_space, hidden_sizes, observation_normalizer=None):
+    def __init__(self, observation_space, action_space, hidden_sizes, observation_normalizer=None, critic_type="deterministic"):
         super().__init__()
         self.observation_size = observation_space.shape[0]
         self.action_size = action_space.shape[0]
@@ -85,8 +110,18 @@ class Critic(nn.Module):
         self.pool = nn.MaxPool1d(kernel_size=2, stride=2)
         
         # Value head
-        self.value_layer = nn.Linear(hidden_sizes[-1], 1)
+        self.critic_type = critic_type
+        if critic_type == "deterministic":
+            self.value_layer = nn.Linear(hidden_sizes[-1], 1)
+        elif critic_type == "distributional":
+            self.value_layer = DistributionalValueHead(-150, 150, 51, hidden_sizes[-1])
 
+    def to(self, device):
+        """ Moves all components to a specific device """
+        super().to(device)
+        self.value_layer.to(device)
+        return self
+    
     def forward(self, observations, actions):
         if self.observation_normalizer:
             observations = self.observation_normalizer(observations)
@@ -99,8 +134,11 @@ class Critic(nn.Module):
             
         out = torch.cat([observations, actions], dim=-1)
         out = self.torso(out)
-        value = self.value_layer(out)
-        return torch.squeeze(value, -1)
+        if self.critic_type == "deterministic":
+            value = self.value_layer(out)
+            return torch.squeeze(value, -1)
+        elif self.critic_type == "distributional":
+            return self.value_layer(out)
     
 
 class LSTMActor(nn.Module):
@@ -208,13 +246,13 @@ class LSTMCritic(nn.Module):
         return value
     
 class ActorCriticWithTargets(nn.Module):
-    def __init__(self, obs_space, action_space, actor_sizes, critic_sizes, actor_type="gaussian", target_coeff=0.005, device=torch.device("cpu")):
+    def __init__(self, obs_space, action_space, actor_sizes, critic_sizes, actor_type="gaussian", critic_type="deterministic", target_coeff=0.005, device=torch.device("cpu")):
         super().__init__()
         self.obs_space = obs_space
         self.observation_normalizer = MeanStd(shape=obs_space.shape)
         self.return_normalizer = None
         self.actor = Actor(obs_space, action_space, actor_sizes, self.observation_normalizer, actor_type)
-        self.critic = Critic(obs_space, action_space, critic_sizes, self.observation_normalizer)
+        self.critic = Critic(obs_space, action_space, critic_sizes, self.observation_normalizer, critic_type)
         self.target_actor = copy.deepcopy(self.actor)
         self.target_critic = copy.deepcopy(self.critic)
         self.target_coeff = target_coeff

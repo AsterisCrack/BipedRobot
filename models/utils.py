@@ -106,6 +106,31 @@ class Buffer:
         self.last_steps = 0
         print(f"Loaded buffer from {path}")
 
+class CategoricalWithSupport:
+    def __init__(self, values, logits):
+        self.values = values
+        self.logits = logits
+        self.probabilities = torch.nn.functional.softmax(logits, dim=-1)
+
+    def mean(self):
+        return (self.probabilities * self.values).sum(dim=-1)
+
+    def project(self, returns):
+        vmin, vmax = self.values[0], self.values[-1]
+        d_pos = torch.cat([self.values, vmin[None]], 0)[1:]
+        d_pos = (d_pos - self.values)[None, :, None]
+        d_neg = torch.cat([vmax[None], self.values], 0)[:-1]
+        d_neg = (self.values - d_neg)[None, :, None]
+
+        clipped_returns = torch.clamp(returns, vmin, vmax)
+        delta_values = clipped_returns[:, None] - self.values[None, :, None]
+        delta_sign = (delta_values >= 0).float()
+        delta_hat = ((delta_sign * delta_values / d_pos) -
+                     ((1 - delta_sign) * delta_values / d_neg))
+        delta_clipped = torch.clamp(1 - delta_hat, 0, 1)
+
+        return (delta_clipped * self.probabilities[:, None]).sum(dim=2)
+    
 class SquashedMultivariateNormalDiag:
     def __init__(self, loc, scale):
         self._distribution = torch.distributions.normal.Normal(loc, scale)
@@ -234,7 +259,7 @@ class NormalActionNoise:
         pass
 
 class NoActionNoise:
-    def __init__(self, policy, action_space, seed=None, start_steps=20000):
+    def __init__(self, policy, action_space, seed=None, start_steps=10000):
         self.start_steps = start_steps
         self.policy = policy
         self.action_size = action_space.shape[0]
@@ -257,7 +282,7 @@ class Trainer:
     def __init__(
         self, agent, environment, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3),
         test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None,
-        chekpoint_path=None
+        checkpoint_path=None
     ):
         self.max_steps = steps
         self.epoch_steps = epoch_steps
@@ -275,7 +300,7 @@ class Trainer:
         self.agent = agent
         self.environment = environment
         self.test_environment = test_environment
-        self.checkpoint_path = chekpoint_path if chekpoint_path is not None else f"models/mpo/checkpoints/{time.strftime('%d-%m-%Y_%H:%M:%S')}".replace(" ", "_").replace(":", "-")
+        self.checkpoint_path = checkpoint_path if checkpoint_path is not None else f"models/mpo/checkpoints/{time.strftime('%d-%m-%Y_%H:%M:%S')}".replace(" ", "_").replace(":", "-")
         if not os.path.exists(self.checkpoint_path):
             os.makedirs(self.checkpoint_path)
 
