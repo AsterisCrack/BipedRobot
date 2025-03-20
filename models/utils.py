@@ -5,6 +5,38 @@ import time
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
+class Model:
+    def __init__(self, env, model_path=None, device=torch.device("cpu")):
+        # Load the saved model
+        if model_path:
+            self.model.load_state_dict(torch.load(model_path))
+        
+        self.model.to(device)
+        
+        # Initialize environment with rendering
+        self.env = env
+        
+        self.device = device
+        self.trainer = Trainer(self.agent, self.env)
+        
+    def step(self, observation):
+        action = self.model.actor.forward(torch.tensor(observation).float()).sample().numpy()
+        return action
+    
+    def train(self, seed=42, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3), test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None, checkpoint_path=None):
+        
+        # Initialize trainer
+        self.trainer = Trainer(self.agent, self.env, test_environment, steps, epoch_steps, save_steps, test_episodes, show_progress, replace_checkpoint, log, log_dir, log_name, checkpoint_path)
+        
+        self.trainer.run()
+    
+    def save_trainer_state(self):
+        self.trainer.save_trainer_state()
+        
+    def load_trainer_state(self, path):
+        self.trainer.load_trainer_state(path)
+        
+    
 class Buffer:
     '''Replay storing a large number of transitions for off-policy learning
     and using n-step returns.'''

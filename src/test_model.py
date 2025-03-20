@@ -1,24 +1,24 @@
-from models.networks import ActorCriticWithTargets
 from envs.basic_env import BasicEnv
-from models.mpo.mpo import MPO
+from models.mpo.model import MPOModel
 import torch
 
 def test_model(model_path, episodes=10, episode_length=int(2e4)):
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
     # Initialize environment with rendering
     env = BasicEnv(render_mode="human")
     
     # Initialize networks
-    model = ActorCriticWithTargets(env.observation_space, env.action_space, [256, 256], [256, 256])
-
-    # Load the saved model
-    model.load_state_dict(torch.load(model_path))
+    model = MPOModel(model_path, env, device=device)
 
     # Evaluate the model
     mean_reward = 0
     for episode in range(episodes):
         obs = env.reset()
         for step in range(episode_length):
-            action = model.actor.forward(torch.tensor(obs).float()).sample().numpy()
+            action = model.step(obs)
             # action = model.actor.get_action(torch.from_numpy(obs).float())
             obs, reward, done, _ = env.step(action)
             env.render()

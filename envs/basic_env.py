@@ -330,7 +330,7 @@ class BasicEnv(gym.Env):
         
         orintation_command = np.array([0, 0, 0])  # Desired orientation in yaw, pitch, roll
         # Term to keep in desired orientation
-        yaw_orient = np.exp(-300*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="yaw")))
+        yaw_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="yaw")))
         # Term to keep straight
         pitch_roll_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="pitch_roll")))
         

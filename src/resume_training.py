@@ -24,7 +24,7 @@ def resume_training_train(train_state_path):
     model = ActorCriticWithTargets(env.observation_space, env.action_space, [256, 256], [256, 256], device=device)
     model.to(device)
     
-    # Initialize MPO algorithm
+    # Initialize algorithm
     mpo = MPO(
         action_space=env.action_space,
         model=model,

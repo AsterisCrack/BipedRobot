@@ -1,8 +1,8 @@
 import numpy as np
-from models.mpo.train import MPOTrainer, MPOTrainerLSTM
-from models.ddpg.train import DDPGTrainer
-from models.sac.train import SACTrainer
-from models.d4pg.train import D4PGTrainer
+from models.mpo.model import MPO
+from models.ddpg.model import DDPG
+from models.sac.model import SAC
+from models.d4pg.model import D4PG
 from envs.distributed import distribute
 from envs.basic_env import BasicEnv
 import torch
@@ -12,7 +12,7 @@ def train():
     print(f"Using device: {device}")
     # Set random seed for reproducibility
     seed = 42
-    steps = 10200
+    steps = 7000000
     np.random.seed(seed)
     torch.manual_seed(seed)
     
@@ -21,65 +21,31 @@ def train():
     env = distribute(BasicEnv, 8)
     log_dir = "runs_comparison"
     checkpoint_path = "checkpoints_comparison/"
-    trainer_mpo = MPOTrainer(
-        env=env,
-        model_sizes=[[256, 256], [256, 256]],
-        device=device,
-        log_dir=log_dir,
-        log_name="mpo",
-        steps=steps,
-        checkpoint_path=checkpoint_path+"mpo",
-        seed=seed)
     
-    trainer_lstm = MPOTrainerLSTM(
-        env=env,
-        model_sizes=[[256, 256], [256, 256]],
-        num_workers=8,
-        device=device,
-        log_dir=log_dir,
-        log_name="mpo_lstm",
-        steps=steps,
-        checkpoint_path=checkpoint_path+"mpo_lstm",
-        seed=seed)
-        
-    trainer_ddpg = DDPGTrainer(
-        env=env,
-        model_sizes=[[256, 256], [256, 256]],
-        device=device,
-        log_dir=log_dir,
-        log_name="ddpg",
-        steps=steps,
-        checkpoint_path=checkpoint_path+"ddpg",
-        seed=seed)
+    mpo = MPO(env=env, device=device)
+    mpo_lstm = MPO(env=env, lstm=True, device=device)
+    ddpg = DDPG(env=env, device=device)
+    sac = SAC(env=env, device=device)
+    d4pg = D4PG(env=env, device=device)
     
-    trainer_sac = SACTrainer(
-        env=env,
-        model_sizes=[[256, 256], [256, 256]],
-        device=device,
+    train = lambda model, name: model.train(
         log_dir=log_dir,
-        log_name="sac",
+        log_name=name,
         steps=steps,
-        checkpoint_path=checkpoint_path+"sac",
+        checkpoint_path=checkpoint_path+name,
         seed=seed)
-    
-    trainer_d4pg = D4PGTrainer(
-        env=env,
-        model_sizes=[[256, 256], [256, 256]],
-        device=device,
-        log_dir=log_dir,
-        log_name="d4pg",
-        steps=steps,
-        checkpoint_path=checkpoint_path+"d4pg",
-        seed=seed)
-    
-    # Train agent
+    # Train agents
     # Run in order SAC, D4PG, MPO, DDPG, MPO-LSTM
-    trainer_sac.run()
-    trainer_d4pg.run()
-    trainer_mpo.run()
-    trainer_ddpg.run()
-    trainer_lstm.run()
-    
+    train(sac, "sac")
+    sac.save_trainer_state()
+    train(d4pg, "d4pg")
+    d4pg.save_trainer_state()
+    train(mpo, "mpo")
+    mpo.save_trainer_state()
+    train(ddpg, "ddpg")
+    ddpg.save_trainer_state()
+    train(mpo_lstm, "mpo_lstm")
+    mpo_lstm.save_trainer_state()
     
 if __name__ == "__main__":
     train()

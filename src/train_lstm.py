@@ -25,7 +25,7 @@ def train():
     model = LSTMActorCriticWithTargets(env.observation_space, env.action_space, 256, 2, seq_length=seq_length, device=device)
     model.to(device)
     
-    # Initialize MPO algorithm
+    # Initialize algorithm
     mpo = MPO(
         action_space=env.action_space,
         model=model,
