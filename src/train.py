@@ -5,6 +5,7 @@ from models.sac.model import SAC
 from models.d4pg.model import D4PG
 from envs.distributed import distribute
 from envs.basic_env import BasicEnv
+import os
 import torch
 
 def train():
@@ -18,26 +19,37 @@ def train():
     
     # Initialize environment
     # env = BasicEnv(render_mode="human")
-    env_sequential = distribute(BasicEnv, 1, 8)
-    env_parallel = distribute(BasicEnv, 8, 8)
-    log_dir = "runs_comparison_envs"
-    checkpoint_path = "checkpoints_comparison_envs/"
+    env_sequential = distribute(BasicEnv, 1, 16)
+    # env_parallel = distribute(BasicEnv, 4, 8)
+    log_dir = "runs_reward_tests"
+    checkpoint_path = "checkpoints_reward_tests/"
+    model_name = "d4pg"
+    i=1
+    while model_name in os.listdir(checkpoint_path):
+        model_name = "d4pg" + str(i)
+        i += 1
+    print(f"Model name: {model_name}")
+    d4pg = D4PG(env=env_sequential, device=device)
+    
+    steps = 10000000
+    print("Training ddpg in sequential")
+    d4pg.train(
+        log_dir=log_dir,
+        log_name=model_name,
+        steps=steps,
+        checkpoint_path=checkpoint_path+model_name,
+        seed=seed)
+    d4pg.save_trainer_state()
     
     """mpo = MPO(env=env, device=device)
     mpo_lstm = MPO(env=env, lstm=True, device=device)
     ddpg = DDPG(env=env, device=device)
     sac = SAC(env=env, device=device)"""
-    d4pg_seq = D4PG(env=env_sequential, device=device)
+    """d4pg_seq = D4PG(env=env_sequential, device=device)
     d4pg_par = D4PG(env=env_parallel, device=device)
     
-    train = lambda model, name: model.train(
-        log_dir=log_dir,
-        log_name=name,
-        steps=steps,
-        checkpoint_path=checkpoint_path+name,
-        seed=seed)
-    
     steps = 1000000
+    print("Training ddpg in parallel")
     d4pg_par.train(
         log_dir=log_dir,
         log_name="d4pg_par",
@@ -46,17 +58,25 @@ def train():
         seed=seed)
     d4pg_par.save_trainer_state()
     
+    print("Training ddpg sequentially")
     d4pg_seq.train(
         log_dir=log_dir,
         log_name="d4pg_seq",
         steps=steps,
         checkpoint_path=checkpoint_path+"d4pg_seq",
         seed=seed)
-    d4pg_seq.save_trainer_state()
+    d4pg_seq.save_trainer_state()"""
     
     # Train agents
     # Run in order SAC, D4PG, MPO, DDPG, MPO-LSTM
-    """train(sac, "sac")
+    """
+    train = lambda model, name: model.train(
+        log_dir=log_dir,
+        log_name=name,
+        steps=steps,
+        checkpoint_path=checkpoint_path+name,
+        seed=seed)
+    train(sac, "sac")
     sac.save_trainer_state()
     train(d4pg, "d4pg")
     d4pg.save_trainer_state()

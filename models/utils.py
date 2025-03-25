@@ -20,7 +20,7 @@ class Model:
         self.trainer = Trainer(self.agent, self.env)
         
     def step(self, observation):
-        action = self.model.actor.forward(torch.tensor(observation).float()).sample().numpy()
+        action = self.model.actor.get_action(torch.from_numpy(observation).to(self.device).float())
         return action
     
     def train(self, seed=42, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3), test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None, checkpoint_path=None):
@@ -269,8 +269,11 @@ class MeanStd(torch.nn.Module):
         self._std.data.copy_(torch.as_tensor(self.std, dtype=torch.float32))
 
 class NormalActionNoise:
-    def __init__(self, policy, action_space, scale=0.1, start_steps=10000, seed=None):
+    def __init__(self, policy, action_space, scale=0.3, min_scale=0.03, decay_rate=0.000001, start_steps=10000, seed=None):
         self.scale = scale
+        self.min_scale = min_scale
+        self.decay_rate = decay_rate
+        
         self.start_steps = start_steps
         self.policy = policy
         self.action_size = action_space.shape[0]
@@ -279,7 +282,9 @@ class NormalActionNoise:
     def __call__(self, observations, steps):
         if steps > self.start_steps:
             actions = self.policy(observations)
-            noises = self.scale * self.np_random.normal(size=actions.shape)
+            # Exponential decay of the scale
+            scale = max(self.min_scale, self.scale * np.exp(-self.decay_rate * steps))
+            noises = scale * self.np_random.normal(size=actions.shape)
             actions = (actions + noises).astype(np.float32)
             actions = np.clip(actions, -1, 1)
         else:

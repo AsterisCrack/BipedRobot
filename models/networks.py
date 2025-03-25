@@ -63,8 +63,11 @@ class Actor(nn.Module):
         if self.observation_normalizer:
             observations = self.observation_normalizer(observations)
         out = self.net(observations)
-        actions = self.mean_layer(out)
-        return actions.detach().cpu().numpy()
+        if self.head_type == "gaussian" or self.head_type == "gaussian_multivariate":
+            actions = self.mean_layer(out)
+            return actions.detach().cpu().numpy()
+        else:
+            return self.action_layer(out).detach().cpu().numpy()
 
 class DistributionalValueHead(torch.nn.Module):
     def __init__(self, vmin, vmax, num_atoms, input_size, return_normalizer=None, fn=None, device=torch.device("cpu")):

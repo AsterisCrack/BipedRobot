@@ -4,10 +4,8 @@
 runs/
 tonic/
 *_old*
-*checkpoints/
-*checkpoints_comparison/
-*checkpoints_comparison_envs/
-*runs_comparison_envs/
+*checkpoints*/
+*runs*/
 __pycache__/
 .vscode
 mujoco-3.2.2-windows-x86_64

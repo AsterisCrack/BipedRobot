@@ -1,5 +1,6 @@
 from envs.basic_env import BasicEnv
-from models.mpo.model import MPOModel
+from models.mpo.model import MPO
+from models.d4pg.model import D4PG
 import torch
 
 def test_model(model_path, episodes=10, episode_length=int(2e4)):
@@ -11,7 +12,7 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     env = BasicEnv(render_mode="human")
     
     # Initialize networks
-    model = MPOModel(model_path, env, device=device)
+    model = D4PG(env, model_path=model_path, device=device)
 
     # Evaluate the model
     mean_reward = 0
@@ -32,5 +33,5 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
 
 if __name__ == "__main__":
     #model_path = "models/mpo/checkpoints/Working/step_3665000.pt"
-    model_path = "models/mpo/checkpoints/final_model_2/step_7540000.pt"
+    model_path = "checkpoints_reward_tests\d4pg10\step_7000000.pt"
     test_model(model_path)

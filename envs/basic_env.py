@@ -319,18 +319,30 @@ class BasicEnv(gym.Env):
         # - (minimize control effort) - y^2 (deviation from y axis, keep straight)
         
         #Lets try setting the target speed at 0.6 m/s
-        velocity_command = np.array([0.5, 0, 0])  # Desired velocity
-        velx = self.data.qvel[0]  # Velocity in X direction
-        velx = np.square(velocity_command[0]) - np.square(velx - velocity_command[0])
-        height = np.square(self.original_height - self.data.qpos[2])  # Height difference of the robot
-        servo_diff = np.sum(np.square(self.data.qpos[7:] - self.prev_joint_pos))  # Control effort
+        velocity_command = np.array([0.4, 0, 0])  # Desired velocity
+        height_command = 0.23  # Desired height of the robot
+        vel_diff = np.linalg.norm(self.data.qvel[0:2] - velocity_command[0:2])
+        vel = np.exp(-5*np.square(vel_diff))  # Penalize deviation from desired velocity
+        height = np.exp(-20*np.square(self.data.qpos[2] - height_command))
+        
+        # Action difference
+        action = np.clip(self.data.ctrl, self.action_space.low, self.action_space.high)
+        action_diff = np.sum(np.abs(action - self.prev_actions))  # Control effort
+        action_diff = np.exp(-0.02*action_diff)  # Penalize action difference
+
+        # Recuce torque
+        max_torques = self.model.actuator_forcerange[:, 1]
+        torques = self.data.actuator_force
+        torque = np.exp(-0.02*np.sum(np.abs(torques)/max_torques)/len(torques))  # Penalize torque
+        
         self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
-        axis_deviation = np.square(self.data.qpos[1])
-        base_accel = np.sqrt(np.sum(self.data.qacc[1:3]**2))  # Acceleration of the base, penalize lateral acceleration
+        self.prev_actions = self.data.ctrl.copy()  # Store previous actions for next step
+        
+        base_accel = np.exp(-0.01*np.sum(np.abs(self.data.qacc[0:3])))  # Penalize acceleration of the base
         
         orintation_command = np.array([0, 0, 0])  # Desired orientation in yaw, pitch, roll
         # Term to keep in desired orientation
-        yaw_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="yaw")))
+        yaw_orient = np.exp(-300*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="yaw")))
         # Term to keep straight
         pitch_roll_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="pitch_roll")))
         
@@ -348,48 +360,34 @@ class BasicEnv(gym.Env):
         if self.data.qpos[2] < 0.2:
             terminated = 1
             
-        """# Multipliers for each term
-        step_reward = 0.1
-        vx_reward = 2
-        height_reward = 0
-        effort_reward = -0.02
-        axis_reward = -3
-        yaw_reward = -0.05
-        pitch_roll_reward = -0.05
-        acceleration_reward = -0.01
-        terminated_reward = 0
-        feet_yaw_orient_reward = -0.05
-        
-        # Compute reward
-        forward_reward = \
-            (velx * vx_reward) + \
-            step_reward + \
-            (height * height_reward) + \
-            (servo_diff * effort_reward) + \
-            (axis_deviation * axis_reward) + \
-            (yaw_orient * yaw_reward) + \
-            (pitch_roll_orient * pitch_roll_reward) + \
-            (base_accel * acceleration_reward) + \
-            (feet_yaw_orient * feet_yaw_orient_reward) + \
-            (terminated * terminated_reward)"""
-            
         # Multipliers for each term
-        step_reward = 0.1
-        vx_reward = 2
-        height_reward = 0
-        effort_reward = -0.02
-        axis_reward = -3
-        yaw_reward = -0.05
-        pitch_roll_reward = -0.05
-        terminated_reward = 0
+        """step_reward = 0.1
+        v_reward = 0.15
+        height_reward = 0.05
+        torque_reward = 0.02
+        action_diff_reward = 0.02
+        acceleration_reward = 0.1
+        yaw_reward = 0.1
+        pitch_roll_reward = 0.2
+        terminated_reward = 0"""
+        step_reward = 0.001
+        v_reward = 0.15
+        height_reward = 0.05
+        torque_reward = 0.02
+        action_diff_reward = 0.02
+        acceleration_reward = 0.1
+        yaw_reward = 0.03
+        pitch_roll_reward = 0.02
+        terminated_reward = -0.1
         
         # Compute reward
         forward_reward = \
-            (velx * vx_reward) + \
+            (vel * v_reward) + \
             step_reward + \
             (height * height_reward) + \
-            (servo_diff * effort_reward) + \
-            (axis_deviation * axis_reward) + \
+            (torque_reward * torque) + \
+            (action_diff * action_diff_reward) + \
+            (base_accel * acceleration_reward) + \
             (yaw_orient * yaw_reward) + \
             (pitch_roll_orient * pitch_roll_reward) + \
             (terminated * terminated_reward)
@@ -399,7 +397,7 @@ class BasicEnv(gym.Env):
 
     def _is_terminated(self):
         # Terminate if the robot falls
-        return self.data.qpos[2] < 0.2 or self.data.time > 19 # Z position too low
+        return self.data.qpos[2] < 0.2 # Z position too low
     
     def _initialize_renderer(self):
         if not glfw.init():
