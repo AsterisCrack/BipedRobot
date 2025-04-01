@@ -4,7 +4,7 @@
     <asset>
         <texture type="skybox" builtin="none" file="../textures/skybox.png" gridsize = "3 4" gridlayout = ".U..LFRB.D.." rgb1=".2 .62 .9" rgb2="0 0 0"/>
         <material name="robot_texture" rgba="0.700 0.700 0.700 1.000"/>
-        <material name="red_color" rgba="1 0 0 1"/>
+        <material name="red_translucent" rgba="1 0 0 0.5"/>
         <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1=".1 .2 .3" rgb2=".2 .3 .4"/>
         <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance=".2"/>
 
@@ -38,6 +38,13 @@
     <worldbody>
         <geom name="floor" size="0 0 .05" type="plane" material="grid" condim="3" pos="0 0 0"/>
         <light name="spotlight" mode="targetbodycom" target="torso" diffuse=".8 .8 .8" specular="0.3 0.3 0.3" pos="0 -6 4" cutoff="30"/>
+
+        <!-- Add the visual target -->
+        <body name="visual_target" pos="5 0 0.2">
+            <geom type="sphere" size="0.1" material="red_translucent"
+                  contype="0" conaffinity="0" density="0"/>
+        </body>
+
         <!-- The meshes are placed so that the robot is already built, but the origin is in the floor -->
         <!-- We need to displace the free joint so that we get position measurments from the torso -->
         <body name="root" pos="0.022936 0 0.29416"> <!-- Render the body at the correct position -->

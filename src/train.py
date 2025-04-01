@@ -5,6 +5,7 @@ from models.sac.model import SAC
 from models.d4pg.model import D4PG
 from envs.distributed import distribute
 from envs.basic_env import BasicEnv
+from envs.advanced_env import AdvancedEnv
 import os
 import torch
 
@@ -13,25 +14,24 @@ def train():
     print(f"Using device: {device}")
     # Set random seed for reproducibility
     seed = 42
-    steps = 7000000
     np.random.seed(seed)
     torch.manual_seed(seed)
     
     # Initialize environment
     # env = BasicEnv(render_mode="human")
-    env_sequential = distribute(BasicEnv, 1, 16)
-    # env_parallel = distribute(BasicEnv, 4, 8)
+    # env_sequential = distribute(AdvancedEnv, 1, 16)
+    env_parallel = distribute(AdvancedEnv, 4, 8)
     log_dir = "runs_reward_tests"
     checkpoint_path = "checkpoints_reward_tests/"
-    model_name = "d4pg"
+    model_name = "d4pg_advanced"
     i=1
     while model_name in os.listdir(checkpoint_path):
-        model_name = "d4pg" + str(i)
+        model_name = "d4pg_advanced" + str(i)
         i += 1
     print(f"Model name: {model_name}")
-    d4pg = D4PG(env=env_sequential, device=device)
+    d4pg = D4PG(env=env_parallel, device=device)
     
-    steps = 10000000
+    steps = 20000000
     print("Training ddpg in sequential")
     d4pg.train(
         log_dir=log_dir,
