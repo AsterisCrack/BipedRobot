@@ -35,11 +35,16 @@ class FeetContactBuffer:
 class BasicEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, short_memory_steps=3, long_memory_steps=200, frequency=50):
+        self.frequency = frequency  # Frequency of control updates in Hz
+        self.short_memory_steps = short_memory_steps  # For short term memory (buffer size)
+        self.long_memory_steps = long_memory_steps  # For long term memory (buffer size)
+        
         # Path to robot XML
         xml_path = "envs/assets/robot/Robot_description/urdf/robot_mujoco.xml"
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
+        self.model.opt.timestep = 1.0 / self.frequency  # Set the timestep for the simulation
         self.render_mode = render_mode
         self.max_episode_steps = 1000000  # Large number of steps
         self.l_feet_geom = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "l_foot")
@@ -47,14 +52,14 @@ class BasicEnv(gym.Env):
         self.name = "BasicEnv"
 
         # Observation space: Full state (joint positions and velocities)
-        obs_dim = self.model.nq + self.model.nv  # Positions + velocities
-        low = np.full(obs_dim, -np.inf, dtype=np.float32)
-        high = np.full(obs_dim, np.inf, dtype=np.float32)
+        self.obs_dim = self.model.nq + self.model.nv  # Positions + velocities
+        low = np.full(self.obs_dim, -np.inf, dtype=np.float32)
+        high = np.full(self.obs_dim, np.inf, dtype=np.float32)
         self.observation_space = Box(low=low, high=high, dtype=np.float32)
 
         # Action space: Control position of servos
-        action_dim = self.model.nu
-        self.action_space = Box(low=-np.pi, high=np.pi, shape=(action_dim,), dtype=np.float32)
+        self.action_dim = self.model.nu
+        self.action_space = Box(low=-np.pi, high=np.pi, shape=(self.action_dim,), dtype=np.float32)
 
         # Rendering attributes
         self.window = None
@@ -82,14 +87,34 @@ class BasicEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
         mujoco.mj_forward(self.model, self.data)
+        # Initialize memory buffers
+        # Contain memory_steps lists of [0*obs dim, self.action_dim]
+        self.short_memory_history = [[0 for _ in range(self.obs_dim + self.action_dim)] for _ in range(self.short_memory_steps)]
+        self.long_memory_history = [[0 for _ in range(self.obs_dim + self.action_dim)] for _ in range(self.long_memory_steps)]
+        
+        # Current observation
         obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
+        
+        # Flatten short and long memory histories
+        short_history_flat = [item for sublist in self.short_memory_history for item in sublist]
+        long_history_flat = [item for sublist in self.long_memory_history for item in sublist]
+
+        # Concatenate obs with flattened histories
+        full_obs = np.concatenate([obs, short_history_flat, long_history_flat]).astype(np.float32)
+
+        # Update buffers
+        self.short_memory_history.append(obs)  # Add the current observation to the short memory history
+        self.long_memory_history.append(obs)  # Add the current observation to the long memory history
+        self.short_memory_history = self.short_memory_history[-self.short_memory_steps:]  # Keep only the last `short_memory_steps` entries
+        self.long_memory_history = self.long_memory_history[-self.long_memory_steps:]  # Keep only the last `long_memory_steps` entries
+         
         self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
         self.prev_actions = self.data.ctrl.copy()  # Store previous actions for next step
         self.original_height = self.data.qpos[2]  # Store original height for reward computation
         self.feet_contact_buffer.clear()  # Clear the buffer for feet contact
         self.l_foot_airtime = 0
         self.r_foot_airtime = 0
-        return obs
+        return full_obs
 
     def step(self, action, render_ref_point=False):
         """
@@ -372,13 +397,13 @@ class BasicEnv(gym.Env):
         terminated_reward = 0"""
         step_reward = 0.001
         v_reward = 0.15
-        height_reward = 0.05 / 2
-        torque_reward = 0.02 / 2
-        action_diff_reward = 0.02 / 2
-        acceleration_reward = 0.1 / 2
+        height_reward = 0.05
+        torque_reward = 0.02
+        action_diff_reward = 0.02
+        acceleration_reward = 0.1
         yaw_reward = 0.03
         pitch_roll_reward = 0.02
-        terminated_reward = -0.1 / 2
+        terminated_reward = -0.1
         
         # Compute reward
         forward_reward = \
@@ -441,3 +466,4 @@ class BasicEnv(gym.Env):
             glfw.destroy_window(self.window)
             glfw.terminate()
             self.window = None
+            

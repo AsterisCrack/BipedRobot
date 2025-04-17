@@ -135,7 +135,7 @@ class DDPG():
     DDPG: https://arxiv.org/pdf/1509.02971.pdf
     '''
     def __init__(
-        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, exploration=None, device=torch.device("cpu")
+        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, exploration=None, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu")
     ):
         self.model = model
         self.recurrent_model = recurrent_model
@@ -146,8 +146,8 @@ class DDPG():
         self.num_workers = num_workers
         self.replay = Buffer(return_steps=5, seed=seed) if replay is None else replay
         self.exploration = exploration or NormalActionNoise(self._policy, action_space, seed=seed)
-        self.actor_updater = DeterministicPolicyGradient(model=model, device=device) if actor_updater is None else actor_updater
-        self.critic_updater = DeterministicQLearning(model=model, device=device) if critic_updater is None else critic_updater
+        self.actor_updater = DeterministicPolicyGradient(model=model, device=device, optimizer=actor_optimizer) if actor_updater is None else actor_updater
+        self.critic_updater = DeterministicQLearning(model=model, device=device, optimizer=critic_optimizer) if critic_updater is None else critic_updater
 
     def save(self, path):
         path = path + '.pt'

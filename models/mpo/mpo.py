@@ -11,8 +11,10 @@ class MaximumAPosterioriPolicyOptimization:
         epsilon_mean=1e-3, epsilon_std=1e-6, initial_log_temperature=1.,
         initial_log_alpha_mean=1., initial_log_alpha_std=10.,
         min_log_dual=-18., per_dim_constraining=True, action_penalization=True,
-        actor_optimizer=None, dual_optimizer=None, gradient_clip=0, recurrent_model = False
+        actor_optimizer=None, dual_optimizer=None, gradient_clip=0, recurrent_model = False,
+        config=None
     ):
+        self.config = config
         self.device = device
         self.num_samples = num_samples
         self.epsilon = epsilon
@@ -26,10 +28,12 @@ class MaximumAPosterioriPolicyOptimization:
         self.epsilon_penalty = epsilon_penalty
         self.per_dim_constraining = per_dim_constraining
         self.seq_length = seq_length
+        if self.config is not None:
+            lr = self.config["model"]["actor_lr"]
         self.actor_optimizer = actor_optimizer or (
-            lambda params: torch.optim.Adam(params, lr=3e-4))
+            lambda params: torch.optim.Adam(params, lr=lr))
         self.dual_optimizer = dual_optimizer or (
-            lambda params: torch.optim.Adam(params, lr=1e-3))
+            lambda params: torch.optim.Adam(params, lr=lr))
         self.gradient_clip = gradient_clip
         self.recurrent_model = recurrent_model
         
@@ -365,7 +369,7 @@ class MPO():
     '''
 
     def __init__(
-        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, device=torch.device("cpu")
+        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, actor_optimizer=None,dual_optimizer=None, critic_optimizer=None, device=torch.device("cpu")
     ):
         self.model = model
         self.recurrent_model = recurrent_model
@@ -375,9 +379,9 @@ class MPO():
         self.device = device
         self.num_workers = num_workers
         self.replay = Buffer(return_steps=5, seed=seed) if replay is None else replay
-        self.actor_updater = MaximumAPosterioriPolicyOptimization(self.model, action_space, device, recurrent_model = recurrent_model, seq_length=max_seq_length) \
+        self.actor_updater = MaximumAPosterioriPolicyOptimization(self.model, action_space, device, recurrent_model = recurrent_model, seq_length=max_seq_length, actor_optimizer=actor_optimizer, dual_optimizer=dual_optimizer) \
             if actor_updater is None else actor_updater
-        self.critic_updater = ExpectedSARSA(self.model, batch_size=num_workers, recurrent_model = recurrent_model, seq_length=max_seq_length) \
+        self.critic_updater = ExpectedSARSA(self.model, batch_size=num_workers, recurrent_model = recurrent_model, seq_length=max_seq_length, optimizer=critic_optimizer) \
             if critic_updater is None else critic_updater
         
     def save(self, path):

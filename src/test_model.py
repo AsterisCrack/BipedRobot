@@ -10,8 +10,8 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     print(f"Using device: {device}")
     
     # Initialize environment with rendering
-    # env = BasicEnv(render_mode="human")
-    env = AdvancedEnv(render_mode="human")
+    env = BasicEnv(render_mode="human")
+    # env = AdvancedEnv(render_mode="human")
     # Initialize networks
     model = D4PG(env, model_path=model_path, device=device)
 
@@ -33,6 +33,5 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     env.close()
 
 if __name__ == "__main__":
-    #model_path = "models/mpo/checkpoints/Working/step_3665000.pt"
-    model_path = "checkpoints_reward_tests\d4pg_advanced11\step_4855008.pt"
+    model_path = "checkpoints_optimizers_tests\d4pg_more_yaw_pitch_roll\step_11000000.pt"
     test_model(model_path)

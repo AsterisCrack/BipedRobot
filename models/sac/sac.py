@@ -165,12 +165,12 @@ class SAC(ddpg.DDPG):
 
     def __init__(
         self, action_space, model, max_seq_length=1, num_workers=1,seed=None, replay=None, exploration=None, actor_updater=None,
-        critic_updater=None, recurrent_model=False, device=torch.device("cpu")
+        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu")
     ):
         model = model
         exploration = NoActionNoise(policy=self._policy, action_space=action_space, seed=seed) if exploration is None else exploration
-        actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device) if actor_updater is None else actor_updater
-        critic_updater = TwinCriticSoftQLearning(model=model, device=device) if critic_updater is None else critic_updater
+        actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device, optimizer=actor_optimizer, entropy_coeff=0.2, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if actor_updater is None else actor_updater
+        critic_updater = TwinCriticSoftQLearning(model=model, device=device, optimizer=critic_optimizer, entropy_coeff=0.2, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if critic_updater is None else critic_updater
         
         super().__init__(action_space=action_space, model=model, recurrent_model=recurrent_model, max_seq_length=max_seq_length, num_workers=num_workers, seed=seed, replay=replay, exploration=exploration,
             actor_updater=actor_updater, critic_updater=critic_updater, device=device)

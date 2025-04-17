@@ -1,12 +1,78 @@
 import numpy as np
 import torch
+import torch.optim.lr_scheduler as lr_scheduler
 import os
 import time
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
 
+class NoConfig:
+    def __init__(self, config=None):
+        pass
+
+    def __getitem__(self, key):
+        return NoConfig()
+
+    def __bool__(self):
+        return False
+
+class OptimizerWithScheduler(torch.optim.Optimizer):
+    """ Wrapper for optimizers with a scheduler. """
+    def __init__(self, optimizer, scheduler):
+        self.optimizer = optimizer
+        self.scheduler = scheduler(self.optimizer)
+    
+    def step(self):
+        self.optimizer.step()
+        self.scheduler.step()
+    
+    def zero_grad(self):
+        self.optimizer.zero_grad()
+    
+    def state_dict(self):
+        return {
+            'optimizer': self.optimizer.state_dict(),
+            'scheduler': self.scheduler.state_dict()
+        }
+    
+    def load_state_dict(self, state_dict):
+        self.optimizer.load_state_dict(state_dict['optimizer'])
+        self.scheduler.load_state_dict(state_dict['scheduler'])
+        
+    def __getattr__(self, name):
+        return getattr(self.optimizer, name)
+    
+    def __setattr__(self, name, value):
+        if name in ['optimizer', 'scheduler']:
+            self.__dict__[name] = value
+        else:
+            setattr(self.optimizer, name, value)
+    
 class Model:
-    def __init__(self, env, model_path=None, device=torch.device("cpu")):
+    def __init__(self, env, model_path=None, device=torch.device("cpu"), config=None):
+        
+        self.config = config or NoConfig()
+        # Initialize optimizers and schedulers
+        actor_lr = self.config["model"]["actor_lr"] or 1e-3
+        critic_lr = self.config["model"]["critic_lr"] or 1e-3
+        T_max = self.config["model"]["lr_scheduler"]["T_max"] or 5e5
+        eta_min = self.config["model"]["lr_scheduler"]["eta_min"] or 1e-5
+        self.actor_optimizer = (
+            lambda params: OptimizerWithScheduler(
+                torch.optim.Adam(params, lr=actor_lr),
+                lambda optimizer: lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+            )
+        )
+        self.critic_optimizer = (
+            lambda params: OptimizerWithScheduler(
+                torch.optim.Adam(params, lr=critic_lr),
+                lambda optimizer: lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+            )
+        )
+        """
+        self.actor_optimizer = lambda params: torch.optim.Adam(params, lr=actor_lr)
+        self.critic_optimizer = lambda params: torch.optim.Adam(params, lr=critic_lr)"""
+        
         # Load the saved model
         if model_path:
             self.model.load_state_dict(torch.load(model_path))
@@ -17,16 +83,19 @@ class Model:
         self.env = env
         
         self.device = device
-        self.trainer = Trainer(self.agent, self.env)
+    
+    def _init_trainer(self):
+        '''Initialize the trainer.'''
+        self.trainer = Trainer(self.agent, self.env, config=self.config)
         
     def step(self, observation):
         action = self.model.actor.get_action(torch.from_numpy(observation).to(self.device).float())
         return action
     
-    def train(self, seed=42, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3), test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None, checkpoint_path=None):
+    def train(self, seed=42, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3), test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None, checkpoint_path=None, config=None):
         
         # Initialize trainer
-        self.trainer = Trainer(self.agent, self.env, test_environment, steps, epoch_steps, save_steps, test_episodes, show_progress, replace_checkpoint, log, log_dir, log_name, checkpoint_path)
+        self.trainer = Trainer(self.agent, self.env, test_environment, steps, epoch_steps, save_steps, test_episodes, show_progress, replace_checkpoint, log, log_dir, log_name, checkpoint_path, config)
         
         self.trainer.run()
     
@@ -44,16 +113,18 @@ class Buffer:
     def __init__(
         self, size=int(1e6), return_steps=1, batch_iterations=50,
         batch_size=1024, discount_factor=0.99, steps_before_batches=int(1e4),
-        steps_between_batches=50, seed=None
+        steps_between_batches=50, seed=None, config=None
     ):
-        self.full_max_size = size
-        self.return_steps = return_steps
-        self.batch_iterations = batch_iterations
-        self.batch_size = batch_size
-        self.discount_factor = discount_factor
-        self.steps_before_batches = steps_before_batches
-        self.steps_between_batches = steps_between_batches
-        self.np_random = np.random.RandomState(seed)
+        self.config = config or NoConfig()
+        self.full_max_size = self.config["buffer"]["size"] or size
+        self.return_steps = self.config["buffer"]["return_steps"] or return_steps
+        self.batch_iterations = self.config["buffer"]["batch_iterations"] or batch_iterations
+        self.batch_size = self.config["buffer"]["batch_size"] or batch_size
+        self.discount_factor = self.config["buffer"]["discount_factor"] or discount_factor
+        self.steps_before_batches = self.config["buffer"]["steps_before_batches"] or steps_before_batches
+        self.steps_between_batches = self.config["buffer"]["steps_between_batches"] or steps_between_batches
+        self.seed = self.config["buffer"]["seed"] or seed
+        self.np_random = np.random.RandomState(self.seed)
         self.buffers = None
         self.index = 0
         self.size = 0
@@ -312,26 +383,27 @@ class NoActionNoise:
 
     def update(self, resets):
         pass
-    
+
 class Trainer:
     '''Trainer used to train and evaluate an agent on an environment.'''
 
     def __init__(
         self, agent, environment, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3),
         test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None,
-        checkpoint_path=None
+        checkpoint_path=None, config=None
     ):
-        self.max_steps = steps
-        self.epoch_steps = epoch_steps
-        self.save_steps = save_steps
-        self.test_episodes = test_episodes
-        self.show_progress = show_progress
-        self.replace_checkpoint = replace_checkpoint
+        self.config = config or NoConfig()
+        self.max_steps = self.config["train"]["steps"] or steps
+        self.epoch_steps = self.config["train"]["epoch_steps"] or epoch_steps
+        self.save_steps = self.config["train"]["save_steps"] or save_steps
+        self.test_episodes = self.config["train"]["test_episodes"] or test_episodes
+        self.show_progress = self.config["train"]["show_progress"] or show_progress
+        self.replace_checkpoint = self.config["train"]["replace_checkpoint"] or replace_checkpoint
         # Log the training data to tensorboard.
-        self.log = log
-        log_dir = log_dir if log_dir is not None else "runs"
+        self.log = self.config["train"]["log"] or log
+        log_dir = log_dir or "runs"
         # Logname is dd/MM/YYYY HH:MM:SS if not provided
-        self.log_name = log_name if log_name is not None else str(time.strftime("%d-%m-%Y %H:%M:%S")).replace(" ", "_").replace(":", "-")
+        self.log_name = log_name or str(time.strftime("%d-%m-%Y %H:%M:%S")).replace(" ", "_").replace(":", "-")
         self.log_dir = os.path.join(log_dir, self.log_name)
         
         self.agent = agent
@@ -358,6 +430,9 @@ class Trainer:
         print(f"Saving trainer state to {path}...")
         os.makedirs(path, exist_ok=True)
         self.agent.save_train_state(path)
+        
+        # Save the config file used
+        self.config.copy_in_file(path + "config.yaml")
         
     def load_trainer_state(self, path):
         '''Loads the state of the trainer.'''
