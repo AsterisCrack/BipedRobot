@@ -35,19 +35,25 @@ class FeetContactBuffer:
 class BasicEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, short_history_size=0, long_history_size=0, sim_frequency=0.33):
+        super().__init__()
         # Path to robot XML
         xml_path = "envs/assets/robot/Robot_description/urdf/robot_mujoco.xml"
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data = mujoco.MjData(self.model)
         self.render_mode = render_mode
-        self.max_episode_steps = 1000000  # Large number of steps
+        self.max_episode_steps = 2000  # Large number of steps
         self.l_feet_geom = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "l_foot")
         self.r_feet_geom = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "r_foot")
         self.name = "BasicEnv"
+        
+        # Set the simulation frequency
+        self.model.opt.timestep = 1.0 / sim_frequency
 
         # Observation space: Full state (joint positions and velocities)
-        obs_dim = self.model.nq + self.model.nv  # Positions + velocities
+        obs_dim = self.model.nq + self.model.nv + \
+            short_history_size * (self.model.nq + self.model.nv + self.model.nu) + \
+            long_history_size * (self.model.nq + self.model.nv + self.model.nu)
         low = np.full(obs_dim, -np.inf, dtype=np.float32)
         high = np.full(obs_dim, np.inf, dtype=np.float32)
         self.observation_space = Box(low=low, high=high, dtype=np.float32)
@@ -55,6 +61,12 @@ class BasicEnv(gym.Env):
         # Action space: Control position of servos
         action_dim = self.model.nu
         self.action_space = Box(low=-np.pi, high=np.pi, shape=(action_dim,), dtype=np.float32)
+        
+        # Start history and long history
+        self.short_history_size = short_history_size
+        self.long_history_size = long_history_size
+        self.short_history = np.zeros((self.short_history_size, self.model.nq+self.model.nv+action_dim), dtype=np.float32)
+        self.long_history = np.zeros((self.long_history_size, self.model.nq+self.model.nv+action_dim), dtype=np.float32)
 
         # Rendering attributes
         self.window = None
@@ -83,9 +95,18 @@ class BasicEnv(gym.Env):
         mujoco.mj_resetData(self.model, self.data)
         mujoco.mj_forward(self.model, self.data)
         obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
+        # reset history
+        if self.short_history_size > 0:
+            self.short_history = np.zeros((self.short_history_size, self.short_history.shape[1]), dtype=np.float32)
+        if self.long_history_size > 0:
+            self.long_history = np.zeros((self.long_history_size, self.long_history.shape[1]), dtype=np.float32)
+            obs = np.concatenate([obs, self.short_history.flatten(), self.long_history.flatten()])
+            
         self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
         self.prev_actions = self.data.ctrl.copy()  # Store previous actions for next step
         self.original_height = self.data.qpos[2]  # Store original height for reward computation
+        self.l_foot_orientation_command = self._get_geom_orientation(self.r_feet_geom)
+        self.r_foot_orientation_command = self._get_geom_orientation(self.l_feet_geom)
         self.feet_contact_buffer.clear()  # Clear the buffer for feet contact
         self.l_foot_airtime = 0
         self.r_foot_airtime = 0
@@ -102,11 +123,22 @@ class BasicEnv(gym.Env):
             First 3 are linear velocities, next 3 are angular velocities, finally n joints with the velocity of each joint.
         """
         # print("Action received:", action)
+        # First, store the previous observation and actions in the history
         action = np.clip(action, self.action_space.low, self.action_space.high)
+        if self.short_history_size > 0:
+            self.short_history = np.roll(self.short_history, -1, axis=0)
+            self.short_history[-1] = np.concatenate([self.data.qpos, self.data.qvel, action]).astype(np.float32)
+        if self.long_history_size > 0:
+            self.long_history = np.roll(self.long_history, -1, axis=0)
+            self.long_history[-1] = np.concatenate([self.data.qpos, self.data.qvel, action]).astype(np.float32)
+            
         self.data.ctrl[:] = action
         mujoco.mj_step(self.model, self.data)
             
         obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
+        # Add history to the observation
+        if self.long_history_size > 0:
+            obs = np.concatenate([obs, self.short_history.flatten(), self.long_history.flatten()])
     
         terminated = self._is_terminated()
         reward = self._compute_reward()
@@ -169,10 +201,7 @@ class BasicEnv(gym.Env):
         # Get the orientation of a specific geometry
         # Extract the rotation matrix and convert it to a quaternion
         # Geom is the geometry id
-        geom_mat = self.data.geom_xmat[geom]
-        # Convert the rotation matrix to a quaternion
-        rotation = scipy.spatial.transform.Rotation.from_matrix(geom_mat.reshape(3, 3))
-        quaternion = rotation.as_quat()
+        quaternion = self.data.xquat[geom]
         return quaternion
     
     def _get_geom_position(self, geom):
@@ -187,7 +216,7 @@ class BasicEnv(gym.Env):
         velocity_command = np.array([0.6, 0, 0])  # Desired velocity
         if standing:
             velocity_command = np.array([0, 0, 0])
-        orintation_command = np.array([0, 0, 0])  # Desired orientation in yaw, pitch, roll
+        orientation_command = np.array([0, 0, 0])  # Desired orientation in yaw, pitch, roll
         height_command = self.original_height  # Desired height of the robot
 
         l_foot_orientation_command = np.array([0, 0, 0]) # Desired orientation of the left foot in yaw, pitch, roll
@@ -200,9 +229,9 @@ class BasicEnv(gym.Env):
         velocity = np.exp(-5*np.square(vel_diff)) if not standing else np.exp(-5*vel_diff)
 
         # Term to keep in desired orientation
-        yaw_orient = np.exp(-300*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="yaw")))
+        yaw_orient = np.exp(-300*(self._quaternion_distance(self.data.qpos[3:7], orientation_command, axis="yaw")))
         # Term to keep straight
-        pitch_roll_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="pitch_roll")))
+        pitch_roll_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orientation_command, axis="pitch_roll")))
 
         # Feet contact with ground
         # Store feet contact in buffer
@@ -244,7 +273,7 @@ class BasicEnv(gym.Env):
         l_foot_orientation_euler = scipy.spatial.transform.Rotation.from_quat(self._get_geom_orientation(self.l_feet_geom)).as_euler('zyx')
         r_foot_orientation_euler = scipy.spatial.transform.Rotation.from_quat(self._get_geom_orientation(self.r_feet_geom)).as_euler('zyx')
         # If yaw orientation commanded > 0:
-        if np.abs(orintation_command[0]) > 0:
+        if np.abs(orientation_command[0]) > 0:
             # Only take into account roll and pitch
             l_foot_orientation_euler[0] = 0
             r_foot_orientation_euler[0] = 0
@@ -320,9 +349,12 @@ class BasicEnv(gym.Env):
         
         #Lets try setting the target speed at 0.6 m/s
         velocity_command = np.array([0.4, 0, 0])  # Desired velocity
+        min_velocity = 0.1  # Minimum velocity to consider the robot moving
         height_command = 0.23  # Desired height of the robot
         vel_diff = np.linalg.norm(self.data.qvel[0:2] - velocity_command[0:2])
         vel = np.exp(-5*np.square(vel_diff))  # Penalize deviation from desired velocity
+        if np.linalg.norm(self.data.qvel[0:2]) < min_velocity:
+            vel = -1  # Penalize if the robot is not moving
         height = np.exp(-20*np.square(self.data.qpos[2] - height_command))
         
         # Action difference
@@ -340,20 +372,19 @@ class BasicEnv(gym.Env):
         
         base_accel = np.exp(-0.01*np.sum(np.abs(self.data.qacc[0:3])))  # Penalize acceleration of the base
         
-        orintation_command = np.array([0, 0, 0])  # Desired orientation in yaw, pitch, roll
+        orientation_command = np.array([0, 0, 0])  # Desired orientation in yaw, pitch, roll
         # Term to keep in desired orientation
-        yaw_orient = np.exp(-300*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="yaw")))
+        yaw_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orientation_command, axis="yaw")))
         # Term to keep straight
-        pitch_roll_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orintation_command, axis="pitch_roll")))
+        pitch_roll_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orientation_command, axis="pitch_roll")))
         
         # Feet orientation
-        """l_foot_orientation_command = np.array([0, 0, 0]) # Desired orientation of the left foot in yaw, pitch, roll
-        r_foot_orientation_command = np.array([0, 0, 0]) # Desired orientation of the right foot in yaw, pitch, roll
-        r_foot_jaw = self._get_geom_orientation(self.r_feet_geom)
-        l_foot_jaw = self._get_geom_orientation(self.l_feet_geom)
-        l_foot_yaw_orient = np.exp(-300*(self._quaternion_distance(l_foot_jaw, l_foot_orientation_command, axis="yaw")))
-        r_foot_yaw_orient = np.exp(-300*(self._quaternion_distance(r_foot_jaw, r_foot_orientation_command, axis="yaw")))
-        feet_yaw_orient = l_foot_yaw_orient + r_foot_yaw_orient"""
+        r_foot_orient = self._get_geom_orientation(self.r_feet_geom)
+        l_foot_orient = self._get_geom_orientation(self.l_feet_geom)
+
+        l_foot_orient_diff = np.abs(self._quaternion_distance(l_foot_orient, self.l_foot_orientation_command, axis="yaw_roll"))
+        r_foot_orient_diff = np.abs(self._quaternion_distance(r_foot_orient, self.r_foot_orientation_command, axis="yaw_roll"))
+        feet_orient = np.exp(-30*(l_foot_orient_diff + r_foot_orient_diff))
         
         # The robot fell
         terminated = 0
@@ -372,12 +403,14 @@ class BasicEnv(gym.Env):
         terminated_reward = 0"""
         step_reward = 0.001
         v_reward = 0.15
-        height_reward = 0.05 / 2
+        #height_reward = 0.05 / 2
+        height_reward = 0
         torque_reward = 0.02 / 2
         action_diff_reward = 0.02 / 2
         acceleration_reward = 0.1 / 2
-        yaw_reward = 0.03
-        pitch_roll_reward = 0.02
+        yaw_reward = 0.02
+        pitch_roll_reward = 0.04
+        feet_orient_reward = 0.1
         terminated_reward = -0.1 / 2
         
         # Compute reward
@@ -390,8 +423,8 @@ class BasicEnv(gym.Env):
             (base_accel * acceleration_reward) + \
             (yaw_orient * yaw_reward) + \
             (pitch_roll_orient * pitch_roll_reward) + \
+            (feet_orient * feet_orient_reward) + \
             (terminated * terminated_reward)
-        #forward_reward = velx + step_reward
             
         return forward_reward
 

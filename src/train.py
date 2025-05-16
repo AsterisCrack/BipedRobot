@@ -22,7 +22,17 @@ def train(config):
     # Initialize environment
     worker_groups = config["train"]["worker_groups"] or 4
     workers_per_group = config["train"]["workers_per_group"] or 8
-    env = distribute(BasicEnv, worker_groups, workers_per_group)
+    max_episode_steps = config["train"]["max_episode_steps"] or 2000
+    use_history = config["train"]["use_history"] or False
+    short_history_size = config["train"]["short_history_size"] or 0
+    long_history_size = config["train"]["long_history_size"] or 0
+    sim_frequency = config["train"]["sim_frequency"] or 100
+    
+    if not use_history:
+        env_builder = lambda: BasicEnv(sim_frequency=sim_frequency)
+    else:
+        env_builder = lambda: BasicEnv(sim_frequency=sim_frequency, short_history_size=short_history_size, long_history_size=long_history_size)
+    env = distribute(env_builder, worker_groups, workers_per_group, max_episode_steps=max_episode_steps)
     log_dir = config["train"]["log_dir"] or "runs"
     checkpoint_path = config["train"]["checkpoint_path"] or "checkpoints/" 
     model_name = config["train"]["model_name"] or "model"
@@ -39,8 +49,10 @@ def train(config):
     print(f"Model name: {model_name}")
     
     # Initialize model
-    model_sizes = config["model"]["model_sizes"] or [[256, 256], [256, 256]]
-    model_init = lambda model: model(env=env, device=device, model_sizes=model_sizes, config=config)
+    actor_sizes = config["model"]["actor_sizes"] or [256, 256]
+    critic_sizes = config["model"]["critic_sizes"] or [256, 256]
+    model_sizes = [actor_sizes, critic_sizes]
+    model_init = lambda model: model(env=env, device=device, model_sizes=model_sizes, config=config, use_history=use_history, long_history_size=long_history_size, short_history_size=short_history_size)
     match config["train"]["model"].lower():
         case "mpo":
             model = model_init(MPO)
@@ -74,6 +86,7 @@ def train(config):
     
     
 if __name__ == "__main__":
+    # config_file = "config/train_history_config.yaml"
     config_file = "config/train_config.yaml"
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=config_file, help="Path to the config file")

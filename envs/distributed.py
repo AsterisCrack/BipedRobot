@@ -140,11 +140,8 @@ class Parallel:
         return observations, infos
 
 
-def distribute(environment_builder, worker_groups=1, workers_per_group=1):
+def distribute(environment_builder, worker_groups=1, workers_per_group=1, max_episode_steps=2000):
     '''Distributes workers over parallel and sequential groups.'''
-    dummy_environment = environment_builder()
-    max_episode_steps = dummy_environment.max_episode_steps
-    del dummy_environment
 
     if worker_groups < 2:
         return Sequential(

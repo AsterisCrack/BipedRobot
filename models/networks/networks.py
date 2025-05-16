@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 import copy
 from models.utils import MeanStd, SquashedMultivariateNormalDiag, CategoricalWithSupport
+from models.networks.advanced_networks import AdvancedActor, AdvancedCritic
 
 class Actor(nn.Module):
     def __init__(self, observation_space, action_space, hidden_sizes, observation_normalizer=None, head_type="gaussian"):
@@ -249,13 +250,18 @@ class LSTMCritic(nn.Module):
         return value
     
 class ActorCriticWithTargets(nn.Module):
-    def __init__(self, obs_space, action_space, actor_sizes, critic_sizes, actor_type="gaussian", critic_type="deterministic", target_coeff=0.005, device=torch.device("cpu")):
+    def __init__(self, obs_space, action_space, actor_sizes, critic_sizes, actor_type="gaussian", critic_type="deterministic", use_history=False, long_history_size=0, short_history_size=0, target_coeff=0.005, device=torch.device("cpu")):
         super().__init__()
         self.obs_space = obs_space
         self.observation_normalizer = MeanStd(shape=obs_space.shape)
         self.return_normalizer = None
-        self.actor = Actor(obs_space, action_space, actor_sizes, self.observation_normalizer, actor_type)
-        self.critic = Critic(obs_space, action_space, critic_sizes, self.observation_normalizer, critic_type)
+        if not use_history:
+            self.actor = Actor(obs_space, action_space, actor_sizes, self.observation_normalizer, actor_type)
+            self.critic = Critic(obs_space, action_space, critic_sizes, self.observation_normalizer, critic_type)
+        else:
+            # Actor sizes are different here. Separate them for the actor and critic
+            self.actor = AdvancedActor(obs_space, long_history_size, short_history_size, action_space, actor_sizes[0], actor_sizes[1], self.observation_normalizer, actor_type)
+            self.critic = AdvancedCritic(obs_space, long_history_size, short_history_size, action_space, critic_sizes[0], critic_sizes[1], self.observation_normalizer, critic_type, DistributionalValueHead)
         self.target_actor = copy.deepcopy(self.actor)
         self.target_critic = copy.deepcopy(self.critic)
         self.target_coeff = target_coeff
@@ -287,13 +293,19 @@ class ActorCriticWithTargets(nn.Module):
                 target_param.data.add_(self.target_coeff * param.data)
                 
 class ActorTwinCriticWithTargets(nn.Module):
-    def __init__(self, obs_space, action_space, actor_sizes, critic_sizes, actor_type="gaussian", target_coeff=0.005, device=torch.device("cpu")):
+    def __init__(self, obs_space, action_space, actor_sizes, critic_sizes, actor_type="gaussian", use_history=False, long_history_size=0, short_history_size=0, target_coeff=0.005, device=torch.device("cpu")):
         super().__init__()
         self.obs_space = obs_space
         self.observation_normalizer = MeanStd(shape=obs_space.shape)
         self.return_normalizer = None
-        self.actor = Actor(obs_space, action_space, actor_sizes, self.observation_normalizer, actor_type)
-        self.critic_1 = Critic(obs_space, action_space, critic_sizes, self.observation_normalizer)
+        if not use_history:
+            self.actor = Actor(obs_space, action_space, actor_sizes, self.observation_normalizer, actor_type)
+            self.critic_1 = Critic(obs_space, action_space, critic_sizes, self.observation_normalizer)
+        else:
+            # Actor sizes are different here. Separate them for the actor and critic
+            self.actor = AdvancedActor(obs_space, long_history_size, short_history_size, action_space, actor_sizes[0], actor_sizes[1], self.observation_normalizer, actor_type)
+            self.critic1 = AdvancedCritic(obs_space, long_history_size, short_history_size, action_space, critic_sizes[0], critic_sizes[1], self.observation_normalizer, DistributionalValueHead)
+        
         self.critic_2 = copy.deepcopy(self.critic_1)
         self.target_actor = copy.deepcopy(self.actor)
         self.target_critic_1 = copy.deepcopy(self.critic_1)
