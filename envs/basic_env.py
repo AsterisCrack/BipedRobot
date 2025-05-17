@@ -100,6 +100,7 @@ class BasicEnv(gym.Env):
             self.short_history = np.zeros((self.short_history_size, self.short_history.shape[1]), dtype=np.float32)
         if self.long_history_size > 0:
             self.long_history = np.zeros((self.long_history_size, self.long_history.shape[1]), dtype=np.float32)
+        if self.short_history_size > 0 or self.long_history_size > 0:
             obs = np.concatenate([obs, self.short_history.flatten(), self.long_history.flatten()])
             
         self.prev_joint_pos = self.data.qpos[7:].copy()  # Store previous joint positions for next step
@@ -137,7 +138,7 @@ class BasicEnv(gym.Env):
             
         obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
         # Add history to the observation
-        if self.long_history_size > 0:
+        if self.long_history_size > 0 or self.short_history_size > 0:
             obs = np.concatenate([obs, self.short_history.flatten(), self.long_history.flatten()])
     
         terminated = self._is_terminated()

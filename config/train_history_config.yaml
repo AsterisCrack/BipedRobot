@@ -6,13 +6,13 @@ train:
   max_episode_steps: 2000
   worker_groups: 1
   workers_per_group: 8
-  sim_frequency: 33
+  sim_frequency: 50
   use_history: True
   short_history_size: 4
-  long_history_size: 66
+  long_history_size: 0
   log_dir: runs_history_tests
   checkpoint_path: checkpoints_history_tests/
-  model_name: history_feet_orient
+  model_name: history_no_long
   overwrite_model: False
 
   model: d4pg

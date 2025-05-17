@@ -30,18 +30,27 @@ class AdvancedActor(nn.Module):
         
         # Main net (1D CNN for long history and MLP for short history)
         assert len(cnn_sizes) == 2, "CNN sizes must be a list of two tuples (kernel_size, out_channels, stride)"
-        assert len(cnn_sizes[0]) == 3 and len(cnn_sizes[1]) == 3, "Each CNN size tuple must contain (kernel_size, out_channels, stride)"
-        self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=cnn_sizes[0][1], kernel_size=cnn_sizes[0][0], stride=cnn_sizes[0][2]),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=cnn_sizes[0][1], out_channels=cnn_sizes[1][1], kernel_size=cnn_sizes[1][0], stride=cnn_sizes[1][2]),
-            nn.ReLU(),
-            nn.Flatten()
-        )
-        # Main net (MLP with ReLU activations)
-        # Calculate the output size of the CNN
-        cnn_out_size = ((self.long_history_size*(self.observation_size + self.action_size) - cnn_sizes[0][0]) // cnn_sizes[0][2]) + 1
-        cnn_out_size = ((cnn_out_size - cnn_sizes[1][0]) // cnn_sizes[1][2]) + 1
+        if self.long_history_size != 0:
+            assert len(cnn_sizes[0]) == 3 and len(cnn_sizes[1]) == 3, "Each CNN size tuple must contain (kernel_size, out_channels, stride)"
+            self.cnn = nn.Sequential(
+                nn.Conv1d(in_channels=1, out_channels=cnn_sizes[0][1], kernel_size=cnn_sizes[0][0], stride=cnn_sizes[0][2]),
+                nn.ReLU(),
+                nn.Conv1d(in_channels=cnn_sizes[0][1], out_channels=cnn_sizes[1][1], kernel_size=cnn_sizes[1][0], stride=cnn_sizes[1][2]),
+                nn.ReLU(),
+                nn.Flatten()
+            )
+            # Main net (MLP with ReLU activations)
+            # Calculate the output size of the CNN
+            cnn_out_size = ((self.long_history_size*(self.observation_size + self.action_size) - cnn_sizes[0][0]) // cnn_sizes[0][2]) + 1
+            cnn_out_size = ((cnn_out_size - cnn_sizes[1][0]) // cnn_sizes[1][2]) + 1
+        else:
+            cnn_out_size = 0
+            self.cnn = None
+        
+        print("Observation size: ", self.observation_size)
+        print("Long history size: ", self.long_history_size)
+        print("Short history size: ", self.short_history_size)
+        print("CNN out size: ", cnn_out_size)
         sizes = [self.observation_size + self.short_history_size*(self.observation_size + self.action_size) +  cnn_out_size*cnn_sizes[1][1]] + hidden_sizes
         layers = []
         for i in range(len(sizes) - 1):
@@ -73,12 +82,17 @@ class AdvancedActor(nn.Module):
             observations = self.observation_normalizer(observations)
             
         # Split observations into long history and short history
-        long_history = observations[:, -self.long_history_size*(self.observation_size+self.action_size):]
-        observations = observations[:, :-self.long_history_size*(self.observation_size+self.action_size)]
+        if self.long_history_size != 0:
+            long_history = observations[:, -self.long_history_size*(self.observation_size+self.action_size):]
+            observations = observations[:, :-self.long_history_size*(self.observation_size+self.action_size)]
         
-        cnn_out = self.cnn(long_history.unsqueeze(1))
-        # Concatenate the CNN output with the observations
-        out = torch.cat([cnn_out, observations], dim=-1)
+            cnn_out = self.cnn(long_history.unsqueeze(1))
+            # Concatenate the CNN output with the observations
+            out = torch.cat([cnn_out, observations], dim=-1)
+        else:
+            # No long history, just use the short history
+            out = observations
+            
         out = self.net(out)
         if self.head_type == "gaussian":
             mean = self.mean_layer(out)
@@ -117,18 +131,23 @@ class AdvancedCritic(nn.Module):
         
         # Main net (1D CNN for long history and MLP for short history)
         assert len(cnn_sizes) == 2, "CNN sizes must be a list of two tuples (kernel_size, out_channels, stride)"
-        assert len(cnn_sizes[0]) == 3 and len(cnn_sizes[1]) == 3, "Each CNN size tuple must contain (kernel_size, out_channels, stride)"
-        self.cnn = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=cnn_sizes[0][1], kernel_size=cnn_sizes[0][0], stride=cnn_sizes[0][2]),
-            nn.ReLU(),
-            nn.Conv1d(in_channels=cnn_sizes[0][1], out_channels=cnn_sizes[1][1], kernel_size=cnn_sizes[1][0], stride=cnn_sizes[1][2]),
-            nn.ReLU(),
-            nn.Flatten()
-        )
-        # Main net (MLP with ReLU activations)
-        # Calculate the output size of the CNN
-        cnn_out_size = ((self.long_history_size*(self.observation_size + self.action_size) - cnn_sizes[0][0]) // cnn_sizes[0][2]) + 1
-        cnn_out_size = ((cnn_out_size - cnn_sizes[1][0]) // cnn_sizes[1][2]) + 1
+        if self.long_history_size != 0:
+            assert len(cnn_sizes[0]) == 3 and len(cnn_sizes[1]) == 3, "Each CNN size tuple must contain (kernel_size, out_channels, stride)"
+            self.cnn = nn.Sequential(
+                nn.Conv1d(in_channels=1, out_channels=cnn_sizes[0][1], kernel_size=cnn_sizes[0][0], stride=cnn_sizes[0][2]),
+                nn.ReLU(),
+                nn.Conv1d(in_channels=cnn_sizes[0][1], out_channels=cnn_sizes[1][1], kernel_size=cnn_sizes[1][0], stride=cnn_sizes[1][2]),
+                nn.ReLU(),
+                nn.Flatten()
+            )
+            # Main net (MLP with ReLU activations)
+            # Calculate the output size of the CNN
+            cnn_out_size = ((self.long_history_size*(self.observation_size + self.action_size) - cnn_sizes[0][0]) // cnn_sizes[0][2]) + 1
+            cnn_out_size = ((cnn_out_size - cnn_sizes[1][0]) // cnn_sizes[1][2]) + 1
+        else:
+            cnn_out_size = 0
+            self.cnn = None
+            
         sizes = [self.observation_size + self.short_history_size*(self.observation_size + self.action_size) +  cnn_out_size*cnn_sizes[1][1] + self.action_size] + hidden_sizes
         layers = []
         for i in range(len(sizes) - 1):
@@ -162,14 +181,17 @@ class AdvancedCritic(nn.Module):
             observations = self.pool(observations.transpose(1, 2)).transpose(1, 2)
             # Now reshape to (batch_size, observation_size)
             observations = observations.reshape(actions.shape[0], -1)
-        
-        # Split observations into long history and short history
-        long_history = observations[:, -self.long_history_size*(self.observation_size+self.action_size):]
-        observations = observations[:, :-self.long_history_size*(self.observation_size+self.action_size)]
-        
-        cnn_out = self.cnn(long_history.unsqueeze(1))
-        # Concatenate the CNN output with the observations
-        out = torch.cat([cnn_out, observations, actions], dim=-1)
+        if self.long_history_size != 0:
+            # Split observations into long history and short history
+            long_history = observations[:, -self.long_history_size*(self.observation_size+self.action_size):]
+            observations = observations[:, :-self.long_history_size*(self.observation_size+self.action_size)]
+            
+            cnn_out = self.cnn(long_history.unsqueeze(1))
+            # Concatenate the CNN output with the observations
+            out = torch.cat([cnn_out, observations, actions], dim=-1)
+        else:
+            # No long history, just use the short history
+            out = torch.cat([observations, actions], dim=-1)
         out = self.net(out)
         if self.critic_type == "deterministic":
             value = self.value_layer(out)
