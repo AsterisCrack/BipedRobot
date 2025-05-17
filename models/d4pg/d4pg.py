@@ -130,12 +130,12 @@ class D4PG(ddpg.DDPG):
 
     def __init__(
         self, action_space, model, max_seq_length=1, num_workers=1, seed=None, replay=None, exploration=None, actor_updater=None,
-        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu")
+        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu"), config=None
     ):
         model = model
-        self.replay = Buffer(return_steps=5) if replay is None else replay
+        replay = Buffer(return_steps=5, seed=seed, device=device, config=config) if replay is None else replay
         actor_updater = DistributionalDeterministicPolicyGradient(model=model, action_space=action_space, device=device, recurrent_model=recurrent_model, optimizer=actor_optimizer, seq_length=max_seq_length) if actor_updater is None else actor_updater
         critic_updater = DistributionalDeterministicQLearning(model=model, device=device, recurrent_model=recurrent_model, optimizer=critic_optimizer, seq_length=max_seq_length) if critic_updater is None else critic_updater
         
         super().__init__(action_space=action_space, model=model, recurrent_model=recurrent_model, max_seq_length=max_seq_length, num_workers=num_workers, seed=seed, replay=replay, exploration=exploration,
-            actor_updater=actor_updater, critic_updater=critic_updater, device=device)
+            actor_updater=actor_updater, critic_updater=critic_updater, device=device, config=config)

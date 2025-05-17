@@ -369,7 +369,7 @@ class MPO():
     '''
 
     def __init__(
-        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, actor_optimizer=None,dual_optimizer=None, critic_optimizer=None, device=torch.device("cpu")
+        self, action_space, model, recurrent_model=False, max_seq_length=1, num_workers=1, seed=None, replay=None, actor_updater=None, critic_updater=None, actor_optimizer=None,dual_optimizer=None, critic_optimizer=None, device=torch.device("cpu"), config=None
     ):
         self.model = model
         self.recurrent_model = recurrent_model
@@ -378,10 +378,10 @@ class MPO():
         self.action_memory = np.zeros((max_seq_length, num_workers, model.actor.action_size), dtype=np.float32) if recurrent_model else None
         self.device = device
         self.num_workers = num_workers
-        self.replay = Buffer(return_steps=5, seed=seed) if replay is None else replay
-        self.actor_updater = MaximumAPosterioriPolicyOptimization(self.model, action_space, device, recurrent_model = recurrent_model, seq_length=max_seq_length, actor_optimizer=actor_optimizer, dual_optimizer=dual_optimizer) \
+        self.replay = Buffer(return_steps=5, seed=seed, device=device, config=config) if replay is None else replay
+        self.actor_updater = MaximumAPosterioriPolicyOptimization(self.model, action_space, device, recurrent_model = recurrent_model, seq_length=max_seq_length, actor_optimizer=actor_optimizer, dual_optimizer=dual_optimizer, config=config) \
             if actor_updater is None else actor_updater
-        self.critic_updater = ExpectedSARSA(self.model, batch_size=num_workers, recurrent_model = recurrent_model, seq_length=max_seq_length, optimizer=critic_optimizer) \
+        self.critic_updater = ExpectedSARSA(self.model, batch_size=num_workers, recurrent_model = recurrent_model, seq_length=max_seq_length, optimizer=critic_optimizer, config=config) \
             if critic_updater is None else critic_updater
         
     def save(self, path):

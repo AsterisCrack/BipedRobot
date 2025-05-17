@@ -33,5 +33,5 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     env.close()
 
 if __name__ == "__main__":
-    model_path = "checkpoints_optimizers_tests\d4pg_feet_orient_no_height6\step_6500000.pt"
+    model_path = "checkpoints_optimizers_tests\d4pg_feet_orient_no_height6\step_17000000.pt"
     test_model(model_path)

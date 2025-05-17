@@ -382,8 +382,8 @@ class BasicEnv(gym.Env):
         r_foot_orient = self._get_geom_orientation(self.r_feet_geom)
         l_foot_orient = self._get_geom_orientation(self.l_feet_geom)
 
-        l_foot_orient_diff = np.abs(self._quaternion_distance(l_foot_orient, self.l_foot_orientation_command, axis="yaw_roll"))
-        r_foot_orient_diff = np.abs(self._quaternion_distance(r_foot_orient, self.r_foot_orientation_command, axis="yaw_roll"))
+        l_foot_orient_diff = np.abs(self._quaternion_distance(l_foot_orient, self.l_foot_orientation_command, axis="yaw_pitch_roll"))
+        r_foot_orient_diff = np.abs(self._quaternion_distance(r_foot_orient, self.r_foot_orientation_command, axis="yaw_pitch_roll"))
         feet_orient = np.exp(-30*(l_foot_orient_diff + r_foot_orient_diff))
         
         # The robot fell

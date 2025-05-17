@@ -113,10 +113,12 @@ class Buffer:
     def __init__(
         self, size=int(1e6), return_steps=1, batch_iterations=50,
         batch_size=1024, discount_factor=0.99, steps_before_batches=int(1e4),
-        steps_between_batches=50, seed=None, config=None
+        steps_between_batches=50, seed=None, config=None, device=torch.device("cpu")
     ):
+        self.device = device
         self.config = config or NoConfig()
-        self.full_max_size = self.config["buffer"]["size"] or size
+        self.full_max_size = int(self.config["buffer"]["size"] or size)
+        
         self.return_steps = self.config["buffer"]["return_steps"] or return_steps
         self.batch_iterations = self.config["buffer"]["batch_iterations"] or batch_iterations
         self.batch_size = self.config["buffer"]["batch_size"] or batch_size
@@ -124,7 +126,6 @@ class Buffer:
         self.steps_before_batches = self.config["buffer"]["steps_before_batches"] or steps_before_batches
         self.steps_between_batches = self.config["buffer"]["steps_between_batches"] or steps_between_batches
         self.seed = self.config["buffer"]["seed"] or seed
-        self.np_random = np.random.RandomState(self.seed)
         self.buffers = None
         self.index = 0
         self.size = 0
@@ -140,18 +141,24 @@ class Buffer:
             continuations = np.float32(1 - kwargs['terminations'])
             kwargs['discounts'] = continuations * self.discount_factor
 
+        
         # Create the named buffers.
         if self.buffers is None:
             self.num_workers = len(list(kwargs.values())[0])
             self.max_size = self.full_max_size // self.num_workers
             self.buffers = {}
             for key, val in kwargs.items():
-                shape = (self.max_size,) + np.array(val).shape
-                self.buffers[key] = np.full(shape, np.nan, np.float32)
+                shape = (self.max_size,) + tuple(int(x) for x in np.array(val).shape)
+                self.buffers[key] = torch.full(shape, float("nan"), dtype=torch.float32, device=self.device)
 
         # Store the new values.
         for key, val in kwargs.items():
+            if not torch.is_tensor(val):
+                val = torch.tensor(val, dtype=torch.float32, device=self.device)
+            else:
+                val = val.to(dtype=torch.float32, device=self.device)
             self.buffers[key][self.index] = val
+            
         # Accumulate values for n-step returns.
         if self.return_steps > 1:
             self.accumulate_n_steps(kwargs)
@@ -163,7 +170,7 @@ class Buffer:
         rewards = kwargs['rewards']
         next_observations = kwargs['next_observations']
         discounts = kwargs['discounts']
-        masks = np.ones(self.num_workers, np.float32)
+        masks = torch.ones(self.num_workers, dtype=torch.float32, device=self.device)
         for i in range(min(self.size, self.return_steps - 1)):
             index = (self.index - i - 1) % self.max_size
             masks *= (1 - self.buffers['resets'][index])
@@ -186,7 +193,7 @@ class Buffer:
 
         for _ in range(self.batch_iterations):
             total_size = self.size * self.num_workers
-            indices = self.np_random.randint(total_size, size=self.batch_size)
+            indices = torch.randint(0, total_size, (self.batch_size,), device=self.device)
             rows = indices // self.num_workers
             columns = indices % self.num_workers
             yield {k: self.buffers[k][rows, columns] for k in keys}

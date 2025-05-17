@@ -13,6 +13,7 @@ import argparse
 
 def train(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cpu")
     print(f"Using device: {device}")
     # Set random seed for reproducibility
     seed = 42 or config["train"]["seed"]
@@ -87,7 +88,7 @@ def train(config):
     
 if __name__ == "__main__":
     # config_file = "config/train_history_config.yaml"
-    config_file = "config/train_config.yaml"
+    config_file = "config/train_history_config.yaml"
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=config_file, help="Path to the config file")
     args = parser.parse_args()

@@ -16,6 +16,7 @@ class SAC(Model):
             actor_optimizer=self.actor_optimizer,
             critic_optimizer=self.critic_optimizer,
             device=device,
+            config=config,
         )
         
         self._init_trainer()
