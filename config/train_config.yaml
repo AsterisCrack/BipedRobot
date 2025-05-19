@@ -1,7 +1,7 @@
 train:
   seed: 42
   steps: 20000000
-  max_episode_steps: 2000
+  max_episode_steps: 4000
   worker_groups: 1
   workers_per_group: 8
   sim_frequency: 100
@@ -10,7 +10,7 @@ train:
   long_history_size: 0
   log_dir: runs_optimizers_tests
   checkpoint_path: checkpoints_optimizers_tests/
-  model_name: d4pg_feet_orient_no_height
+  model_name: d4pg_feet_orient_full
   overwrite_model: False
 
   model: d4pg
@@ -36,7 +36,7 @@ model:
 
 buffer:
   size: 1e6
-  return_steps: 1
+  return_steps: 5
   batch_iterations: 50
   batch_size: 1024
   discount_factor: 0.99

@@ -47,10 +47,6 @@ class AdvancedActor(nn.Module):
             cnn_out_size = 0
             self.cnn = None
         
-        print("Observation size: ", self.observation_size)
-        print("Long history size: ", self.long_history_size)
-        print("Short history size: ", self.short_history_size)
-        print("CNN out size: ", cnn_out_size)
         sizes = [self.observation_size + self.short_history_size*(self.observation_size + self.action_size) +  cnn_out_size*cnn_sizes[1][1]] + hidden_sizes
         layers = []
         for i in range(len(sizes) - 1):

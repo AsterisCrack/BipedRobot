@@ -170,6 +170,22 @@ class Buffer:
         rewards = kwargs['rewards']
         next_observations = kwargs['next_observations']
         discounts = kwargs['discounts']
+        
+        # Ensure all are torch tensors on the correct device
+        if not torch.is_tensor(rewards):
+            rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+        else:
+            rewards = rewards.to(dtype=torch.float32, device=self.device)
+        if not torch.is_tensor(next_observations):
+            next_observations = torch.tensor(next_observations, dtype=torch.float32, device=self.device)
+        else:
+            next_observations = next_observations.to(dtype=torch.float32, device=self.device)
+        if not torch.is_tensor(discounts):
+            discounts = torch.tensor(discounts, dtype=torch.float32, device=self.device)
+        else:
+            discounts = discounts.to(dtype=torch.float32, device=self.device)
+
+        # Accumulate n-step returns.
         masks = torch.ones(self.num_workers, dtype=torch.float32, device=self.device)
         for i in range(min(self.size, self.return_steps - 1)):
             index = (self.index - i - 1) % self.max_size
