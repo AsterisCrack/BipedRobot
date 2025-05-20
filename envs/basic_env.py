@@ -3,7 +3,7 @@ from gymnasium.spaces import Box
 import numpy as np
 import mujoco
 from mujoco.glfw import glfw
-from utils import free_camera_movement
+from utils import free_camera_movement, NoConfig
 import scipy.spatial.transform
 
 # Buffer to store timesteps and if there is a feet contacting the ground
@@ -35,7 +35,7 @@ class FeetContactBuffer:
 class BasicEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, render_mode=None, short_history_size=0, long_history_size=0, sim_frequency=0.33, randomize_dynamics=False, randomize_sensors=False, randomize_perturbations=False, random_config=None, seed=None):
+    def __init__(self, render_mode=None, short_history_size=0, long_history_size=0, sim_frequency=0.33, randomize_dynamics=False, randomize_sensors=False, randomize_perturbations=False, random_config=NoConfig(), seed=None):
         
         super().__init__()
         # Path to robot XML
@@ -55,6 +55,8 @@ class BasicEnv(gym.Env):
         self.randomize_sensors = randomize_sensors
         self.randomize_perturbations = randomize_perturbations
         self.random_config = random_config
+        self.imu_noise_std = 0.0
+        self.vel_noise_std = 0.0
         if (randomize_dynamics or randomize_sensors or randomize_perturbations) and random_config is None:
             raise ValueError("random_config must be provided if randomize_dynamics, randomize_sensors or randomize_perturbations are True.")
         self.t_last_perturbation = 0

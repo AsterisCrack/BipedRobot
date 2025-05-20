@@ -1,5 +1,15 @@
 import yaml
 
+class NoConfig:
+    def __init__(self, config=None):
+        pass
+
+    def __getitem__(self, key):
+        return NoConfig()
+
+    def __bool__(self):
+        return False
+    
 class ConfigSubdict:
     def __init__(self, data):
         self.data = data

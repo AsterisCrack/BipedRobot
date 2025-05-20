@@ -10,7 +10,22 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     print(f"Using device: {device}")
     
     # Initialize environment with rendering
-    env = BasicEnv(render_mode="human", sim_frequency=100)
+    randomization = {
+        "randomize_dynamics": False,
+        "randomize_sensors": False,
+        "randomize_perturbations": False,
+        "friction": [0.5, 1.5],
+        "joint_damping": [0.5, 1,5],
+        "mass": [0.5, 1.5],
+        "inertia": [0.7, 1.3],
+        "imu_noise": 0.01,
+        "vel_noise": 0.02,
+        "t_perturbation": [0.1, 3],
+        "force": [-3, 3]
+    }
+    
+    env = BasicEnv(render_mode="human", sim_frequency=100, randomize_dynamics=randomization["randomize_dynamics"], randomize_sensors=randomization["randomize_sensors"], randomize_perturbations=randomization["randomize_perturbations"], random_config=randomization, seed=42)
+    
     # env = AdvancedEnv(render_mode="human")
     # Initialize networks
     model = D4PG(env, model_path=model_path, device=device)

@@ -5,16 +5,7 @@ import os
 import time
 from tensorboardX import SummaryWriter
 from tqdm import tqdm
-
-class NoConfig:
-    def __init__(self, config=None):
-        pass
-
-    def __getitem__(self, key):
-        return NoConfig()
-
-    def __bool__(self):
-        return False
+from utils import NoConfig
 
 class OptimizerWithScheduler(torch.optim.Optimizer):
     """ Wrapper for optimizers with a scheduler. """
