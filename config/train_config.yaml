@@ -10,7 +10,7 @@ train:
   long_history_size: 0
   log_dir: runs_optimizers_tests
   checkpoint_path: checkpoints_optimizers_tests/
-  model_name: d4pg_feet_orient_full
+  model_name: d4pg_com_center
   overwrite_model: False
 
   model: d4pg

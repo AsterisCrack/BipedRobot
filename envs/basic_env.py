@@ -35,7 +35,8 @@ class FeetContactBuffer:
 class BasicEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, render_mode=None, short_history_size=0, long_history_size=0, sim_frequency=0.33):
+    def __init__(self, render_mode=None, short_history_size=0, long_history_size=0, sim_frequency=0.33, randomize_dynamics=False, randomize_sensors=False, randomize_perturbations=False, random_config=None, seed=None):
+        
         super().__init__()
         # Path to robot XML
         xml_path = "envs/assets/robot/Robot_description/urdf/robot_mujoco.xml"
@@ -46,6 +47,18 @@ class BasicEnv(gym.Env):
         self.l_feet_geom = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "l_foot")
         self.r_feet_geom = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "r_foot")
         self.name = "BasicEnv"
+        
+        # Set the random seed for reproducibility
+        if seed is not None:
+            np.random.seed(seed)
+        self.randomize_dynamics = randomize_dynamics
+        self.randomize_sensors = randomize_sensors
+        self.randomize_perturbations = randomize_perturbations
+        self.random_config = random_config
+        if (randomize_dynamics or randomize_sensors or randomize_perturbations) and random_config is None:
+            raise ValueError("random_config must be provided if randomize_dynamics, randomize_sensors or randomize_perturbations are True.")
+        self.t_last_perturbation = 0
+        self.t_next_perturbation = 0
         
         # Set the simulation frequency
         self.model.opt.timestep = 1.0 / sim_frequency
@@ -93,8 +106,20 @@ class BasicEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
+        
+        if self.randomize_dynamics or self.randomize_sensors:
+            self.randomize_env()
+            
         mujoco.mj_forward(self.model, self.data)
-        obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
+        
+        # Get observation
+        qpos = self.data.qpos.copy()
+        qvel = self.data.qvel.copy()
+        # Add noise to orientation and velocity if enabled
+        qpos[3:7] += np.random.normal(0, self.imu_noise_std, size=4)  # quaternion noise
+        qvel[0:3] += np.random.normal(0, self.vel_noise_std, size=3)  # linear velocity noise
+        obs = np.concatenate([qpos, qvel]).astype(np.float32)
+        
         # reset history
         if self.short_history_size > 0:
             self.short_history = np.zeros((self.short_history_size, self.short_history.shape[1]), dtype=np.float32)
@@ -111,19 +136,75 @@ class BasicEnv(gym.Env):
         self.feet_contact_buffer.clear()  # Clear the buffer for feet contact
         self.l_foot_airtime = 0
         self.r_foot_airtime = 0
+        self.t_last_perturbation = 0
+        next_perturbation_config = self.random_config["t_perturbation"] or [0.1, 3]
+        self.t_next_perturbation = np.random.uniform(next_perturbation_config[0], next_perturbation_config[1])
         return obs
+    
+    def randomize_env(self):
+        # --- Dynamics randomization ---
+        if self.randomize_dynamics:
+            # Ground friction
+            floor_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+            friction_config = self.random_config["friction"] or [0.5, 1.5]
+            self.model.geom_friction[floor_id][:] = np.random.uniform(friction_config[0], friction_config[1], size=3)
 
+            # Joint damping
+            joint_damping_config = self.random_config["joint_damping"] or [0.5, 1,5]
+            self.model.dof_damping[:] *= np.random.uniform(joint_damping_config[0], joint_damping_config[1], size=self.model.nv)
+
+            # Link mass & inertia
+            mass_config = self.random_config["mass"] or [0.5, 1.5]
+            self.model.body_mass[:] *= np.random.uniform(mass_config[0], mass_config[1], size=self.model.nbody)
+            inertia_config = self.random_config["inertia"] or [0.7, 1.3]
+            self.model.body_inertia[:] *= np.random.uniform(inertia_config[0], inertia_config[1], size=self.model.body_inertia.shape)
+
+        # --- Sensor noise (applied during observation retrieval) ---
+        if self.randomize_sensors:
+            self.imu_noise_std = self.random_config["imu_noise"] or 0.01  # rad/s
+            self.vel_noise_std = self.random_config["vel_noise"] or 0.02  # m/s
+        else:
+            self.imu_noise_std = 0.0
+            self.vel_noise_std = 0.0
+
+    def apply_random_perturbation(self):
+        if not self.randomize_perturbations:
+            return
+        sim_t = self.data.time
+        if sim_t - self.t_last_perturbation > self.t_next_perturbation:
+            # Reset perturbation time
+            self.t_last_perturbation = sim_t
+            next_perturbation_config = self.random_config["t_perturbation"] or [0.1, 3]
+            self.t_next_perturbation = np.random.uniform(next_perturbation_config[0], next_perturbation_config[1])
+            
+            # Apply random perturbation
+            force_config = self.random_config["force"] or [-3, 3]
+            force = np.random.uniform([force_config[0], force_config[0], force_config[0]], [force_config[1], force_config[1], force_config[1]])
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "torso")
+            # Get the 3D position of the torso body
+            point = self.data.xpos[body_id]  # shape (3,)
+
+            # Ensure all arrays are float64 and correct shape
+            force = np.asarray(force, dtype=np.float64).reshape(3)
+            torque = np.zeros(3, dtype=np.float64)
+            qfrc_target = self.data.qfrc_applied  # already correct shape and dtype
+
+            mujoco.mj_applyFT(
+                self.model,
+                self.data,
+                force,
+                torque,
+                point,
+                body_id,
+                qfrc_target
+            )
+            
     def step(self, action, render_ref_point=False):
         """
         Apply action and step the simulation.
         returns observation, reward, done, truncated, and info.
         observation is composed of a concatenation of positions and velocities.
-        Positions, length = 7 + n joints.
-            First 3 are x, y, z, next 4 are rotation quaternion, finally n joints with the position of each joint.
-        Velocities, length = 6 + n joints.
-            First 3 are linear velocities, next 3 are angular velocities, finally n joints with the velocity of each joint.
         """
-        # print("Action received:", action)
         # First, store the previous observation and actions in the history
         action = np.clip(action, self.action_space.low, self.action_space.high)
         if self.short_history_size > 0:
@@ -132,11 +213,21 @@ class BasicEnv(gym.Env):
         if self.long_history_size > 0:
             self.long_history = np.roll(self.long_history, -1, axis=0)
             self.long_history[-1] = np.concatenate([self.data.qpos, self.data.qvel, action]).astype(np.float32)
-            
+        
+        # Apply random perturbation
+        self.apply_random_perturbation()
+        
+        # Step the simulation
         self.data.ctrl[:] = action
         mujoco.mj_step(self.model, self.data)
             
-        obs = np.concatenate([self.data.qpos, self.data.qvel]).astype(np.float32)  # Convert to float32
+        # Get observation
+        qpos = self.data.qpos.copy()
+        qvel = self.data.qvel.copy()
+        # Add noise to orientation and velocity if enabled
+        qpos[3:7] += np.random.normal(0, self.imu_noise_std, size=4)  # quaternion noise
+        qvel[0:3] += np.random.normal(0, self.vel_noise_std, size=3)  # linear velocity noise
+        obs = np.concatenate([qpos, qvel]).astype(np.float32)
         # Add history to the observation
         if self.long_history_size > 0 or self.short_history_size > 0:
             obs = np.concatenate([obs, self.short_history.flatten(), self.long_history.flatten()])
@@ -212,144 +303,10 @@ class BasicEnv(gym.Env):
         return geom_pos
     
     def _compute_reward(self):
-        """# Target commands
-        standing = False
-        velocity_command = np.array([0.6, 0, 0])  # Desired velocity
-        if standing:
-            velocity_command = np.array([0, 0, 0])
-        orientation_command = np.array([0, 0, 0])  # Desired orientation in yaw, pitch, roll
-        height_command = self.original_height  # Desired height of the robot
-
-        l_foot_orientation_command = np.array([0, 0, 0]) # Desired orientation of the left foot in yaw, pitch, roll
-        r_foot_orientation_command = np.array([0, 0, 0]) # Desired orientation of the right foot in yaw, pitch, roll
-        l_foot_pos_command = np.array([0, 0, 0])  # Desired position of the left foot
-        r_foot_pos_command = np.array([0, 0, 0])  # Desired position of the right foot
-
-        # Difference between current and desired velocity
-        vel_diff = np.linalg.norm(self.data.qvel[0:3] - velocity_command)
-        velocity = np.exp(-5*np.square(vel_diff)) if not standing else np.exp(-5*vel_diff)
-
-        # Term to keep in desired orientation
-        yaw_orient = np.exp(-300*(self._quaternion_distance(self.data.qpos[3:7], orientation_command, axis="yaw")))
-        # Term to keep straight
-        pitch_roll_orient = np.exp(-30*(self._quaternion_distance(self.data.qpos[3:7], orientation_command, axis="pitch_roll")))
-
-        # Feet contact with ground
-        # Store feet contact in buffer
-        if self._one_feet_in_contact():
-            sim_time = self.data.time
-            self.feet_contact_buffer.add(sim_time)
-            
-        feet_contact = 0
-        if standing:
-            feet_contact = 1
-        else:
-            if self.feet_contact_buffer.get(self.data.time) > 0:
-                feet_contact = 1
-
-        # Height difference from the desired height
-        height = np.exp(-20*np.abs(self.data.qpos[2] - height_command))  # Height difference of the robot
-
-        # Feet airtime
-        l_feet_in_contact = self._feet_in_contact(self.l_feet_geom)
-        r_feet_in_contact = self._feet_in_contact(self.r_feet_geom)
-        #If the foot is in contact and the airtime is reseted, then this timestep is a touchdown
-        l_foot_touchdown = l_feet_in_contact and self.l_foot_airtime == 0
-        r_foot_touchdown = r_feet_in_contact and self.r_foot_airtime == 0
-        feet_airtime = 0
-        if standing:
-            feet_airtime = 1
-        else:
-            if self.feet_contact_buffer.get(self.data.time) > 0:
-                l = (self.data.time - self.l_foot_airtime -0.4) * l_foot_touchdown
-                r = (self.data.time - self.r_foot_airtime -0.4) * r_foot_touchdown
-                feet_airtime = l + r
-        # When the foot is lifted, the airtime is reseted
-        if not l_feet_in_contact and self.l_foot_airtime == 0:
-            self.l_foot_airtime = self.data.time
-        if not r_feet_in_contact and self.r_foot_airtime == 0:
-            self.r_foot_airtime = self.data.time
-
-        # Feet orientation
-        l_foot_orientation_euler = scipy.spatial.transform.Rotation.from_quat(self._get_geom_orientation(self.l_feet_geom)).as_euler('zyx')
-        r_foot_orientation_euler = scipy.spatial.transform.Rotation.from_quat(self._get_geom_orientation(self.r_feet_geom)).as_euler('zyx')
-        # If yaw orientation commanded > 0:
-        if np.abs(orientation_command[0]) > 0:
-            # Only take into account roll and pitch
-            l_foot_orientation_euler[0] = 0
-            r_foot_orientation_euler[0] = 0
-        # Calculate the difference
-        l_foot_diff = np.sum(np.abs(l_foot_orientation_euler - l_foot_orientation_command))
-        r_foot_diff = np.sum(np.abs(r_foot_orientation_euler - r_foot_orientation_command))
-        feet_orientation = np.exp(-(l_foot_diff + r_foot_diff))
-
-        # Foot position
-        l_foot_pos = self._get_geom_position(self.l_feet_geom)
-        r_foot_pos = self._get_geom_position(self.r_feet_geom)
-        feet_position = 1
-        if standing:
-            l_foot_diff = np.linalg.norm(l_foot_pos - l_foot_pos_command)
-            r_foot_diff = np.linalg.norm(r_foot_pos - r_foot_pos_command)
-            feet_position = np.exp(-3*(l_foot_diff + r_foot_diff))
-            
-        # Base acceleration
-        base_accel = np.sum(np.abs(self.data.qacc[0:3]))
-        base_accel = np.exp(-0.01*base_accel)  # Penalize acceleration of the base
-
-        # Action difference
-        action = np.clip(self.data.ctrl, self.action_space.low, self.action_space.high)
-        action_diff = np.sum(np.abs(action - self.prev_actions))  # Control effort
-        action_diff = np.exp(-0.02*action_diff)  # Penalize action difference
-
-        # Recuce torque
-        max_torques = self.model.actuator_forcerange[:, 1]
-        torques = self.data.actuator_force
-        torque = np.exp(-0.01*np.sum(np.abs(torques)/max_torques)/len(torques))  # Penalize torque
-
-        # Multipliers for each term
-        vel_reward = 0.15
-        yaw_reward = 0.1
-        pitch_roll_reward = 0.2
-        feet_contact_reward = 0.1
-        height_reward = 0.05
-        airtime_reward = 1 # Higher because it is sparse
-        feet_orientation_reward = 0.05
-        feet_position_reward = 0.05
-        accel_reward = 0.1
-        action_diff_reward = 0.02
-        torque_reward = 0.02
-
-        # For testing purposes, set rewards to 0
-        feet_contact = 0
-        feet_airtime = 0
-        feet_orientation = 0
-        feet_position = 0
-        torque = 0
-        accel_reward = 0
-        action_diff_reward = 0
-        # Compute reward
-        forward_reward = \
-            vel_reward * velocity + \
-            yaw_reward * yaw_orient + \
-            pitch_roll_reward * pitch_roll_orient + \
-            feet_contact_reward * feet_contact + \
-            height_reward * height + \
-            airtime_reward * feet_airtime + \
-            feet_orientation_reward * feet_orientation + \
-            feet_position_reward * feet_position + \
-            accel_reward * base_accel + \
-            action_diff_reward * action_diff + \
-            torque_reward * torque
-        # print("Reward components:", velocity, yaw_orient, pitch_roll_orient, feet_contact, height, feet_airtime, feet_orientation, feet_position, base_accel, action_diff, torque)
-        # print("Total reward:", forward_reward)
-        return forward_reward
-        """
-        # Reward function consists of:
-        # velx + fixed reward for each step - (height-desired height)^2
-        # - (minimize control effort) - y^2 (deviation from y axis, keep straight)
         
+        # Reward function consists of:
         #Lets try setting the target speed at 0.6 m/s
-        velocity_command = np.array([0.4, 0, 0])  # Desired velocity
+        velocity_command = np.array([0.6, 0, 0])  # Desired velocity
         min_velocity = 0.1  # Minimum velocity to consider the robot moving
         height_command = 0.23  # Desired height of the robot
         vel_diff = np.linalg.norm(self.data.qvel[0:2] - velocity_command[0:2])
@@ -387,6 +344,18 @@ class BasicEnv(gym.Env):
         r_foot_orient_diff = np.abs(self._quaternion_distance(r_foot_orient, self.r_foot_orientation_command, axis="yaw_pitch_roll"))
         feet_orient = np.exp(-30*(l_foot_orient_diff + r_foot_orient_diff))
         
+        # Keep COM between feet for stability
+        com_pos = self.data.qpos[0:3]  # torso or base COM (x, y, z)
+        l_foot_pos = self.data.geom_xpos[self.l_feet_geom][:3]
+        r_foot_pos = self.data.geom_xpos[self.r_feet_geom][:3]
+        
+        feet_midpoint = 0.5 * (l_foot_pos + r_foot_pos)
+        horizontal_offset = np.linalg.norm(com_pos[:2] - feet_midpoint[:2])
+        torso_centering = np.exp(-20 * horizontal_offset**2)
+
+
+
+        
         # The robot fell
         terminated = 0
         if self.data.qpos[2] < 0.2:
@@ -411,7 +380,8 @@ class BasicEnv(gym.Env):
         acceleration_reward = 0.1 / 2
         yaw_reward = 0.02
         pitch_roll_reward = 0.04
-        feet_orient_reward = 0.1
+        feet_orient_reward = 0.2
+        torso_centering_reward = 0.1
         terminated_reward = -0.1 / 2
         
         # Compute reward
@@ -425,6 +395,7 @@ class BasicEnv(gym.Env):
             (yaw_orient * yaw_reward) + \
             (pitch_roll_orient * pitch_roll_reward) + \
             (feet_orient * feet_orient_reward) + \
+            (torso_centering * torso_centering_reward) + \
             (terminated * terminated_reward)
             
         return forward_reward
