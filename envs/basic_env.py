@@ -3,7 +3,7 @@ from gymnasium.spaces import Box
 import numpy as np
 import mujoco
 from mujoco.glfw import glfw
-from utils import free_camera_movement, NoConfig
+from utils import free_camera_movement, NoConfig, mirror_observation, mirror_action
 import scipy.spatial.transform
 
 # Buffer to store timesteps and if there is a feet contacting the ground
@@ -35,7 +35,7 @@ class FeetContactBuffer:
 class BasicEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, render_mode=None, short_history_size=0, long_history_size=0, sim_frequency=0.33, randomize_dynamics=False, randomize_sensors=False, randomize_perturbations=False, random_config=NoConfig(), seed=None):
+    def __init__(self, render_mode=None, short_history_size=0, long_history_size=0, sim_frequency=100, randomize_dynamics=False, randomize_sensors=False, randomize_perturbations=False, random_config=NoConfig(), seed=None):
         
         super().__init__()
         # Path to robot XML
@@ -49,8 +49,8 @@ class BasicEnv(gym.Env):
         self.name = "BasicEnv"
         
         # Set the random seed for reproducibility
-        if seed is not None:
-            np.random.seed(seed)
+        """if seed is not None:
+            np.random.seed(seed)"""
         self.randomize_dynamics = randomize_dynamics
         self.randomize_sensors = randomize_sensors
         self.randomize_perturbations = randomize_perturbations
@@ -103,11 +103,17 @@ class BasicEnv(gym.Env):
         self.feet_contact_buffer = FeetContactBuffer(max_time=0.2)
         self.l_foot_airtime = 0
         self.r_foot_airtime = 0
+        
+        # Mirror observation and action functions in half of the runs for data augmentation
+        self.mirror = False
         self.reset()
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
+        
+        # self.mirror = np.random.rand() < 0.5
+        self.mirror =False
         
         if self.randomize_dynamics or self.randomize_sensors:
             self.randomize_env()
@@ -121,6 +127,9 @@ class BasicEnv(gym.Env):
         qpos[3:7] += np.random.normal(0, self.imu_noise_std, size=4)  # quaternion noise
         qvel[0:3] += np.random.normal(0, self.vel_noise_std, size=3)  # linear velocity noise
         obs = np.concatenate([qpos, qvel]).astype(np.float32)
+        # Mirror observation if enabled
+        if self.mirror:
+            obs = mirror_observation(obs, self.model.nu)
         
         # reset history
         if self.short_history_size > 0:
@@ -209,6 +218,9 @@ class BasicEnv(gym.Env):
         """
         # First, store the previous observation and actions in the history
         action = np.clip(action, self.action_space.low, self.action_space.high)
+        # Mirror action if enabled
+        if self.mirror:
+            action = mirror_action(action, self.model.nu)
         if self.short_history_size > 0:
             self.short_history = np.roll(self.short_history, -1, axis=0)
             self.short_history[-1] = np.concatenate([self.data.qpos, self.data.qvel, action]).astype(np.float32)
@@ -229,7 +241,11 @@ class BasicEnv(gym.Env):
         # Add noise to orientation and velocity if enabled
         qpos[3:7] += np.random.normal(0, self.imu_noise_std, size=4)  # quaternion noise
         qvel[0:3] += np.random.normal(0, self.vel_noise_std, size=3)  # linear velocity noise
+        
         obs = np.concatenate([qpos, qvel]).astype(np.float32)
+        # Mirror observation if enabled
+        if self.mirror:
+            obs = mirror_observation(obs, self.model.nu)
         # Add history to the observation
         if self.long_history_size > 0 or self.short_history_size > 0:
             obs = np.concatenate([obs, self.short_history.flatten(), self.long_history.flatten()])
@@ -307,8 +323,8 @@ class BasicEnv(gym.Env):
     def _compute_reward(self):
         
         # Reward function consists of:
-        #Lets try setting the target speed at 0.6 m/s
-        velocity_command = np.array([0.6, 0, 0])  # Desired velocity
+        #Lets try setting the target speed at 0.5 m/s
+        velocity_command = np.array([0.5, 0, 0])  # Desired velocity
         min_velocity = 0.1  # Minimum velocity to consider the robot moving
         height_command = 0.23  # Desired height of the robot
         vel_diff = np.linalg.norm(self.data.qvel[0:2] - velocity_command[0:2])

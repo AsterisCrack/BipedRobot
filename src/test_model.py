@@ -11,8 +11,8 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     
     # Initialize environment with rendering
     randomization = {
-        "randomize_dynamics": False,
-        "randomize_sensors": False,
+        "randomize_dynamics": True,
+        "randomize_sensors": True,
         "randomize_perturbations": False,
         "friction": [0.5, 1.5],
         "joint_damping": [0.5, 1,5],
@@ -21,10 +21,10 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
         "imu_noise": 0.01,
         "vel_noise": 0.02,
         "t_perturbation": [0.1, 3],
-        "force": [-3, 3]
+        "force": [-1, 1]
     }
     
-    env = BasicEnv(render_mode="human", sim_frequency=100, randomize_dynamics=randomization["randomize_dynamics"], randomize_sensors=randomization["randomize_sensors"], randomize_perturbations=randomization["randomize_perturbations"], random_config=randomization, seed=42)
+    env = BasicEnv(render_mode="human", sim_frequency=100, randomize_dynamics=randomization["randomize_dynamics"], randomize_sensors=randomization["randomize_sensors"], randomize_perturbations=randomization["randomize_perturbations"], random_config=randomization)
     
     # env = AdvancedEnv(render_mode="human")
     # Initialize networks
@@ -48,5 +48,6 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     env.close()
 
 if __name__ == "__main__":
-    model_path = "checkpoints_optimizers_tests\d4pg_feet_orient_full2\step_7800000.pt"
+    model_path = "checkpoints_optimizers_tests\d4pg_com_center_random2\step_250000.pt"
+    # model_path = "checkpoints_optimizers_tests\d4pg_com_center\step_9100000.pt"
     test_model(model_path)

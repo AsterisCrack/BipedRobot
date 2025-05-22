@@ -10,7 +10,7 @@ train:
   long_history_size: 0
   log_dir: runs_optimizers_tests
   checkpoint_path: checkpoints_optimizers_tests/
-  model_name: d4pg_com_center
+  model_name: d4pg_com_center_random
   overwrite_model: False
 
   model: d4pg
@@ -47,7 +47,7 @@ buffer:
 randomization:
   randomize_dynamics: True
   randomize_sensors: True
-  randomize_perturbations: True
+  randomize_perturbations: False
   friction: [0.5, 1.5]
   joint_damping: [0.5, 1,5]
   mass: [0.5, 1.5]
@@ -55,6 +55,6 @@ randomization:
   imu_noise: 0.01
   vel_noise: 0.02
   t_perturbation: [0.1, 3]
-  force: [-3, 3]
+  force: [-1, 1]
 
 
