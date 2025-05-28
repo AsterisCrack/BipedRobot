@@ -74,10 +74,9 @@ def mirror_observation(obs, n_joints):
     Returns:
     - mirrored_obs: np.array, mirrored observation
     """
-    """obs = obs.copy()
+    obs = obs.copy()
     
     # Indices
-    pos_start = 0
     quat_start = 3
     joint_start = 7
     vel_start = 7 + n_joints
@@ -93,34 +92,34 @@ def mirror_observation(obs, n_joints):
     # 3. Swap joint angles (first half <-> second half)
     joint_angles = obs[joint_start:vel_start]
     half = n_joints // 2
-    obs[joint_start:vel_start] = np.concatenate([joint_angles[half:], joint_angles[:half]])*-1
+    obs[joint_start:vel_start] = np.concatenate([joint_angles[half:], joint_angles[:half]])
     
     # Invert joints on y-axis
-    obs[9] *= -1  # r_hip_x
-    obs[10] *= -1  # r_knee
-    obs[11] *= -1  # r_ankle_y
-    obs[15] *= -1  # l_hip_x
-    obs[16] *= -1  # l_knee
-    obs[17] *= -1  # l_ankle_y
+    obs[joint_start+0] *= -1  # r_hip_x
+    obs[joint_start+2] *= -1  # r_knee
+    obs[joint_start+5] *= -1  # r_ankle_y
+    obs[joint_start+6] *= -1  # l_hip_x
+    obs[joint_start+8] *= -1  # l_knee
+    obs[joint_start+11] *= -1  # l_ankle_y
     
     # 4. Mirror linear velocity (negate vy)
     obs[vel_start+1] *= -1  # vy
     
     # 5. Mirror angular velocity (negate wx, wz)
-    obs[vel_start+3] *= -1  # wx
+    obs[vel_start+4] *= -1  # wx
     obs[vel_start+5] *= -1  # wz
     
     # 6. Swap joint velocities (first half <-> second half)
     joint_vels = obs[joint_vel_start:]
-    obs[joint_vel_start:] = np.concatenate([joint_vels[half:], joint_vels[:half]])*-1
+    obs[joint_vel_start:] = np.concatenate([joint_vels[half:], joint_vels[:half]])
     
     # Invert joint velocities on y-axis
-    obs[joint_vel_start+2] *= -1  # r_hip_x
-    obs[joint_vel_start+3] *= -1  # r_knee
-    obs[joint_vel_start+4] *= -1  # r_ankle_y
-    obs[joint_vel_start+8] *= -1  # l_hip_x
-    obs[joint_vel_start+9] *= -1  # l_knee
-    obs[joint_vel_start+10] *= -1  # l_ankle_y"""
+    obs[joint_vel_start+0] *= -1  # r_hip_x
+    obs[joint_vel_start+2] *= -1  # r_knee
+    obs[joint_vel_start+5] *= -1  # r_ankle_y
+    obs[joint_vel_start+6] *= -1  # l_hip_x
+    obs[joint_vel_start+8] *= -1  # l_knee
+    obs[joint_vel_start+11] *= -1  # l_ankle_y
     
     return obs
 
@@ -135,17 +134,17 @@ def mirror_action(action, n_joints):
     Returns:
     - mirrored_action: np.array, mirrored action
     """
-    """action = action.copy()
+    action = action.copy()
     
     # 1. Swap joint angles (first half <-> second half)
     half = n_joints // 2
-    action = np.concatenate([action[half:], action[:half]])*-1
+    action = np.concatenate([action[half:], action[:half]])
     # Mirror joint angles on y-axis
     action[0] *= -1  # r_hip_x
-    action[1] *= -1  # r_knee
-    action[2] *= -1  # r_ankle_y
+    action[2] *= -1  # r_knee
+    action[5] *= -1  # r_ankle_y
     action[6] *= -1  # l_hip_x
-    action[7] *= -1  # l_knee
-    action[8] *= -1  # l_ankle_y"""
+    action[8] *= -1  # l_knee
+    action[11] *= -1  # l_ankle_y
     
     return action

@@ -88,7 +88,7 @@
                             <body name="l_foot" pos="0.0235 0.015 -0.05">
                                 <inertial pos="-0.0213185 0.0101746 -0.00821998" mass="0.157381" diaginertia="7.26491e-05 6e-05 4.73509e-05"/>
                                 <joint name="r_ankle_x" pos="0 0 0" axis="1 0 0" range="-1.5708 0.436332"/>
-                                <geom pos="-0.023038 -0.037901 -0.023044" quat="1 0 0 0" type="mesh" mesh="l_foot" class="visual"/>
+                                <geom name="l_foot" pos="-0.023038 -0.037901 -0.023044" quat="1 0 0 0" type="mesh" mesh="l_foot" class="visual"/>
                             </body>
                             </body>
                         </body>
@@ -118,7 +118,7 @@
                             <body name="r_foot" pos="0.0235 -0.015 -0.05">
                                 <inertial pos="-0.0213188 -0.0100895 -0.00821981" mass="0.157381" diaginertia="7.27257e-05 5.99255e-05 4.73489e-05"/>
                                 <joint name="l_ankle_x" pos="0 0 0" axis="1 0 0" range="-0.436332 1.5708"/>
-                                <geom pos="-0.022938 0.037714 -0.023945" quat="1 0 0 0" type="mesh" mesh="r_foot" class="visual"/>
+                                <geom name="r_foot" pos="-0.022938 0.037714 -0.023945" quat="1 0 0 0" type="mesh" mesh="r_foot" class="visual"/>
                             </body>
                             </body>
                             </body>

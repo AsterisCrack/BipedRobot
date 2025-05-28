@@ -10,7 +10,7 @@ train:
   long_history_size: 0
   log_dir: runs_optimizers_tests
   checkpoint_path: checkpoints_optimizers_tests/
-  model_name: d4pg_com_center
+  model_name: d4pg_com_center_contact_time_invariant_no_feet_orient
   overwrite_model: False
 
   model: d4pg

@@ -1,5 +1,5 @@
 import numpy as np
-from utils import Config
+from utils import Config, NoConfig
 from models.mpo.model import MPO
 from models.ddpg.model import DDPG
 from models.sac.model import SAC
@@ -29,11 +29,12 @@ def train(config):
     long_history_size = config["train"]["long_history_size"] or 0
     sim_frequency = config["train"]["sim_frequency"] or 100
     
-    randomize_dynamics = config["randomization"]["randomize_dynamics"] or False
-    randomize_sensors = config["randomization"]["randomize_sensors"] or False
-    randomize_perturbations = config["randomization"]["randomize_perturbations"] or False
+    random_config = config["randomization"] or NoConfig()
+    randomize_dynamics = random_config["randomize_dynamics"] or False
+    randomize_sensors = random_config["randomize_sensors"] or False
+    randomize_perturbations = random_config["randomize_perturbations"] or False
     
-    env_builder = lambda: BasicEnv(sim_frequency=sim_frequency, short_history_size=short_history_size, long_history_size=long_history_size, randomize_dynamics=randomize_dynamics, randomize_sensors=randomize_sensors, randomize_perturbations=randomize_perturbations, random_config=config["randomization"], seed=seed)
+    env_builder = lambda: BasicEnv(sim_frequency=sim_frequency, short_history_size=short_history_size, long_history_size=long_history_size, randomize_dynamics=randomize_dynamics, randomize_sensors=randomize_sensors, randomize_perturbations=randomize_perturbations, random_config=random_config, seed=seed)
     
     env = distribute(env_builder, worker_groups, workers_per_group, max_episode_steps=max_episode_steps)
     log_dir = config["train"]["log_dir"] or "runs"
@@ -90,7 +91,7 @@ def train(config):
     
 if __name__ == "__main__":
     # config_file = "config/train_history_config.yaml"
-    config_file = "config/train_config_random.yaml"
+    config_file = "config/train_config.yaml"
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=config_file, help="Path to the config file")
     args = parser.parse_args()
