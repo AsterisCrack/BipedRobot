@@ -273,7 +273,7 @@ class MaximumAPosterioriPolicyOptimization:
 
 class ExpectedSARSA:
     def __init__(
-        self, model, num_samples=20, batch_size=1, loss=None, optimizer=None, gradient_clip=0, device=torch.device("cpu"), recurrent_model = False, seq_length=1
+        self, model, num_samples=20, batch_size=1, loss=None, optimizer=None, gradient_clip=0, device=torch.device("cpu"), recurrent_model = False, seq_length=1, config=None
     ):
         self.device = device
         self.num_samples = num_samples

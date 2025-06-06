@@ -165,7 +165,7 @@ class SAC(ddpg.DDPG):
 
     def __init__(
         self, action_space, model, max_seq_length=1, num_workers=1,seed=None, replay=None, exploration=None, actor_updater=None,
-        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu")
+        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu"), config=None
     ):
         model = model
         exploration = NoActionNoise(policy=self._policy, action_space=action_space, seed=seed) if exploration is None else exploration
