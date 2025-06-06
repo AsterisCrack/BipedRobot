@@ -352,7 +352,29 @@ class MeanStd(torch.nn.Module):
     def _update(self, mean, std):
         self._mean.data.copy_(torch.as_tensor(self.mean, dtype=torch.float32))
         self._std.data.copy_(torch.as_tensor(self.std, dtype=torch.float32))
+        
+class DecayingEntropyCoeff:
+    def __init__(self, initial=0.2, minimum=0.01, decay_rate=1e-6, start_steps=10000):
+        self.initial = initial
+        self.minimum = minimum
+        self.decay_rate = decay_rate
+        self.start_steps = start_steps
+        self.step = 0  # Initialize step counter
+        self.value = initial  # Initial value of the coefficient
 
+    def __call__(self):
+        self.step += 1
+        step = self.step
+        if step < self.start_steps:
+            return self.initial
+        decayed = self.initial * np.exp(-self.decay_rate * (step - self.start_steps))
+        self.value = max(self.minimum, decayed)
+        return max(self.minimum, decayed)
+
+    def update(self):
+        # For compatibility with other updaters
+        return self()
+    
 class NormalActionNoise:
     def __init__(self, policy, action_space, scale=0.3, min_scale=0.03, decay_rate=0.000001, start_steps=10000, seed=None):
         self.scale = scale
@@ -473,7 +495,8 @@ class Trainer:
         
         if self.log:
             writer = SummaryWriter(self.log_dir)
-        progress_bar = tqdm(total=self.max_steps, desc="Training", unit="step")
+        if self.show_progress:
+            progress_bar = tqdm(total=self.max_steps, desc="Training", unit="step")
         
         try:
             while True:
@@ -497,7 +520,8 @@ class Trainer:
                 steps_since_save += num_workers
                 
                 # Update the progress bar
-                progress_bar.update(num_workers)
+                if self.show_progress:
+                    progress_bar.update(num_workers)
 
                 # Check the finished episodes.
                 for i in range(num_workers):

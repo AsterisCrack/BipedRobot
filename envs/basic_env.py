@@ -460,11 +460,11 @@ class BasicEnv(gym.Env):
         yaw_reward = 0.02
         pitch_roll_reward = 0.04
         # feet_orient_reward = 0.02
-        feet_orient_reward = 0
+        feet_orient_reward = 0.1
         torso_centering_reward = 0.1
         terminated_reward = -0.1 / 2
         phase_reward = 0.02
-        contact_reward = 0.3
+        contact_reward = 1
         
         # Compute reward
         forward_reward = \

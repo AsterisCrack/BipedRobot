@@ -9,16 +9,16 @@ train:
   use_history: False
   short_history_size: 0
   long_history_size: 0
-  log_dir: runs_optimizers_tests
-  checkpoint_path: checkpoints_optimizers_tests/
-  model_name: sac
+  log_dir: runs_final
+  checkpoint_path: checkpoints_final/
+  model_name: d4pg
   overwrite_model: False
 
-  model: sac
+  model: d4pg
 
   test_environment: False
   epoch_steps: 5e3
-  save_steps: 5e4
+  save_steps: 1e5
 
   test_episodes: 5
   show_progress: False
@@ -29,8 +29,8 @@ model:
   actor_sizes: [256, 256]
   critic_sizes: [256, 256]
   target_coeff: 0.005
-  actor_lr: 1e-4
-  critic_lr: 1e-4
+  actor_lr: 1e-3
+  critic_lr: 1e-3
   lr_scheduler:
     T_max: 5e5
     eta_min: 1e-5
