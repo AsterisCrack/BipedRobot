@@ -48,6 +48,6 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     env.close()
 
 if __name__ == "__main__":
-    model_path = "checkpoints_optimizers_tests\d4pg_com_center_slow_contact2\step_4700000.pt"
+    model_path = "checkpoints_optimizers_tests/d4pg_new_feet_orient/step_1050000.pt"
     # model_path = "checkpoints_optimizers_tests\d4pg_com_center\step_9100000.pt"
     test_model(model_path)

@@ -9,16 +9,16 @@ train:
   use_history: False
   short_history_size: 0
   long_history_size: 0
-  log_dir: runs_optimizers_tests
-  checkpoint_path: checkpoints_optimizers_tests/
-  model_name: sac
+  log_dir: runs_final
+  checkpoint_path: checkpoints_final/
+  model_name: ddpg
   overwrite_model: False
 
-  model: sac
+  model: ddpg
 
   test_environment: False
   epoch_steps: 5e3
-  save_steps: 5e4
+  save_steps: 1e5
 
   test_episodes: 5
   show_progress: False

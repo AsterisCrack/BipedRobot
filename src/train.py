@@ -91,7 +91,7 @@ def train(config):
     
 if __name__ == "__main__":
     # config_file = "config/train_history_config.yaml"
-    config_file = "config/train_config.yaml"
+    config_file = "config/final/train_config_d4pg.yaml"
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=config_file, help="Path to the config file")
     args = parser.parse_args()

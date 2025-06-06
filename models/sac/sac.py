@@ -2,10 +2,10 @@ import os
 import torch
 import numpy as np
 import models.ddpg.ddpg as ddpg
-from models.utils import NoActionNoise
+from models.utils import NoActionNoise, DecayingEntropyCoeff
 
 class TwinCriticSoftDeterministicPolicyGradient:
-    def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, entropy_coeff=0.2, gradient_clip=0, recurrent_model = False):
+    def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, entropy_coeff=DecayingEntropyCoeff(), gradient_clip=0, recurrent_model = False):
         self.device = device
         self.recurrent_model = recurrent_model
         self.seq_length = seq_length
@@ -64,7 +64,7 @@ class TwinCriticSoftDeterministicPolicyGradient:
         values_1 = self.model.critic_1(observations, actions)
         values_2 = self.model.critic_2(observations, actions)
         values = torch.min(values_1, values_2)
-        loss = (self.entropy_coeff * log_probs - values).mean()
+        loss = (self.entropy_coeff.value * log_probs - values).mean()
 
         loss.backward()
         if self.gradient_clip > 0:
@@ -78,7 +78,7 @@ class TwinCriticSoftDeterministicPolicyGradient:
 
 class TwinCriticSoftQLearning:
     def __init__(
-        self, model, loss=None, optimizer=None, entropy_coeff=0.2, gradient_clip=0, device=torch.device("cpu"), recurrent_model = False, seq_length=1
+        self, model, loss=None, optimizer=None, entropy_coeff=DecayingEntropyCoeff(), gradient_clip=0, device=torch.device("cpu"), recurrent_model = False, seq_length=1
     ):
         self.loss = loss or torch.nn.MSELoss()
         self.optimizer = optimizer or (
@@ -140,8 +140,12 @@ class TwinCriticSoftQLearning:
             next_values_2 = self.model.target_critic_2(
                 next_observations, next_actions)
             next_values = torch.min(next_values_1, next_values_2)
-            returns = rewards + discounts * (
-                next_values - self.entropy_coeff * next_log_probs)
+            rewards_copy = rewards.clone()
+            
+            # Update entropy coefficient to raise a step in the decaying entropy coefficient
+            self.entropy_coeff.update()
+            returns = rewards_copy + discounts * (
+                next_values - self.entropy_coeff.value * next_log_probs)
 
         self.optimizer.zero_grad()
         values_1 = self.model.critic_1(observations, actions)
@@ -157,7 +161,7 @@ class TwinCriticSoftQLearning:
 
         return dict(
             loss=loss.detach(), q1=values_1.detach(), q2=values_2.detach())
-
+       
 class SAC(ddpg.DDPG):
     '''Soft Actor-Critic.
     SAC: https://arxiv.org/pdf/1801.01290.pdf
@@ -165,12 +169,13 @@ class SAC(ddpg.DDPG):
 
     def __init__(
         self, action_space, model, max_seq_length=1, num_workers=1,seed=None, replay=None, exploration=None, actor_updater=None,
-        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu")
+        critic_updater=None, recurrent_model=False, actor_optimizer=None, critic_optimizer=None, device=torch.device("cpu"), config=None
     ):
         model = model
+        self.entropy_coeff = DecayingEntropyCoeff(initial=0.2, minimum=0.01, decay_rate=1e-6, start_steps=10000)
         exploration = NoActionNoise(policy=self._policy, action_space=action_space, seed=seed) if exploration is None else exploration
-        actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device, optimizer=actor_optimizer, entropy_coeff=0.2, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if actor_updater is None else actor_updater
-        critic_updater = TwinCriticSoftQLearning(model=model, device=device, optimizer=critic_optimizer, entropy_coeff=0.2, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if critic_updater is None else critic_updater
+        actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device, optimizer=actor_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if actor_updater is None else actor_updater
+        critic_updater = TwinCriticSoftQLearning(model=model, device=device, optimizer=critic_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=1.0, recurrent_model=recurrent_model, seq_length=max_seq_length) if critic_updater is None else critic_updater
         
         super().__init__(action_space=action_space, model=model, recurrent_model=recurrent_model, max_seq_length=max_seq_length, num_workers=num_workers, seed=seed, replay=replay, exploration=exploration,
             actor_updater=actor_updater, critic_updater=critic_updater, device=device)
