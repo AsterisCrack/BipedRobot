@@ -3,6 +3,7 @@ from envs.advanced_env import AdvancedEnv
 from models.mpo.model import MPO
 from models.d4pg.model import D4PG
 from models.sac.model import SAC
+from models.ddpg.model import DDPG
 import torch
 
 def test_model(model_path, episodes=10, episode_length=1000):
@@ -29,7 +30,7 @@ def test_model(model_path, episodes=10, episode_length=1000):
     
     # env = AdvancedEnv(render_mode="human")
     # Initialize networks
-    model = D4PG(env, model_path=model_path, device=device)
+    model = DDPG(env, model_path=model_path, device=device)
 
     # Evaluate the model
     mean_reward = 0
@@ -50,5 +51,5 @@ def test_model(model_path, episodes=10, episode_length=1000):
 
 if __name__ == "__main__":
     # model_path = "checkpoints_optimizers_tests\d4pg_com_center_contact_time_invariant_no_feet_orient1\step_6900000.pt"
-    model_path = "checkpoints_linux/4/step_30000000.pt"
+    model_path = "checkpoints_linux/4/step_29200000.pt"
     test_model(model_path)

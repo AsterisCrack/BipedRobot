@@ -338,9 +338,16 @@ class BasicEnv(gym.Env):
         min_velocity = 0.1  # Minimum velocity to consider the robot moving
         height_command = 0.23  # Desired height of the robot
         vel_diff = np.linalg.norm(self.data.qvel[0:2] - velocity_command[0:2])
+        
         vel = np.exp(-5*np.square(vel_diff))  # Penalize deviation from desired velocity
+        
         if np.linalg.norm(self.data.qvel[0:2]) < min_velocity:
             vel = -10  # Penalize if the robot is not moving
+        print()
+        print(vel)
+        print(self.data.qvel[0:2])
+        print(vel_diff)
+        
         height = np.exp(-20*np.square(self.data.qpos[2] - height_command))
         
         # Action difference
