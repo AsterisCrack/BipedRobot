@@ -1,5 +1,5 @@
 train:
-# 209495
+# 366985
   seed: 42
   steps: 30000000
   max_episode_steps: 1000

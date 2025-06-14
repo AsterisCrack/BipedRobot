@@ -7,9 +7,9 @@ FLOAT_EPSILON = 1e-8
 
 class MaximumAPosterioriPolicyOptimization:
     def __init__(
-        self, model, action_space, device=torch.device("cpu"), seq_length=1 , num_samples=20, epsilon=1e-1, epsilon_penalty=1e-3,
-        epsilon_mean=1e-3, epsilon_std=1e-6, initial_log_temperature=1.,
-        initial_log_alpha_mean=1., initial_log_alpha_std=10.,
+        self, model, action_space, device=torch.device("cpu"), seq_length=1 , num_samples=30, epsilon=1e-1, epsilon_penalty=1e-3,
+        epsilon_mean=5e-2, epsilon_std=1e-3, initial_log_temperature=1.,
+        initial_log_alpha_mean=0, initial_log_alpha_std=5,
         min_log_dual=-18., per_dim_constraining=True, action_penalization=True,
         actor_optimizer=None, dual_optimizer=None, gradient_clip=0, recurrent_model = False,
         config=None

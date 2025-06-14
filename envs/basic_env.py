@@ -334,13 +334,13 @@ class BasicEnv(gym.Env):
         
         # Reward function consists of:
         #Lets try setting the target speed at 0.5 m/s
-        velocity_command = np.array([0.4, 0, 0])  # Desired velocity
+        velocity_command = np.array([0.5, 0, 0])  # Desired velocity
         min_velocity = 0.1  # Minimum velocity to consider the robot moving
         height_command = 0.23  # Desired height of the robot
         vel_diff = np.linalg.norm(self.data.qvel[0:2] - velocity_command[0:2])
         vel = np.exp(-5*np.square(vel_diff))  # Penalize deviation from desired velocity
-        if np.linalg.norm(self.data.qvel[0:2]) < min_velocity:
-            vel = -10  # Penalize if the robot is not moving
+        if np.linalg.norm(self.data.qvel[0:2]) < min_velocity or self.data.qvel[0] < 0:
+            vel = -10  # Penalize if the robot is not moving or going backwards
         height = np.exp(-20*np.square(self.data.qpos[2] - height_command))
         
         # Action difference
@@ -460,11 +460,11 @@ class BasicEnv(gym.Env):
         yaw_reward = 0.02
         pitch_roll_reward = 0.04
         # feet_orient_reward = 0.02
-        feet_orient_reward = 0.1
+        feet_orient_reward = 0.3
         torso_centering_reward = 0.1
         terminated_reward = -0.1 / 2
         phase_reward = 0.02
-        contact_reward = 1
+        contact_reward = 1.5
         
         # Compute reward
         forward_reward = \
