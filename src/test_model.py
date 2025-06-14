@@ -2,9 +2,10 @@ from envs.basic_env import BasicEnv
 from envs.advanced_env import AdvancedEnv
 from models.mpo.model import MPO
 from models.d4pg.model import D4PG
+from models.sac.model import SAC
 import torch
 
-def test_model(model_path, episodes=10, episode_length=int(2e4)):
+def test_model(model_path, episodes=10, episode_length=1000):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -48,6 +49,6 @@ def test_model(model_path, episodes=10, episode_length=int(2e4)):
     env.close()
 
 if __name__ == "__main__":
-    model_path = "checkpoints_optimizers_tests/d4pg_new_feet_orient/step_1050000.pt"
-    # model_path = "checkpoints_optimizers_tests\d4pg_com_center\step_9100000.pt"
+    # model_path = "checkpoints_optimizers_tests\d4pg_com_center_contact_time_invariant_no_feet_orient1\step_6900000.pt"
+    model_path = "checkpoints_linux/4/step_30000000.pt"
     test_model(model_path)
