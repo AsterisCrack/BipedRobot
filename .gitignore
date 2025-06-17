@@ -5,6 +5,8 @@ runs/
 tonic/
 *_old*
 *checkpoints*/
+!checkpoints_final/
+*trainer_state*/
 *runs*/
 __pycache__/
 .vscode

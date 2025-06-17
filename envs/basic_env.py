@@ -91,8 +91,8 @@ class BasicEnv(gym.Env):
         # Rendering attributes
         self.window = None
         self.context = None
-        self.viewport_width = 1200
-        self.viewport_height = 900
+        self.viewport_width = 1920
+        self.viewport_height = 1080
         self.cam = mujoco.MjvCamera()
         self.opt = mujoco.MjvOption()
         self.scene = mujoco.MjvScene(self.model, maxgeom=1000)
