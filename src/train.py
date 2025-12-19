@@ -11,6 +11,37 @@ import os
 import torch
 import argparse
 
+
+class EnvBuilder:
+    """Top-level picklable environment builder.
+
+    Multiprocessing (spawn) requires that callables passed to child processes
+    be importable/picklable. Defining a small top-level callable object that
+    stores the environment parameters avoids using a local lambda.
+    """
+    def __init__(self, sim_frequency, short_history_size, long_history_size,
+                 randomize_dynamics, randomize_sensors, randomize_perturbations,
+                 random_config, seed):
+        self.sim_frequency = sim_frequency
+        self.short_history_size = short_history_size
+        self.long_history_size = long_history_size
+        self.randomize_dynamics = randomize_dynamics
+        self.randomize_sensors = randomize_sensors
+        self.randomize_perturbations = randomize_perturbations
+        self.random_config = random_config
+        self.seed = seed
+
+    def __call__(self):
+        return BasicEnv(
+            sim_frequency=self.sim_frequency,
+            short_history_size=self.short_history_size,
+            long_history_size=self.long_history_size,
+            randomize_dynamics=self.randomize_dynamics,
+            randomize_sensors=self.randomize_sensors,
+            randomize_perturbations=self.randomize_perturbations,
+            random_config=self.random_config,
+            seed=self.seed)
+
 def train(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # device = torch.device("cpu")
@@ -34,7 +65,15 @@ def train(config):
     randomize_sensors = random_config["randomize_sensors"] or False
     randomize_perturbations = random_config["randomize_perturbations"] or False
     
-    env_builder = lambda: BasicEnv(sim_frequency=sim_frequency, short_history_size=short_history_size, long_history_size=long_history_size, randomize_dynamics=randomize_dynamics, randomize_sensors=randomize_sensors, randomize_perturbations=randomize_perturbations, random_config=random_config, seed=seed)
+    env_builder = EnvBuilder(
+        sim_frequency=sim_frequency,
+        short_history_size=short_history_size,
+        long_history_size=long_history_size,
+        randomize_dynamics=randomize_dynamics,
+        randomize_sensors=randomize_sensors,
+        randomize_perturbations=randomize_perturbations,
+        random_config=random_config,
+        seed=seed)
     
     env = distribute(env_builder, worker_groups, workers_per_group, max_episode_steps=max_episode_steps)
     log_dir = config["train"]["log_dir"] or "runs"
@@ -91,7 +130,7 @@ def train(config):
     
 if __name__ == "__main__":
     # config_file = "config/train_history_config.yaml"
-    config_file = "config/final/train_config_mpo.yaml"
+    config_file = "config/final/train_config_d4pg.yaml"
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=config_file, help="Path to the config file")
     args = parser.parse_args()

@@ -66,7 +66,7 @@ class Model:
         
         # Load the saved model
         if model_path:
-            self.model.load_state_dict(torch.load(model_path))
+            self.model.load_state_dict(torch.load(model_path, map_location=device))
         
         self.model.to(device)
         
