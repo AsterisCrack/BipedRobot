@@ -1,8 +1,8 @@
 import os
 import torch
 import numpy as np
-import models.ddpg.ddpg as ddpg
-from models.utils import NoActionNoise, Buffer
+import algorithms.ddpg.ddpg as ddpg
+from algorithms.utils import NoActionNoise, Buffer
 
 class DistributionalDeterministicPolicyGradient:
     def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, gradient_clip=0, recurrent_model = False):
@@ -42,15 +42,26 @@ class DistributionalDeterministicPolicyGradient:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         print(f"Loaded mpo model from {path}")
         
-    def __call__(self, observations):
+    def __call__(self, observations, critic_observations=None):
         critic_variables = [param for param in self.model.critic.parameters() if param.requires_grad]
 
         for var in critic_variables:
             var.requires_grad = False
 
         self.optimizer.zero_grad()
+        
+        if self.recurrent_model:
+            observations = observations.reshape(observations.shape[0], self.seq_length, -1)
+            observations = observations.transpose(0, 1)
+            if critic_observations is not None:
+                critic_observations = critic_observations.reshape(critic_observations.shape[0], self.seq_length, -1)
+                critic_observations = critic_observations.transpose(0, 1)
+            
         actions = self.model.actor(observations)
-        value_distributions = self.model.critic(observations, actions)
+        
+        # Use critic_observations if provided (for privileged critic)
+        critic_obs = critic_observations if critic_observations is not None else observations
+        value_distributions = self.model.critic(critic_obs, actions)
         values = value_distributions.mean()
         loss = -values.mean()
 
@@ -100,10 +111,14 @@ class DistributionalDeterministicQLearning:
         print(f"Loaded mpo model from {path}")
         
     def __call__(
-        self, observations, actions, next_observations, rewards, discounts
+        self, observations, actions, next_observations, rewards, discounts,
+        next_actor_observations=None
     ):
         with torch.no_grad():
-            next_actions = self.model.target_actor(next_observations)
+            # If actor and critic have different observation spaces, 
+            # use next_actor_observations for the target actor.
+            actor_obs = next_actor_observations if next_actor_observations is not None else next_observations
+            next_actions = self.model.target_actor(actor_obs)
             next_value_distributions = self.model.target_critic(
                 next_observations, next_actions)
             values = next_value_distributions.values

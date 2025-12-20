@@ -1,13 +1,14 @@
 train:
   seed: 42
-  steps: 30000000
+  steps: 20000
   max_episode_steps: 1000
   worker_groups: 8
   workers_per_group: 16
   sim_frequency: 100
   use_history: False
-  short_history_size: 0
-  long_history_size: 0
+  history_size: 0
+  actor_obs: normal
+  critic_obs: privileged
   log_dir: runs_optimizers_tests
   checkpoint_path: checkpoints_optimizers_tests/
   model_name: sac
@@ -25,8 +26,19 @@ train:
   log: True
 
 model:
+# Old style network configuration
   actor_sizes: [256, 256]
   critic_sizes: [256, 256]
+  
+  # New modular network configuration (optional)
+  # actor_config:
+  #   network_type: "mlp"
+  #   hidden_sizes: [256, 256]
+  # critic_config:
+  #   network_type: "lstm"
+  #   hidden_size: 128
+  #   num_layers: 2
+  
   target_coeff: 0.005
   actor_lr: 1e-4
   critic_lr: 1e-4

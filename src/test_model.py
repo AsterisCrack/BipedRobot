@@ -1,9 +1,8 @@
-from envs.basic_env import BasicEnv
-from envs.advanced_env import AdvancedEnv
-from models.mpo.model import MPO
-from models.d4pg.model import D4PG
-from models.sac.model import SAC
-from models.ddpg.model import DDPG
+from envs.mujoco_env import MujocoEnv
+from algorithms.mpo.model import MPO
+from algorithms.d4pg.model import D4PG
+from algorithms.sac.model import SAC
+from algorithms.ddpg.model import DDPG
 import torch
 
 def test_model(model_path, episodes=10, episode_length=1000):
@@ -12,23 +11,8 @@ def test_model(model_path, episodes=10, episode_length=1000):
     print(f"Using device: {device}")
     
     # Initialize environment with rendering
-    randomization = {
-        "randomize_dynamics": False,
-        "randomize_sensors": False,
-        "randomize_perturbations": False,
-        "friction": [0.5, 1.5],
-        "joint_damping": [0.5, 1,5],
-        "mass": [0.5, 1.5],
-        "inertia": [0.7, 1.3],
-        "imu_noise": 0.01,
-        "vel_noise": 0.02,
-        "t_perturbation": [0.1, 3],
-        "force": [-1, 1]
-    }
+    env = MujocoEnv(render_mode="human", sim_frequency=100)
     
-    env = BasicEnv(render_mode="human", sim_frequency=100, randomize_dynamics=randomization["randomize_dynamics"], randomize_sensors=randomization["randomize_sensors"], randomize_perturbations=randomization["randomize_perturbations"], random_config=randomization)
-    
-    # env = AdvancedEnv(render_mode="human")
     # Initialize networks
     model = SAC(env, model_path=model_path, device=device)
 

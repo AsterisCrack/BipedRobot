@@ -1,7 +1,7 @@
 import numpy as np
 import time
-from envs import basic_env # Replace with your actual environment import
-from utils import mirror_action
+from envs.mujoco_env import MujocoEnv
+from envs.utils.mirroring import mirror_action
 
 def sinusoidal_action_pattern(step, frequency=0.1, amplitude=1.0, action_dim=6):
     """
@@ -24,7 +24,7 @@ def no_action_pattern(step, action_dim=6):
     return np.zeros(action_dim)
 
 def test_env():
-    env = basic_env.BasicEnv(render_mode="human")
+    env = MujocoEnv(render_mode="human")
     obs = env.reset()
     action_dim = env.action_space.shape[0]
 

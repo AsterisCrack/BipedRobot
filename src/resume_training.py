@@ -1,10 +1,10 @@
 import numpy as np
 from torch.optim import Adam
-from models.mpo.mpo import MPO
-from models.networks.networks import ActorCriticWithTargets
+from algorithms.mpo.mpo import MPO
+from models.networks import ActorCriticWithTargets
 from envs.distributed import distribute
-from envs.basic_env import BasicEnv
-from models.utils import Trainer
+from envs.mujoco_env import MujocoEnv
+from algorithms.utils import Trainer
 import torch
 
 def resume_training_train(train_state_path):
@@ -16,8 +16,10 @@ def resume_training_train(train_state_path):
     torch.manual_seed(seed)
     
     # Initialize environment
-    # env = BasicEnv(render_mode="human")
-    env = distribute(BasicEnv, 8)
+    from src.train import EnvBuilder
+    from utils import NoConfig
+    env_builder = EnvBuilder(config=NoConfig(), seed=seed)
+    env = distribute(env_builder, 8)
     
     # Initialize networks
     print("Initializing model")
@@ -44,5 +46,3 @@ if __name__ == "__main__":
     # Load the saved model
     train_state_path = "models/mpo/checkpoints/02-03-2025_19-29-46/trainer_state/"
     resume_training_train(train_state_path)
-
-

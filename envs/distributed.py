@@ -12,8 +12,13 @@ class Sequential:
 
     def start(self):
         '''Used once to get the initial observations.'''
-        observations = [env.reset() for env in self.environments]
+        results = [env.reset() for env in self.environments]
+        observations = [r[0] for r in results]
         self.lengths = np.zeros(len(self.environments), int)
+        
+        if isinstance(observations[0], dict):
+            keys = observations[0].keys()
+            return {k: np.array([o[k] for o in observations], np.float32) for k in keys}
         return np.array(observations, np.float32)
 
     def step(self, actions):
@@ -24,29 +29,40 @@ class Sequential:
         observations = []  # Observations for the actions selection.
 
         for i in range(len(self.environments)):
-            ob, rew, term, _ = self.environments[i].step(actions[i])
-
+            ob, rew, term, trunc, _ = self.environments[i].step(actions[i])
+            
             self.lengths[i] += 1
             # Timeouts trigger resets but are not true terminations.
-            reset = term or self.lengths[i] == self.max_episode_steps
+            reset = term or trunc or self.lengths[i] == self.max_episode_steps
             next_observations.append(ob)
             rewards.append(rew)
             resets.append(reset)
             terminations.append(term)
 
             if reset:
-                ob = self.environments[i].reset()
+                ob, _ = self.environments[i].reset()
                 self.lengths[i] = 0
 
             observations.append(ob)
 
-        observations = np.array(observations, np.float32)
-        infos = dict(
-            observations=np.array(next_observations, np.float32),
-            rewards=np.array(rewards, np.float32),
-            resets=np.array(resets, bool),
-            terminations=np.array(terminations, bool))
-        return observations, infos
+        if isinstance(observations[0], dict):
+            keys = observations[0].keys()
+            observations = {k: np.array([o[k] for o in observations], np.float32) for k in keys}
+            next_observations_stacked = {k: np.array([o[k] for o in next_observations], np.float32) for k in keys}
+            infos = dict(
+                observations=next_observations_stacked,
+                rewards=np.array(rewards, np.float32),
+                resets=np.array(resets, bool),
+                terminations=np.array(terminations, bool))
+            return observations, infos
+        else:
+            observations = np.array(observations, np.float32)
+            infos = dict(
+                observations=np.array(next_observations, np.float32),
+                rewards=np.array(rewards, np.float32),
+                resets=np.array(resets, bool),
+                terminations=np.array(terminations, bool))
+            return observations, infos
 
     def render(self, mode='human', *args, **kwargs):
         outs = []
@@ -63,9 +79,12 @@ def proc(action_pipe, index, environment_builder, max_episode_steps, workers_per
     output_queue.put((index, observations))
 
     while True:
-        actions = action_pipe.recv()
-        out = envs.step(actions)
-        output_queue.put((index, out))
+        try:
+            actions = action_pipe.recv()
+            out = envs.step(actions)
+            output_queue.put((index, out))
+        except (EOFError, BrokenPipeError):
+            break
         
 class Parallel:
     '''A group of sequential environments used in parallel.'''
@@ -107,16 +126,24 @@ class Parallel:
             index, observations = self.output_queue.get()
             observations_list[index] = observations
 
-        self.observations_list = np.array(observations_list)
-        self.next_observations_list = np.zeros_like(self.observations_list)
+        self.observations_list = observations_list # Keep as list
+        
         self.rewards_list = np.zeros(
             (self.worker_groups, self.workers_per_group), np.float32)
         self.resets_list = np.zeros(
             (self.worker_groups, self.workers_per_group), bool)
         self.terminations_list = np.zeros(
             (self.worker_groups, self.workers_per_group), bool)
-
-        return np.concatenate(self.observations_list)
+            
+        # Check if observations are dicts
+        if isinstance(observations_list[0], dict):
+            keys = observations_list[0].keys()
+            self.next_observations_list = [{k: np.zeros_like(observations_list[i][k]) for k in keys} for i in range(self.worker_groups)]
+            return {k: np.concatenate([o[k] for o in observations_list]) for k in keys}
+        else:
+            self.observations_list = np.array(observations_list)
+            self.next_observations_list = np.zeros_like(self.observations_list)
+            return np.concatenate(self.observations_list)
 
     def step(self, actions):
         actions_list = np.split(actions, self.worker_groups)
@@ -131,9 +158,16 @@ class Parallel:
             self.resets_list[index] = infos['resets']
             self.terminations_list[index] = infos['terminations']
 
-        observations = np.concatenate(self.observations_list)
+        if isinstance(self.observations_list[0], dict):
+            keys = self.observations_list[0].keys()
+            observations = {k: np.concatenate([o[k] for o in self.observations_list]) for k in keys}
+            next_observations = {k: np.concatenate([o[k] for o in self.next_observations_list]) for k in keys}
+        else:
+            observations = np.concatenate(self.observations_list)
+            next_observations = np.concatenate(self.next_observations_list)
+            
         infos = dict(
-            observations=np.concatenate(self.next_observations_list),
+            observations=next_observations,
             rewards=np.concatenate(self.rewards_list),
             resets=np.concatenate(self.resets_list),
             terminations=np.concatenate(self.terminations_list))

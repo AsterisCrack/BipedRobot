@@ -1,8 +1,8 @@
 import os
 import torch
 import numpy as np
-import models.ddpg.ddpg as ddpg
-from models.utils import NoActionNoise, DecayingEntropyCoeff
+import algorithms.ddpg.ddpg as ddpg
+from algorithms.utils import NoActionNoise, DecayingEntropyCoeff
 
 class TwinCriticSoftDeterministicPolicyGradient:
     def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, entropy_coeff=DecayingEntropyCoeff(), gradient_clip=0, recurrent_model = False):
@@ -41,7 +41,7 @@ class TwinCriticSoftDeterministicPolicyGradient:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         print(f"Loaded mpo model from {path}")
         
-    def __call__(self, observations):
+    def __call__(self, observations, critic_observations=None):
         critic_1_variables = [param for param in self.model.critic_1.parameters() if param.requires_grad]
         critic_2_variables = [param for param in self.model.critic_2.parameters() if param.requires_grad]
         critic_variables = critic_1_variables + critic_2_variables
@@ -61,8 +61,11 @@ class TwinCriticSoftDeterministicPolicyGradient:
             actions = distributions.rsample()
             log_probs = distributions.log_prob(actions)
         log_probs = log_probs.sum(dim=-1)
-        values_1 = self.model.critic_1(observations, actions)
-        values_2 = self.model.critic_2(observations, actions)
+        
+        # Use critic_observations if provided (for privileged critic)
+        critic_obs = critic_observations if critic_observations is not None else observations
+        values_1 = self.model.critic_1(critic_obs, actions)
+        values_2 = self.model.critic_2(critic_obs, actions)
         values = torch.min(values_1, values_2)
         loss = (self.entropy_coeff.value * log_probs - values).mean()
 
@@ -119,7 +122,8 @@ class TwinCriticSoftQLearning:
         print(f"Loaded mpo model from {path}")
         
     def __call__(
-        self, observations, actions, next_observations, rewards, discounts
+        self, observations, actions, next_observations, rewards, discounts,
+        next_actor_observations=None
     ):
         with torch.no_grad():
             if self.recurrent_model:
@@ -127,7 +131,11 @@ class TwinCriticSoftQLearning:
                 observations = observations.transpose(0, 1)
                 next_observations = next_observations.reshape(next_observations.shape[0], self.seq_length, -1)
                 next_observations = next_observations.transpose(0, 1)
-            next_distributions = self.model.actor(next_observations)
+            
+            # If actor and critic have different observation spaces, 
+            # use next_actor_observations for the target actor.
+            actor_obs = next_actor_observations if next_actor_observations is not None else next_observations
+            next_distributions = self.model.actor(actor_obs)
             if hasattr(next_distributions, 'rsample_with_log_prob'):
                 outs = next_distributions.rsample_with_log_prob()
                 next_actions, next_log_probs = outs
@@ -177,8 +185,11 @@ class SAC(ddpg.DDPG):
         actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device, optimizer=actor_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if actor_updater is None else actor_updater
         critic_updater = TwinCriticSoftQLearning(model=model, device=device, optimizer=critic_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=1.0, recurrent_model=recurrent_model, seq_length=max_seq_length) if critic_updater is None else critic_updater
         
+        from gymnasium import spaces
+        self.is_dict_obs = isinstance(model.obs_space, spaces.Dict)
+        
         super().__init__(action_space=action_space, model=model, recurrent_model=recurrent_model, max_seq_length=max_seq_length, num_workers=num_workers, seed=seed, replay=replay, exploration=exploration,
-            actor_updater=actor_updater, critic_updater=critic_updater, device=device)
+            actor_updater=actor_updater, critic_updater=critic_updater, device=device, config=config)
 
     def _stochastic_actions(self, observations):
         observations = torch.as_tensor(observations, dtype=torch.float32)

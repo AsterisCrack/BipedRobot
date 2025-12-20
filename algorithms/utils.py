@@ -44,10 +44,17 @@ class Model:
         
         self.config = config or NoConfig()
         # Initialize optimizers and schedulers
-        actor_lr = self.config["model"]["actor_lr"] or 1e-3
-        critic_lr = self.config["model"]["critic_lr"] or 1e-3
-        T_max = self.config["model"]["lr_scheduler"]["T_max"] or 5e5
-        eta_min = self.config["model"]["lr_scheduler"]["eta_min"] or 1e-5
+        model_cfg = self.config["model"]
+        actor_lr = model_cfg.get("actor_lr", 1e-3)
+        critic_lr = model_cfg.get("critic_lr", 1e-3)
+        
+        lr_sched_cfg = model_cfg.get("lr_scheduler")
+        if lr_sched_cfg:
+            T_max = lr_sched_cfg.get("T_max", 5e5)
+            eta_min = lr_sched_cfg.get("eta_min", 1e-5)
+        else:
+            T_max = 5e5
+            eta_min = 1e-5
         self.actor_optimizer = (
             lambda params: OptimizerWithScheduler(
                 torch.optim.Adam(params, lr=actor_lr),
@@ -80,7 +87,12 @@ class Model:
         self.trainer = Trainer(self.agent, self.env, config=self.config)
         
     def step(self, observation):
-        action = self.model.actor.get_action(torch.from_numpy(observation).to(self.device).float())
+        if isinstance(observation, dict) and "actor" in observation:
+            obs = observation["actor"]
+        else:
+            obs = observation
+            
+        action = self.model.actor.get_action(torch.from_numpy(obs).to(self.device).float())
         return action
     
     def train(self, seed=42, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3), test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None, checkpoint_path=None, config=None):
@@ -131,8 +143,17 @@ class Buffer:
         if 'terminations' in kwargs:
             continuations = np.float32(1 - kwargs['terminations'])
             kwargs['discounts'] = continuations * self.discount_factor
+            
+        # Flatten dicts
+        flattened_kwargs = {}
+        for k, v in kwargs.items():
+            if isinstance(v, dict):
+                for subk, subv in v.items():
+                    flattened_kwargs[f"{k}_{subk}"] = subv
+            else:
+                flattened_kwargs[k] = v
+        kwargs = flattened_kwargs
 
-        
         # Create the named buffers.
         if self.buffers is None:
             self.num_workers = len(list(kwargs.values())[0])
@@ -159,7 +180,6 @@ class Buffer:
 
     def accumulate_n_steps(self, kwargs):
         rewards = kwargs['rewards']
-        next_observations = kwargs['next_observations']
         discounts = kwargs['discounts']
         
         # Ensure all are torch tensors on the correct device
@@ -167,14 +187,24 @@ class Buffer:
             rewards = torch.tensor(rewards, dtype=torch.float32, device=self.device)
         else:
             rewards = rewards.to(dtype=torch.float32, device=self.device)
-        if not torch.is_tensor(next_observations):
-            next_observations = torch.tensor(next_observations, dtype=torch.float32, device=self.device)
-        else:
-            next_observations = next_observations.to(dtype=torch.float32, device=self.device)
+        
         if not torch.is_tensor(discounts):
             discounts = torch.tensor(discounts, dtype=torch.float32, device=self.device)
         else:
             discounts = discounts.to(dtype=torch.float32, device=self.device)
+
+        # Identify next observation keys
+        next_obs_keys = [k for k in kwargs.keys() if 'next_observations' in k]
+        
+        # Convert next obs to tensors
+        next_obs_tensors = {}
+        for k in next_obs_keys:
+            val = kwargs[k]
+            if not torch.is_tensor(val):
+                val = torch.tensor(val, dtype=torch.float32, device=self.device)
+            else:
+                val = val.to(dtype=torch.float32, device=self.device)
+            next_obs_tensors[k] = val
 
         # Accumulate n-step returns.
         masks = torch.ones(self.num_workers, dtype=torch.float32, device=self.device)
@@ -190,10 +220,13 @@ class Buffer:
             self.buffers['discounts'][index] = (
                 (1 - masks) * self.buffers['discounts'][index] +
                 masks * new_discounts)
-            self.buffers['next_observations'][index] = (
-                (1 - masks)[:, None] *
-                self.buffers['next_observations'][index] +
-                masks[:, None] * next_observations)
+            
+            # Update next observations for all keys
+            for k in next_obs_keys:
+                self.buffers[k][index] = (
+                    (1 - masks)[:, None] *
+                    self.buffers[k][index] +
+                    masks[:, None] * next_obs_tensors[k])
 
     def get(self, *keys, steps):
         '''Get batches from named buffers.'''
@@ -229,6 +262,7 @@ class CategoricalWithSupport:
         self.logits = logits
         self.probabilities = torch.nn.functional.softmax(logits, dim=-1)
 
+    @property
     def mean(self):
         return (self.probabilities * self.values).sum(dim=-1)
 
@@ -276,6 +310,10 @@ class SquashedMultivariateNormalDiag:
     @property
     def loc(self):
         return torch.tanh(self._distribution.mean)
+
+    @property
+    def mean(self):
+        return self.loc
     
 class MeanStd(torch.nn.Module):
     def __init__(self, mean=0, std=1, clip=None, shape=None):
@@ -387,6 +425,8 @@ class NormalActionNoise:
         self.np_random = np.random.RandomState(seed)
 
     def __call__(self, observations, steps):
+        obs_for_len = observations['actor'] if isinstance(observations, dict) else observations
+
         if steps > self.start_steps:
             actions = self.policy(observations)
             # Exponential decay of the scale
@@ -395,7 +435,7 @@ class NormalActionNoise:
             actions = (actions + noises).astype(np.float32)
             actions = np.clip(actions, -1, 1)
         else:
-            shape = (len(observations), self.action_size)
+            shape = (len(obs_for_len), self.action_size)
             actions = self.np_random.uniform(-1, 1, shape)
         return actions
 
@@ -410,11 +450,16 @@ class NoActionNoise:
         self.np_random = np.random.RandomState(seed)
 
     def __call__(self, observations, steps):
+        if isinstance(observations, dict) and "actor" in observations:
+            obs_for_len = observations["actor"]
+        else:
+            obs_for_len = observations
+
         if steps > self.start_steps:
             actions = self.policy(observations)
         else:
-            shape = (len(observations), self.action_size)
-            actions = self.np_random.uniform(-np.pi, np.pi, shape)
+            shape = (len(obs_for_len), self.action_size)
+            actions = self.np_random.uniform(-1, 1, shape)
         return actions
 
     def update(self, resets):
@@ -485,7 +530,10 @@ class Trainer:
         # Start the environments.
         observations = self.environment.start()
 
-        num_workers = len(observations)
+        if isinstance(observations, dict):
+            num_workers = len(list(observations.values())[0])
+        else:
+            num_workers = len(observations)
         scores = np.zeros(num_workers)
         total_reward = np.zeros(num_workers)
         lengths = np.zeros(num_workers, int)
@@ -551,7 +599,8 @@ class Trainer:
                     if self.log:
                         writer.add_scalar('train/epoch_time', epoch_time, self.steps)
                         writer.add_scalar('train/steps_per_second', sps, self.steps)
-                        writer.add_scalar('train/epoch_mean_reward', np.mean(total_reward / episodes), self.steps)
+                        if episodes > 0:
+                            writer.add_scalar('train/epoch_mean_reward', np.mean(total_reward / episodes), self.steps)
                     
                     last_epoch_time = time.time()
                     epoch_steps = 0
@@ -611,3 +660,28 @@ class Trainer:
             # Log the data.
             # logger.store('test/episode_score', score, stats=True)
             # logger.store('test/episode_length', length, stats=True)
+
+class DistributionalValueHead(torch.nn.Module):
+    def __init__(self, vmin, vmax, num_atoms, input_size, return_normalizer=None, fn=None, device=torch.device("cpu")):
+        super().__init__()
+        self.num_atoms = num_atoms
+        self.fn = fn
+        self.values = torch.linspace(vmin, vmax, num_atoms).float().to(device)
+        if return_normalizer:
+            raise ValueError(
+                'Return normalizers cannot be used with distributional value'
+                'heads.')
+        self.distributional_layer = torch.nn.Linear(input_size, self.num_atoms)
+        if self.fn:
+            self.distributional_layer.apply(self.fn)
+            
+    def to(self, device):
+        """ Moves all components to a specific device """
+        super().to(device)
+        self.values = self.values.to(device)
+        self.distributional_layer.to(device)
+        return self
+    
+    def forward(self, inputs):
+        logits = self.distributional_layer(inputs)
+        return CategoricalWithSupport(values=self.values, logits=logits)

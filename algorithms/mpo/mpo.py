@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-from models.utils import Buffer
+from algorithms.utils import Buffer
 
 FLOAT_EPSILON = 1e-8
 
@@ -92,7 +92,7 @@ class MaximumAPosterioriPolicyOptimization:
         self.dual_optimizer.load_state_dict(checkpoint['dual_optimizer'])
         print(f"Loaded mpo model from {path}")
         
-    def __call__(self, observations):
+    def __call__(self, observations, critic_observations=None):
         def parametric_kl_and_dual_losses(kl, alpha, epsilon):
             kl_mean = kl.mean(dim=0)
             kl_loss = (alpha.detach() * kl_mean).sum()
@@ -151,8 +151,11 @@ class MaximumAPosterioriPolicyOptimization:
                 
             actions = target_distributions.sample((self.num_samples,))
 
+            # Use critic_observations if provided (for privileged critic)
+            critic_obs = critic_observations if critic_observations is not None else observations
+            
             # Tile the observations and actions for the critic.
-            tiled_observations = observations.unsqueeze(0).expand(self.num_samples, *observations.shape)
+            tiled_observations = critic_obs.unsqueeze(0).expand(self.num_samples, *critic_obs.shape)
             # Merge the first two dimensions for the observations and actions.
             flat_observations = tiled_observations.reshape(tiled_observations.shape[0] * tiled_observations.shape[1], *tiled_observations.shape[2:])
             flat_actions = actions.reshape(actions.shape[0] * actions.shape[1], *actions.shape[2:])
@@ -314,7 +317,8 @@ class ExpectedSARSA:
         print(f"Loaded mpo model from {path}")
         
     def __call__(
-        self, observations, actions, next_observations, rewards, discounts
+        self, observations, actions, next_observations, rewards, discounts,
+        next_actor_observations=None
     ):
         # Approximate the expected next values.
         with torch.no_grad():
@@ -325,12 +329,18 @@ class ExpectedSARSA:
                 
                 next_observations = next_observations.reshape(next_observations.shape[0], self.seq_length, -1)
                 next_observations = next_observations.transpose(0, 1)
-                next_target_distributions = self.model.target_actor(next_observations)
-                # Undo the flattening of the observations
+                
+                # Undo the flattening of the observations for target actor call if needed?
+                # Actually target_actor expects (seq, batch, obs) if recurrent.
+                actor_obs = next_actor_observations.reshape(next_actor_observations.shape[0], self.seq_length, -1).transpose(0,1) if next_actor_observations is not None else next_observations
+                next_target_distributions = self.model.target_actor(actor_obs)
+                
+                # Undo the flattening of the observations for the critic part
                 next_observations = next_observations.transpose(0, 1)
                 next_observations = next_observations.reshape(next_observations.shape[0], -1)
             else:
-                next_target_distributions = self.model.target_actor(next_observations)
+                actor_obs = next_actor_observations if next_actor_observations is not None else next_observations
+                next_target_distributions = self.model.target_actor(actor_obs)
                 
             next_actions = next_target_distributions.rsample(
                 (self.num_samples,))
@@ -383,6 +393,12 @@ class MPO():
             if actor_updater is None else actor_updater
         self.critic_updater = ExpectedSARSA(self.model, batch_size=num_workers, recurrent_model = recurrent_model, seq_length=max_seq_length, optimizer=critic_optimizer, config=config) \
             if critic_updater is None else critic_updater
+        
+        self.config = config
+        from gymnasium import spaces
+        self.is_dict_obs = isinstance(model.obs_space, spaces.Dict)
+        self.keys = ('observations_actor', 'actions', 'next_observations_actor', 'observations_critic', 'next_observations_critic', 'rewards', 'discounts') if self.is_dict_obs else \
+                    ('observations', 'actions', 'next_observations', 'rewards', 'discounts')
         
     def save(self, path):
         path = path + '.pt'
@@ -467,8 +483,14 @@ class MPO():
             terminations=terminations)
 
         # Prepare to update the normalizers.
-        if self.model.observation_normalizer:
+        if self.is_dict_obs:
+            if hasattr(self.model, 'actor_observation_normalizer') and self.model.actor_observation_normalizer:
+                self.model.actor_observation_normalizer.record(self.last_observations['actor'])
+            if hasattr(self.model, 'critic_observation_normalizer') and self.model.critic_observation_normalizer:
+                self.model.critic_observation_normalizer.record(self.last_observations['critic'])
+        elif self.model.observation_normalizer:
             self.model.observation_normalizer.record(self.last_observations)
+
         if self.model.return_normalizer:
             self.model.return_normalizer.record(rewards)
 
@@ -480,11 +502,17 @@ class MPO():
         return infos
 
     def _step(self, observations):
-        observations = torch.as_tensor(observations, dtype=torch.float32).to(self.device)
+        if self.is_dict_obs:
+            actor_obs = observations["actor"]
+        else:
+            actor_obs = observations
+            
+        actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32).to(self.device)
+        
         if self.recurrent_model:
             # Update the list of last observations for the recurrent model. Last observations must be of size:
             # (sequence_length, batch_size, observation_size)
-            self.observation_memory = torch.cat((self.observation_memory, observations.unsqueeze(0)), dim=0)
+            self.observation_memory = torch.cat((self.observation_memory, actor_obs.unsqueeze(0)), dim=0)
             self.observation_memory = self.observation_memory[1:]
             with torch.no_grad():
                 # Get the action from the model
@@ -493,12 +521,17 @@ class MPO():
 
         else: 
             with torch.no_grad():
-                return self.model.actor(observations).sample()
+                return self.model.actor(actor_obs).sample()
             
     def _test_step(self, observations):
-        observations = torch.as_tensor(observations, dtype=torch.float32)
+        if self.is_dict_obs:
+            actor_obs = observations["actor"]
+        else:
+            actor_obs = observations
+            
+        actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32)
         with torch.no_grad():
-            actions = self.model.actor(observations).sample()
+            actions = self.model.actor(actor_obs).sample()
             return actions
 
     def _update(self, steps):
@@ -509,7 +542,7 @@ class MPO():
         actor_loss = 0
         critic_loss = 0
         # Update both the actor and the critic multiple times.
-        for batch in self.replay.get(*keys, steps=steps):
+        for batch in self.replay.get(*self.keys, steps=steps):
             batch = {k: torch.as_tensor(v) for k, v in batch.items()}
             infos = self._update_actor_critic(**batch)
 
@@ -523,6 +556,11 @@ class MPO():
         # Update the normalizers.
         if self.model.observation_normalizer:
             self.model.observation_normalizer.update()
+        if hasattr(self.model, 'actor_observation_normalizer') and self.model.actor_observation_normalizer:
+            self.model.actor_observation_normalizer.update()
+        if hasattr(self.model, 'critic_observation_normalizer') and self.model.critic_observation_normalizer:
+            self.model.critic_observation_normalizer.update()
+            
         if self.model.return_normalizer:
             self.model.return_normalizer.update()
         
@@ -530,18 +568,37 @@ class MPO():
             actor_dual_loss=actor_dual_loss.detach(),
             actor_loss=actor_loss.detach(), critic_loss=critic_loss.detach())
 
-    def _update_actor_critic(
-        self, observations, actions, next_observations, rewards, discounts
-    ):
-        observations = torch.as_tensor(observations, dtype=torch.float32).to(self.device)
-        actions = torch.as_tensor(actions, dtype=torch.float32).to(self.device)
-        next_observations = torch.as_tensor(next_observations, dtype=torch.float32).to(self.device)
-        rewards = torch.as_tensor(rewards, dtype=torch.float32).to(self.device)
-        discounts = torch.as_tensor(discounts, dtype=torch.float32).to(self.device)
+    def _update_actor_critic(self, **kwargs):
+        if self.is_dict_obs:
+            observations = kwargs['observations_actor'] 
+            critic_observations = kwargs['observations_critic']
+            actions = kwargs['actions']
+            next_observations = kwargs['next_observations_actor']
+            next_critic_observations = kwargs['next_observations_critic']
+            rewards = kwargs['rewards']
+            discounts = kwargs['discounts']
         
-        critic_infos = self.critic_updater(observations, actions, next_observations, rewards, discounts)
-        actor_infos = self.actor_updater(observations)
-        
+            critic_infos = self.critic_updater(
+                observations=critic_observations, actions=actions, next_observations=next_critic_observations, 
+                rewards=rewards, discounts=discounts, 
+                next_actor_observations=next_observations
+            )
+            actor_infos = self.actor_updater(observations, critic_observations=critic_observations)
+        else:
+            observations = kwargs['observations']
+            actions = kwargs['actions']
+            next_observations = kwargs['next_observations']
+            rewards = kwargs['rewards']
+            discounts = kwargs['discounts']
+            
+            observations = torch.as_tensor(observations, dtype=torch.float32).to(self.device)
+            actions = torch.as_tensor(actions, dtype=torch.float32).to(self.device)
+            next_observations = torch.as_tensor(next_observations, dtype=torch.float32).to(self.device)
+            rewards = torch.as_tensor(rewards, dtype=torch.float32).to(self.device)
+            discounts = torch.as_tensor(discounts, dtype=torch.float32).to(self.device)
+            
+            critic_infos = self.critic_updater(observations, actions, next_observations, rewards, discounts)
+            actor_infos = self.actor_updater(observations)
         
         self.model.update_targets()
         return dict(critic=critic_infos, actor=actor_infos)
