@@ -1,6 +1,7 @@
 from models.mlp import MLPActor, MLPCritic
 from models.cnn import CNNActor, CNNCritic
 from models.lstm import LSTMActor, LSTMCritic
+from models.transformer import TransformerActor, TransformerCritic
 from config.schema import NetworkType, NetworkConfig
 import torch
 
@@ -14,7 +15,7 @@ class NetworkFactory:
         elif network_type == NetworkType.LSTM:
             return LSTMActor, LSTMCritic
         elif network_type == NetworkType.TRANSFORMER:
-            raise NotImplementedError("Transformer network not implemented yet.")
+            return TransformerActor, TransformerCritic
         else:
             raise ValueError(f"Unknown network type: {network_type}")
 
@@ -29,6 +30,8 @@ class NetworkFactory:
             return CNNActor(observation_space, history_size, action_space, config.hidden_sizes, cnn_sizes, normalizer, head_type)
         elif network_type == NetworkType.LSTM:
             return LSTMActor(observation_space, action_space, config.hidden_size, config.num_layers, normalizer, head_type, history_size, device)
+        elif network_type == NetworkType.TRANSFORMER:
+            return TransformerActor(observation_space, action_space, config.d_model, config.nhead, config.num_layers, config.dim_feedforward, normalizer, head_type, history_size, device)
         else:
             raise ValueError(f"Unknown actor network type: {network_type}")
 
@@ -42,6 +45,8 @@ class NetworkFactory:
             return CNNCritic(observation_space, history_size, action_space, config.hidden_sizes, cnn_sizes, normalizer, critic_type)
         elif network_type == NetworkType.LSTM:
             return LSTMCritic(observation_space, action_space, config.hidden_size, config.num_layers, normalizer, history_size, critic_type, device)
+        elif network_type == NetworkType.TRANSFORMER:
+            return TransformerCritic(observation_space, action_space, config.d_model, config.nhead, config.num_layers, config.dim_feedforward, normalizer, history_size, critic_type, device)
         else:
             raise ValueError(f"Unknown critic network type: {network_type}")
 

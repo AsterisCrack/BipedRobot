@@ -7,6 +7,7 @@ from algorithms.d4pg.model import D4PG
 from envs.distributed import distribute
 from envs.mujoco_env import MujocoEnv
 import os
+import shutil
 import torch
 import argparse
 
@@ -47,19 +48,33 @@ def train(config):
     checkpoint_path = config.train.checkpoint_path
     model_name = config.train.model_name
     
-    if not config.train.overwrite_model:
-        i=1
-        orig_model_name = model_name
-        if not os.path.exists(checkpoint_path):
-            os.makedirs(checkpoint_path)
-        while model_name in os.listdir(checkpoint_path):
-            model_name = orig_model_name + str(i)
-            i += 1
-            
     print(f"Model name: {model_name}")
     
+    # Ensure unique log and checkpoint directory
+    if not config.train.overwrite_model:
+        i = 1
+        original_model_name = model_name
+        # Check both checkpoint path and log path to be safe
+        while os.path.exists(os.path.join(checkpoint_path, model_name)) or os.path.exists(os.path.join(log_dir, model_name)):
+            model_name = f"{original_model_name}_{i}"
+            i += 1
+        if model_name != original_model_name:
+            print(f"Model name adjusted to avoid collision: {model_name}")
+    else:
+        # If overwrite is true, delete existing folders
+        checkpoint_dir = os.path.join(checkpoint_path, model_name)
+        log_run_dir = os.path.join(log_dir, model_name)
+        if os.path.exists(checkpoint_dir):
+            print(f"Overwriting checkpoint directory: {checkpoint_dir}")
+            shutil.rmtree(checkpoint_dir)
+        if os.path.exists(log_run_dir):
+            print(f"Overwriting log directory: {log_run_dir}")
+            shutil.rmtree(log_run_dir)
+    
     # Initialize model
-    model_init = lambda model: model(env=env, device=device, config=config)
+    use_history = config.train.use_history
+    history_size = config.train.history_size
+    model_init = lambda model: model(env=env, device=device, config=config, use_history=use_history, history_size=history_size)
     match config.train.model.lower():
         case "mpo":
             model = model_init(MPO)

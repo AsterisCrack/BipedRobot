@@ -25,9 +25,11 @@ class NetworkConfig(BaseModel):
     network_type: NetworkType = Field(default=NetworkType.MLP)
     hidden_sizes: List[int] = Field(default=[256, 256])
     cnn_sizes: Optional[List[List[int]]] = None
-    # LSTM specific
-    hidden_size: Optional[int] = 64
+    # Transformer specific
+    d_model: Optional[int] = 128
+    nhead: Optional[int] = 4
     num_layers: Optional[int] = 2
+    dim_feedforward: Optional[int] = 256
 class ModelConfig(BaseModel):
     # Backward compatibility fields
     network_type: Optional[NetworkType] = None
@@ -63,6 +65,12 @@ class EnvConfig(BaseModel):
     objective: EnvObjective = Field(default=EnvObjective.WALK)
     enable_mirroring: bool = Field(default=False)
     reward_weights: Dict[str, float] = Field(default_factory=dict)
+    
+    # Target velocity randomization (when objective == "target")
+    # Velocities are in robot reference frame
+    target_x_vel_range: List[float] = Field(default=[-0.5, 0.5])  # Forward/backward (m/s)
+    target_y_vel_range: List[float] = Field(default=[-0.3, 0.3])  # Left/right (m/s)
+    target_w_vel_range: List[float] = Field(default=[-1.0, 1.0])  # Angular velocity (rad/s)
     
 class TrainConfig(BaseModel):
     seed: int = 42

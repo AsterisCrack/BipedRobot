@@ -25,6 +25,9 @@ class MujocoEnv(BaseEnv):
         self.actor_obs_type = actor_obs
         self.critic_obs_type = critic_obs
         
+        # Set simulation frequency
+        self.model.opt.timestep = 1.0 / sim_frequency
+        
         # Mujoco IDs
         self.l_feet_body = self.model.body('l_foot').id
         self.r_feet_body = self.model.body('r_foot').id
@@ -33,14 +36,17 @@ class MujocoEnv(BaseEnv):
         self.floor_geom = self.model.geom('floor').id
         
         # State variables
-        self.target = 0.0
-        self.steps_in_target = 0
+        self.target = np.zeros(3)  # [x_vel, y_vel, w_vel] in robot frame
         self.prev_joint_pos = np.zeros(12)
         self.prev_actions = np.zeros(12)
         self.feet_contact_buffer = FeetContactBuffer(max_time=0.2)
         self.last_step_time = 0.0
         self.prev_left_contact = False
         self.prev_right_contact = False
+        
+        # Mirroring support
+        self.enable_mirroring = getattr(self.config, "enable_mirroring", False)
+        self.use_mirroring_this_episode = False
         
         # Randomizer
         # randomization_cfg is passed via env_config usually, but schema has it top level in Config. 
@@ -70,8 +76,8 @@ class MujocoEnv(BaseEnv):
         
         objective = getattr(self.config, "objective", "walk")
         if objective == "target":
-            self.normal_obs_dim += 1
-            self.privileged_obs_dim += 1
+            self.normal_obs_dim += 3  # x_vel, y_vel, w_vel targets
+            self.privileged_obs_dim += 3
 
         self.action_space = Box(low=-np.pi, high=np.pi, shape=(nu,), dtype=np.float32)
         
@@ -113,7 +119,8 @@ class MujocoEnv(BaseEnv):
         
         objective = getattr(self.config, "objective", "walk")
         if objective == "target":
-            obs = np.append(obs, np.abs(self.data.qpos[3] - self.target))
+            # Append target velocities [x_vel, y_vel, w_vel]
+            obs = np.concatenate([obs, self.target])
             
         return obs.astype(np.float32)
 
@@ -126,7 +133,8 @@ class MujocoEnv(BaseEnv):
         obs = np.concatenate([qpos, qvel])
         objective = getattr(self.config, "objective", "walk")
         if objective == "target":
-            obs = np.append(obs, np.abs(self.data.qpos[3] - self.target))
+            # Append target velocities [x_vel, y_vel, w_vel]
+            obs = np.concatenate([obs, self.target])
             
         return obs.astype(np.float32)
 
@@ -143,23 +151,43 @@ class MujocoEnv(BaseEnv):
         self.feet_contact_buffer.clear()
         self.last_step_time = self.data.time
         
+        # Randomize mirroring for this episode (50% chance)
+        if self.enable_mirroring:
+            self.use_mirroring_this_episode = np.random.rand() < 0.5
+        else:
+            self.use_mirroring_this_episode = False
+        
         objective = getattr(self.config, "objective", "walk")
         if objective == "target":
             self._reset_target()
 
         obs = self._build_obs(np.zeros(self.model.nu))
+        
+        # Apply mirroring if enabled for this episode
+        if self.use_mirroring_this_episode:
+            obs = self._mirror_observation(obs)
+        
         return obs, {}
 
     def step(self, action):
-        action = np.clip(action, self.action_space.low, self.action_space.high)
-        self.data.ctrl[:] = action
+        # Un-mirror action if mirroring is active
+        actual_action = action
+        if self.use_mirroring_this_episode:
+            actual_action = mirror_action(action, self.model.nu)
+        
+        actual_action = np.clip(actual_action, self.action_space.low, self.action_space.high)
+        self.data.ctrl[:] = actual_action
         mujoco.mj_step(self.model, self.data)
         
-        reward = self.reward_provider.compute(action)
+        reward = self.reward_provider.compute(actual_action)
         terminated = self._is_terminated()
         
-        obs = self._build_obs(action)
-        self.prev_actions = action.copy()
+        obs = self._build_obs(actual_action)
+        self.prev_actions = actual_action.copy()
+        
+        # Mirror observation if mirroring is active
+        if self.use_mirroring_this_episode:
+            obs = self._mirror_observation(obs)
         
         return obs, reward, terminated, False, self.reward_provider.get_reward_info()
 
@@ -183,19 +211,43 @@ class MujocoEnv(BaseEnv):
         return {"actor": actor_obs, "critic": critic_obs}
 
     def _reset_target(self):
-        self.target = np.random.uniform(0, 2 * np.pi)
-
-    def _check_reached_target(self):
-        yaw_diff = np.abs(self.data.qpos[3] - self.target)
-        if yaw_diff < 0.1:
-            self.steps_in_target += 1
-            if self.steps_in_target >= 100:
-                self.steps_in_target = 0
-                self._reset_target()
-                return True
-        else:
-            self.steps_in_target = 0
-        return False
+        """Reset target velocity in robot reference frame."""
+        x_range = getattr(self.config, "target_x_vel_range", [-0.5, 0.5])
+        y_range = getattr(self.config, "target_y_vel_range", [-0.3, 0.3])
+        w_range = getattr(self.config, "target_w_vel_range", [-1.0, 1.0])
+        
+        self.target[0] = np.random.uniform(x_range[0], x_range[1])  # x_vel
+        self.target[1] = np.random.uniform(y_range[0], y_range[1])  # y_vel
+        self.target[2] = np.random.uniform(w_range[0], w_range[1])  # w_vel
+    
+    def _mirror_observation(self, obs_dict):
+        """Mirror observation dictionary for data augmentation."""
+        mirrored_obs = {}
+        for key, obs in obs_dict.items():
+            if self.history_size > 0:
+                # For history, we need to mirror each timestep
+                # History format: [obs1, action1, obs2, action2, ...]
+                obs_dim = self.normal_obs_dim if key == "actor" and self.actor_obs_type == "normal" else self.privileged_obs_dim
+                if key == "critic" and self.critic_obs_type == "normal":
+                    obs_dim = self.normal_obs_dim
+                    
+                mirrored = obs.copy()
+                step_size = obs_dim + self.model.nu
+                for i in range(self.history_size):
+                    start_idx = i * step_size
+                    # Mirror observation part
+                    mirrored[start_idx:start_idx+obs_dim] = mirror_observation(
+                        obs[start_idx:start_idx+obs_dim], self.model.nu
+                    )
+                    # Mirror action part
+                    mirrored[start_idx+obs_dim:start_idx+step_size] = mirror_action(
+                        obs[start_idx+obs_dim:start_idx+step_size], self.model.nu
+                    )
+                mirrored_obs[key] = mirrored
+            else:
+                mirrored_obs[key] = mirror_observation(obs, self.model.nu)
+        
+        return mirrored_obs
 
     def _get_body_orientation(self, body_id):
         return self.data.xquat[body_id]
