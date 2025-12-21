@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-from algorithms.utils import Buffer
+from algorithms.utils import Buffer, to_tensor
 
 FLOAT_EPSILON = 1e-8
 
@@ -462,6 +462,11 @@ class MPO():
         # Sample actions for testing.
         return self._test_step(observations).numpy()
 
+    def test_update(self, **kwargs):
+        resets = kwargs.get('resets')
+        if resets is not None:
+            self.reset_observations(resets)
+
     def update(self, observations, rewards, resets, terminations, steps):
         # Store the last transitions in the replay.
         # If the model is recurrent we need to change the observations to include it correctly in the replay.
@@ -500,14 +505,14 @@ class MPO():
             infos = self._update(steps)
             
         return infos
+            
+    def _ensure_actor_tensor(self, observations):
+        if self.is_dict_obs and isinstance(observations, dict):
+            observations = observations["actor"]
+        return to_tensor(observations, self.device)
 
     def _step(self, observations):
-        if self.is_dict_obs:
-            actor_obs = observations["actor"]
-        else:
-            actor_obs = observations
-            
-        actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32).to(self.device)
+        actor_obs = self._ensure_actor_tensor(observations)
         
         if self.recurrent_model:
             # Update the list of last observations for the recurrent model. Last observations must be of size:
@@ -524,12 +529,7 @@ class MPO():
                 return self.model.actor(actor_obs).sample()
             
     def _test_step(self, observations):
-        if self.is_dict_obs:
-            actor_obs = observations["actor"]
-        else:
-            actor_obs = observations
-            
-        actor_obs = torch.as_tensor(actor_obs, dtype=torch.float32)
+        actor_obs = self._ensure_actor_tensor(observations)
         with torch.no_grad():
             actions = self.model.actor(actor_obs).sample()
             return actions

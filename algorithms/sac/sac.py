@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 import algorithms.ddpg.ddpg as ddpg
-from algorithms.utils import NoActionNoise, DecayingEntropyCoeff
+from algorithms.utils import NoActionNoise, DecayingEntropyCoeff, to_tensor
 
 class TwinCriticSoftDeterministicPolicyGradient:
     def __init__(self, model, action_space, device=torch.device("cpu"), seq_length=1, optimizer=None, entropy_coeff=DecayingEntropyCoeff(), gradient_clip=0, recurrent_model = False):
@@ -191,8 +191,13 @@ class SAC(ddpg.DDPG):
         super().__init__(action_space=action_space, model=model, recurrent_model=recurrent_model, max_seq_length=max_seq_length, num_workers=num_workers, seed=seed, replay=replay, exploration=exploration,
             actor_updater=actor_updater, critic_updater=critic_updater, device=device, config=config)
 
+    def _ensure_actor_tensor(self, observations):
+        if self.is_dict_obs and isinstance(observations, dict):
+            observations = observations["actor"]
+        return to_tensor(observations, self.device)
+
     def _stochastic_actions(self, observations):
-        observations = torch.as_tensor(observations, dtype=torch.float32)
+        observations = self._ensure_actor_tensor(observations)
         if self.recurrent_model:
             observations = observations.reshape(observations.shape[0], self.seq_length, -1)
             observations = observations.transpose(0, 1)
@@ -201,11 +206,10 @@ class SAC(ddpg.DDPG):
 
     def _policy(self, observations):
         # Send observations to device
-        observations = torch.as_tensor(observations, dtype=torch.float32)
         return self._stochastic_actions(observations).cpu().numpy()
 
     def _greedy_actions(self, observations):
-        observations = torch.as_tensor(observations, dtype=torch.float32)
+        observations = self._ensure_actor_tensor(observations)
         if self.recurrent_model:
             observations = observations.reshape(observations.shape[0], self.seq_length, -1)
             observations = observations.transpose(0, 1)

@@ -75,7 +75,9 @@ def train(config):
     steps = config.train.steps
     test_environment = None
     if config.train.test_environment:
-        test_environment = MujocoEnv(env_config=config.train.env_config)
+        test_env_builder = EnvBuilder(config=config, seed=seed + 1000)
+        test_environment = distribute(test_env_builder, worker_groups=1, workers_per_group=1, 
+                                      max_episode_steps=max_episode_steps)
 
     model.train(
         log_dir=log_dir,

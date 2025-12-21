@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from gymnasium import spaces
-from algorithms.utils import Buffer, NormalActionNoise
+from algorithms.utils import Buffer, NormalActionNoise, to_tensor
 
 class DeterministicPolicyGradient:
     def __init__(self, model, device=torch.device("cpu"), seq_length=1, optimizer=None, gradient_clip=0, recurrent_model = False):
@@ -208,12 +208,7 @@ class DDPG():
 
     def step(self, observations, steps):
         # Get actions from the actor and exploration method.
-        if self.is_dict_obs:
-            actor_obs = observations["actor"]
-        else:
-            actor_obs = observations
-            
-        actions = self.exploration(torch.as_tensor(actor_obs, dtype=torch.float32).to(self.device), steps)
+        actions = self.exploration(observations, steps)
         self.last_actions = actions.copy()
         
         # Keep some values for the next update.
@@ -237,6 +232,11 @@ class DDPG():
     def test_step(self, observations, steps):
         # Greedy actions for testing.
         return self._greedy_actions(observations).numpy()
+
+    def test_update(self, **kwargs):
+        resets = kwargs.get('resets')
+        if resets is not None:
+            self.reset_observations(resets)
 
     def update(self, observations, rewards, resets, terminations, steps):
         if self.recurrent_model:
@@ -273,9 +273,14 @@ class DDPG():
         self.exploration.update(resets)
         
         return infos
+        
+    def _ensure_actor_tensor(self, observations):
+        if self.is_dict_obs and isinstance(observations, dict):
+            observations = observations["actor"]
+        return to_tensor(observations, self.device)
 
     def _greedy_actions(self, observations):
-        observations = torch.as_tensor(observations, dtype=torch.float32)
+        observations = self._ensure_actor_tensor(observations)
         with torch.no_grad():
             return self.model.actor(observations)
 

@@ -7,6 +7,12 @@ from tensorboardX import SummaryWriter
 from tqdm import tqdm
 from utils import NoConfig
 
+def to_tensor(obs, device):
+    """Converts observations (array or dict) to torch tensors."""
+    if isinstance(obs, dict):
+        return {k: torch.as_tensor(v, dtype=torch.float32, device=device) for k, v in obs.items()}
+    return torch.as_tensor(obs, dtype=torch.float32, device=device)
+
 class OptimizerWithScheduler(torch.optim.Optimizer):
     """ Wrapper for optimizers with a scheduler. """
     def __init__(self, optimizer, scheduler):
@@ -633,7 +639,11 @@ class Trainer:
         # Start the environment.
         if not hasattr(self, 'test_observations'):
             self.test_observations = self.test_environment.start()
-            assert len(self.test_observations) == 1
+            if isinstance(self.test_observations, dict):
+                batch_size = next(iter(self.test_observations.values())).shape[0]
+            else:
+                batch_size = self.test_observations.shape[0]
+            assert batch_size == 1
 
         # Test loop.
         for _ in range(self.test_episodes):
