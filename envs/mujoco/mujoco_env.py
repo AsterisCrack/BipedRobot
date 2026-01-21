@@ -2,7 +2,7 @@ import gymnasium as gym
 from gymnasium.spaces import Box, Dict
 import numpy as np
 import mujoco
-from envs.base_env import BaseEnv, FeetContactBuffer
+from envs.mujoco.base_env import BaseEnv, FeetContactBuffer
 from envs.utils.randomizer import Randomizer
 from envs.rewards.walk_reward import WalkReward
 from envs.rewards.target_reward import TargetReward

@@ -96,21 +96,28 @@ class LSTMCritic(nn.Module):
         self.critic_type = critic_type
         self.action_size = action_space.shape[0]
 
-        self.torso_out_layer = nn.Sequential(nn.Linear(hidden_size + self.action_size, hidden_size), nn.ReLU())
+        if critic_type == "value":
+            self.torso_out_layer = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.ReLU())
+        else:
+            self.torso_out_layer = nn.Sequential(nn.Linear(hidden_size + self.action_size, hidden_size), nn.ReLU())
 
-        if critic_type == "deterministic":
+        if critic_type == "deterministic" or critic_type == "value":
             self.value_layer = nn.Linear(hidden_size, 1)
         elif critic_type == "distributional":
             self.value_layer = DistributionalValueHead(-150, 150, 51, hidden_size)
 
-    def forward(self, observations, actions, hidden_state=None):
+    def forward(self, observations, actions=None, hidden_state=None):
         out, _ = self.torso(observations, hidden_state)
         out = torch.relu(out)
         
-        combined = torch.cat([out, actions], dim=-1)
+        if self.critic_type == "value":
+            combined = out
+        else:
+            combined = torch.cat([out, actions], dim=-1)
+            
         out = self.torso_out_layer(combined)
         
-        if self.critic_type == "deterministic":
+        if self.critic_type == "deterministic" or self.critic_type == "value":
             value = self.value_layer(out)
             return torch.squeeze(value, -1)
         else:

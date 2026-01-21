@@ -21,5 +21,3 @@ class MPO(Model):
             dual_optimizer=self.dual_optimizer,
             critic_optimizer=self.critic_optimizer,
         )
-        
-        self._init_trainer()

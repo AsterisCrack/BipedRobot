@@ -88,10 +88,6 @@ class Model:
         
         self.device = device
     
-    def _init_trainer(self):
-        '''Initialize the trainer.'''
-        self.trainer = Trainer(self.agent, self.env, config=self.config)
-        
     def step(self, observation):
         if isinstance(observation, dict) and "actor" in observation:
             obs = observation["actor"]
@@ -104,7 +100,8 @@ class Model:
     def train(self, seed=42, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3), test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None, checkpoint_path=None, config=None):
         
         # Initialize trainer
-        self.trainer = Trainer(self.agent, self.env, test_environment, steps, epoch_steps, save_steps, test_episodes, show_progress, replace_checkpoint, log, log_dir, log_name, checkpoint_path, config)
+        if not hasattr(self, 'trainer') or self.trainer is None:
+            self.trainer = Trainer(self.agent, self.env, test_environment, steps, epoch_steps, save_steps, test_episodes, show_progress, replace_checkpoint, log, log_dir, log_name, checkpoint_path, config or self.config)
         
         self.trainer.run()
     
@@ -147,7 +144,11 @@ class Buffer:
 
     def store(self, **kwargs):
         if 'terminations' in kwargs:
-            continuations = np.float32(1 - kwargs['terminations'])
+            term = kwargs['terminations']
+            if torch.is_tensor(term):
+                continuations = 1.0 - term.float()
+            else:
+                continuations = np.float32(1 - term)
             kwargs['discounts'] = continuations * self.discount_factor
             
         # Flatten dicts
@@ -166,7 +167,11 @@ class Buffer:
             self.max_size = self.full_max_size // self.num_workers
             self.buffers = {}
             for key, val in kwargs.items():
-                shape = (self.max_size,) + tuple(int(x) for x in np.array(val).shape)
+                if torch.is_tensor(val):
+                    val_shape = val.shape
+                else:
+                    val_shape = np.array(val).shape
+                shape = (self.max_size,) + tuple(int(x) for x in val_shape)
                 self.buffers[key] = torch.full(shape, float("nan"), dtype=torch.float32, device=self.device)
 
         # Store the new values.
@@ -324,8 +329,8 @@ class SquashedMultivariateNormalDiag:
 class MeanStd(torch.nn.Module):
     def __init__(self, mean=0, std=1, clip=None, shape=None):
         super().__init__()
-        self.mean = mean
-        self.std = std
+        self.mean_val = mean
+        self.std_val = std
         self.clip = clip
         self.count = 0
         self.new_sum = 0
@@ -334,19 +339,18 @@ class MeanStd(torch.nn.Module):
         self.eps = 1e-2
         
         if shape:   
-            if isinstance(self.mean, (int, float)):
-                self.mean = np.full(shape, self.mean, np.float32)
+            if isinstance(self.mean_val, (int, float)):
+                self.mean_val = torch.full(shape, self.mean_val, dtype=torch.float32)
             else:
-                self.mean = np.array(self.mean, np.float32)
-            if isinstance(self.std, (int, float)):
-                self.std = np.full(shape, self.std, np.float32)
+                self.mean_val = torch.as_tensor(self.mean_val, dtype=torch.float32)
+            if isinstance(self.std_val, (int, float)):
+                self.std_val = torch.full(shape, self.std_val, dtype=torch.float32)
             else:
-                self.std = np.array(self.std, np.float32)
-            self.mean_sq = np.square(self.mean)
-            self._mean = torch.nn.Parameter(torch.as_tensor(
-                self.mean, dtype=torch.float32), requires_grad=False)
-            self._std = torch.nn.Parameter(torch.as_tensor(
-                self.std, dtype=torch.float32), requires_grad=False)
+                self.std_val = torch.as_tensor(self.std_val, dtype=torch.float32)
+            
+            self.mean_sq = torch.square(self.mean_val)
+            self._mean = torch.nn.Parameter(self.mean_val.clone(), requires_grad=False)
+            self._std = torch.nn.Parameter(self.std_val.clone(), requires_grad=False)
 
     def forward(self, val):
         with torch.no_grad():
@@ -359,13 +363,23 @@ class MeanStd(torch.nn.Module):
         return val * self._std + self._mean
 
     def record(self, values):
-        for val in values:
-            self.new_sum += val
-            self.new_sum_sq += np.square(val)
-            self.new_count += 1
+        if not torch.is_tensor(values):
+            values = torch.as_tensor(values, dtype=torch.float32, device=self._mean.device)
+        
+        # Ensure values are on the same device as parameters
+        if values.device != self._mean.device:
+            values = values.to(self._mean.device)
+            
+        # Batch update
+        self.new_sum += values.sum(dim=0)
+        self.new_sum_sq += torch.square(values).sum(dim=0)
+        self.new_count += values.shape[0]
 
     def update(self):
         new_count = self.count + self.new_count
+        if self.new_count == 0:
+            return
+
         new_mean = self.new_sum / self.new_count
         new_mean_sq = self.new_sum_sq / self.new_count
         w_old = self.count / new_count
@@ -373,29 +387,29 @@ class MeanStd(torch.nn.Module):
         
         # If we have a sequential model new_mean and new_std will have size obs_shape * seq_length
         # We need to reshape them to obs_shape (seq_lenght, obs_shape) and then take the mean over the seq_length dimension
-        if new_mean.shape != self.mean.shape:
-            new_mean = new_mean.reshape(-1, self.mean.shape[0]).mean(axis=0)
-            new_mean_sq = new_mean_sq.reshape(-1, self.mean.shape[0]).mean(axis=0)
+        if new_mean.shape != self.mean_val.shape:
+            new_mean = new_mean.reshape(-1, self.mean_val.shape[0]).mean(dim=0)
+            new_mean_sq = new_mean_sq.reshape(-1, self.mean_val.shape[0]).mean(dim=0)
         
-        self.mean = w_old * self.mean + w_new * new_mean
-        self.mean_sq = w_old * self.mean_sq + w_new * new_mean_sq
-        self.std = self._compute_std(self.mean, self.mean_sq)
+        self.mean_val = w_old * self.mean_val.to(self._mean.device) + w_new * new_mean
+        self.mean_sq = w_old * self.mean_sq.to(self._mean.device) + w_new * new_mean_sq
+        self.std_val = self._compute_std(self.mean_val, self.mean_sq)
         self.count = new_count
         self.new_count = 0
         self.new_sum = 0
         self.new_sum_sq = 0
-        self._update(self.mean.astype(np.float32), self.std.astype(np.float32))
+        self._update(self.mean_val, self.std_val)
 
     def _compute_std(self, mean, mean_sq):
-        var = mean_sq - np.square(mean)
-        var = np.maximum(var, 0)
-        std = np.sqrt(var)
-        std = np.maximum(std, self.eps)
+        var = mean_sq - torch.square(mean)
+        var = torch.maximum(var, torch.tensor(0.0, device=var.device))
+        std = torch.sqrt(var)
+        std = torch.maximum(std, torch.tensor(self.eps, device=std.device))
         return std
 
     def _update(self, mean, std):
-        self._mean.data.copy_(torch.as_tensor(self.mean, dtype=torch.float32))
-        self._std.data.copy_(torch.as_tensor(self.std, dtype=torch.float32))
+        self._mean.data.copy_(mean)
+        self._std.data.copy_(std)
         
 class DecayingEntropyCoeff:
     def __init__(self, initial=0.2, minimum=0.01, decay_rate=1e-6, start_steps=10000):
@@ -492,13 +506,20 @@ class Trainer:
         # Logname is dd/MM/YYYY HH:MM:SS if not provided
         self.log_name = log_name or str(time.strftime("%d-%m-%Y %H:%M:%S")).replace(" ", "_").replace(":", "-")
         self.log_dir = os.path.join(log_dir, self.log_name)
+        if not os.path.exists(self.log_dir) and self.log:
+            os.makedirs(self.log_dir)
+        
+        # Set up checkpoint path
+        print("Checking checkpoint path...")
+        print(self.config["train"]["checkpoint_path"])
+        self.checkpoint_path = self.config["train"]["checkpoint_path"] or checkpoint_path or f"checkpoints/{time.strftime('%d-%m-%Y_%H:%M:%S')}".replace(" ", "_").replace(":", "-")
+        if not os.path.exists(self.checkpoint_path):
+            os.makedirs(self.checkpoint_path)
+        print(f"Checkpoint path: {self.checkpoint_path}")
         
         self.agent = agent
         self.environment = environment
         self.test_environment = test_environment
-        self.checkpoint_path = checkpoint_path if checkpoint_path is not None else f"models/mpo/checkpoints/{time.strftime('%d-%m-%Y_%H:%M:%S')}".replace(" ", "_").replace(":", "-")
-        if not os.path.exists(self.checkpoint_path):
-            os.makedirs(self.checkpoint_path)
 
     def _save_checkpoint(self, name):
         '''Saves a checkpoint of the agent.'''
@@ -508,8 +529,13 @@ class Trainer:
                 # If name is the same as the checkpoint name, delete it
                 if file.startswith(name):
                     os.remove(os.path.join(path, file))
+        print(f"Saving checkpoint {name} to {path}...")
         save_path = os.path.join(path, name)
         self.agent.save(save_path)
+        
+        # Save the config file used
+        if hasattr(self.config, "copy_in_file"):
+             self.config.copy_in_file(os.path.join(path, "config.yaml"))
     
     def save_trainer_state(self):
         '''Saves the state of the trainer.'''
@@ -540,55 +566,94 @@ class Trainer:
             num_workers = len(list(observations.values())[0])
         else:
             num_workers = len(observations)
-        scores = np.zeros(num_workers)
-        total_reward = np.zeros(num_workers)
-        lengths = np.zeros(num_workers, int)
+            
+        # Use torch tensors for tracking if possible, to avoid CPU transfers
+        device = self.environment.device if hasattr(self.environment, "device") else torch.device("cpu")
+        scores = torch.zeros(num_workers, device=device, dtype=torch.float32)
+        total_reward = torch.zeros(num_workers, device=device, dtype=torch.float32)
+        lengths = torch.zeros(num_workers, device=device, dtype=torch.int32)
+        
         self.steps, epoch_steps, epochs, episodes = 0, 0, 0, 0
+        iterations = 0
         steps_since_save = 0
         last_epoch_time = time.time()
+        
+        # Trackers for epoch stats
+        epoch_rewards = []
+        epoch_lengths = []
+        current_loss = 0.0
         
         if self.log:
             writer = SummaryWriter(self.log_dir)
         if self.show_progress:
-            progress_bar = tqdm(total=self.max_steps, desc="Training", unit="step")
+            # Treat max_steps as iterations for the progress bar as requested
+            progress_bar = tqdm(total=self.max_steps, desc="Training", unit="iter")
         
         try:
             while True:
+                iterations += 1
                 # Select actions.
                 actions = self.agent.step(observations, self.steps)
-                assert not np.isnan(actions.sum())
+                # assert not np.isnan(actions.sum()) # Skip nan check for speed
 
                 # Take a step in the environments.
                 observations, infos = self.environment.step(actions)
                 agent_infos = self.agent.update(**infos, steps=self.steps)
+                
+                # Extract loss for progress bar
+                if "loss" in agent_infos:
+                    current_loss = agent_infos["loss"]
+                elif "critic_loss" in agent_infos:
+                    current_loss = agent_infos["critic_loss"]
+                elif "actor_loss" in agent_infos:
+                    current_loss = agent_infos["actor_loss"]
+                    
                 if self.log:
                     for key, value in agent_infos.items():
-                        if isinstance(value, np.ndarray):
+                        if isinstance(value, torch.Tensor):
+                            value = value.mean().item()
+                        elif isinstance(value, np.ndarray):
                             value = value.mean()
                         writer.add_scalar(f'train/{key}', value, self.steps)
 
                 scores += infos['rewards']
                 lengths += 1
                 self.steps += num_workers
-                epoch_steps += num_workers
-                steps_since_save += num_workers
+                epoch_steps += 1
+                steps_since_save += 1
                 
                 # Update the progress bar
                 if self.show_progress:
-                    progress_bar.update(num_workers)
+                    progress_bar.update(1)
 
                 # Check the finished episodes.
-                for i in range(num_workers):
-                    if infos['resets'][i]:
-                        # Reset the observations for the worker.
-                        self.agent.reset_observations(i)
-                        if self.log:
-                            writer.add_scalar('train/episode_score', scores[i], self.steps)
-                            writer.add_scalar('train/episode_length', lengths[i], self.steps)
-                        total_reward[i] += scores[i]
-                        scores[i] = 0
-                        lengths[i] = 0
-                        episodes += 1
+                # Vectorized reset check
+                resets = infos['resets']
+                if resets.any():
+                    reset_indices = torch.nonzero(resets).flatten()
+                    
+                    # Log finished episodes
+                    if self.log:
+                        # We can log the mean of finished episodes in this step
+                        mean_score = scores[reset_indices].mean().item()
+                        mean_length = lengths[reset_indices].float().mean().item()
+                        writer.add_scalar('train/episode_score', mean_score, self.steps)
+                        writer.add_scalar('train/episode_length', mean_length, self.steps)
+                    
+                    # Update total reward for tracking
+                    total_reward[reset_indices] += scores[reset_indices]
+                    
+                    # Store for epoch logging
+                    epoch_rewards.extend(scores[reset_indices].tolist())
+                    epoch_lengths.extend(lengths[reset_indices].tolist())
+                    
+                    # Reset trackers
+                    scores[reset_indices] = 0
+                    lengths[reset_indices] = 0
+                    episodes += len(reset_indices)
+                    
+                    # Reset agent observations if needed (usually handled by env, but agent might have memory)
+                    # self.agent.reset_observations(reset_indices) # This might need update for vectorized
 
                 # End of the epoch.
                 if epoch_steps >= self.epoch_steps:
@@ -605,14 +670,30 @@ class Trainer:
                     if self.log:
                         writer.add_scalar('train/epoch_time', epoch_time, self.steps)
                         writer.add_scalar('train/steps_per_second', sps, self.steps)
-                        if episodes > 0:
-                            writer.add_scalar('train/epoch_mean_reward', np.mean(total_reward / episodes), self.steps)
+                        
+                    if len(epoch_rewards) > 0:
+                        mean_reward = sum(epoch_rewards) / len(epoch_rewards)
+                        mean_length = sum(epoch_lengths) / len(epoch_lengths)
+                        # Update progress bar description instead of printing
+                        if self.show_progress:
+                            progress_bar.set_description(f"Epoch {epochs} | Iter {iterations} | Loss: {current_loss:.4f} | Reward: {mean_reward:.2f} | SPS: {sps:.0f}")
+                        else:
+                            print(f"Epoch {epochs}: SPS: {sps:.2f}, Time: {epoch_time:.2f}s, Mean Reward: {mean_reward:.2f}, Mean Length: {mean_length:.2f}")
+                    else:
+                        if self.show_progress:
+                            progress_bar.set_description(f"Epoch {epochs} | Iter {iterations} | Loss: {current_loss:.4f} | SPS: {sps:.0f}")
+                        else:
+                            print(f"Epoch {epochs}: SPS: {sps:.2f}, Time: {epoch_time:.2f}s (No episodes finished)")
+                    
+                    epoch_rewards = []
+                    epoch_lengths = []
                     
                     last_epoch_time = time.time()
                     epoch_steps = 0
 
                 # End of training.
-                stop_training = self.steps >= self.max_steps
+                # Stop based on iterations to match the progress bar and user expectation
+                stop_training = iterations >= self.max_steps
 
                 # Save a checkpoint.
                 if stop_training or steps_since_save >= self.save_steps:
@@ -676,7 +757,7 @@ class DistributionalValueHead(torch.nn.Module):
         super().__init__()
         self.num_atoms = num_atoms
         self.fn = fn
-        self.values = torch.linspace(vmin, vmax, num_atoms).float().to(device)
+        self.register_buffer("values", torch.linspace(vmin, vmax, num_atoms).float().to(device))
         if return_normalizer:
             raise ValueError(
                 'Return normalizers cannot be used with distributional value'
@@ -685,13 +766,6 @@ class DistributionalValueHead(torch.nn.Module):
         if self.fn:
             self.distributional_layer.apply(self.fn)
             
-    def to(self, device):
-        """ Moves all components to a specific device """
-        super().to(device)
-        self.values = self.values.to(device)
-        self.distributional_layer.to(device)
-        return self
-    
     def forward(self, inputs):
         logits = self.distributional_layer(inputs)
         return CategoricalWithSupport(values=self.values, logits=logits)

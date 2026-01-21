@@ -41,6 +41,16 @@ class Config:
         if hasattr(val, "model_dump"):
             return val.model_dump()
         return val
+        
+    def get(self, key, default=None):
+        if hasattr(self.config_obj, key):
+            val = getattr(self.config_obj, key)
+            if val is None:
+                return default
+            if hasattr(val, "model_dump"):
+                return val.model_dump()
+            return val
+        return default
 
     def __getattr__(self, name):
         # Allow attribute access

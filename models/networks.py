@@ -92,6 +92,19 @@ class ActorCriticWithTargets(BaseActorCritic):
     def _get_sync_pairs(self):
         return [(self.target_actor, self.actor), (self.target_critic, self.critic)]
 
+class ActorCritic(BaseActorCritic):
+    def __init__(self, obs_space, action_space, actor_sizes=None, critic_sizes=None, actor_type="gaussian", critic_type="deterministic", use_history=False, history_size=0, device=torch.device("cpu"), network_type=None, config=None):
+        super().__init__(obs_space, target_coeff=0.0) # No targets
+        
+        actor_config, critic_config = self._resolve_configs(config, network_type, use_history, actor_sizes, critic_sizes)
+
+        # Build networks using factory
+        self.actor = NetworkFactory.build_actor(actor_config, self.actor_obs_space, action_space, self.actor_observation_normalizer, actor_type, history_size, device)
+        self.critic = NetworkFactory.build_critic(critic_config, self.critic_obs_space, action_space, self.critic_observation_normalizer, critic_type, history_size, device)
+
+    def _get_sync_pairs(self):
+        return []
+
 class ActorTwinCriticWithTargets(BaseActorCritic):
     def __init__(self, obs_space, action_space, actor_sizes=None, critic_sizes=None, actor_type="gaussian", use_history=False, history_size=0, target_coeff=0.005, device=torch.device("cpu"), network_type=None, config=None):
         super().__init__(obs_space, target_coeff)

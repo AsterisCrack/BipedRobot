@@ -18,7 +18,5 @@ class SAC(Model):
             device=device,
             config=config,
         )
-        
-        self._init_trainer()
 
         

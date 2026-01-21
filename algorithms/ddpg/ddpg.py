@@ -238,7 +238,7 @@ class DDPG():
         if resets is not None:
             self.reset_observations(resets)
 
-    def update(self, observations, rewards, resets, terminations, steps):
+    def update(self, observations, rewards, resets, terminations, steps, **kwargs):
         if self.recurrent_model:
             observations = torch.as_tensor(observations, dtype=torch.float32)
             observations = torch.cat((self.observation_memory.cpu().clone(), observations.unsqueeze(0)), dim=0)

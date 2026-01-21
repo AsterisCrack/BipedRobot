@@ -20,5 +20,3 @@ class D4PG(Model):
             config=config,
         )
         
-        self._init_trainer()
-        

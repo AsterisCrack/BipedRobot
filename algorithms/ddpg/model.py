@@ -21,6 +21,4 @@ class DDPG(Model):
             config=config,
         )
         
-        self._init_trainer()
-        
         

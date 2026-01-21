@@ -11,9 +11,11 @@ class ModelType(str, Enum):
     DDPG = "ddpg"
     D4PG = "d4pg"
     MPO = "mpo"
+    PPO = "ppo"
 class ObsType(str, Enum):
     NORMAL = "normal"
     PRIVILEGED = "privileged"
+    BASIC = "basic"
 class EnvObjective(str, Enum):
     WALK = "walk"
     TARGET = "target"
@@ -66,11 +68,32 @@ class EnvConfig(BaseModel):
     enable_mirroring: bool = Field(default=False)
     reward_weights: Dict[str, float] = Field(default_factory=dict)
     
+    # Commands structure matching config.yaml
+    commands: Optional[Dict[str, Any]] = None
+
     # Target velocity randomization (when objective == "target")
     # Velocities are in robot reference frame
     target_x_vel_range: List[float] = Field(default=[-0.5, 0.5])  # Forward/backward (m/s)
     target_y_vel_range: List[float] = Field(default=[-0.3, 0.3])  # Left/right (m/s)
     target_w_vel_range: List[float] = Field(default=[-1.0, 1.0])  # Angular velocity (rad/s)
+
+    # Mirroring
+    mirror_joint_indices: Optional[List[int]] = None
+
+    # Randomization & Events
+    enable_perturbations: bool = False
+    push_interval_s: float = 15.0
+    push_vel_range: float = 1.0
+    
+    enable_physics_randomization: bool = False
+    events: Optional[Dict[str, Any]] = None
+    
+    # Noise
+    observation_noise_model: Optional[Dict[str, float]] = None
+    action_noise_model: Optional[Dict[str, float]] = None
+    
+    class Config:
+        extra = "allow" # Allow extra fields to avoid validation errors for complex nested dicts
     
 class TrainConfig(BaseModel):
     seed: int = 42
@@ -118,8 +141,21 @@ class RandomizationConfig(BaseModel):
     
     class Config:
         extra = "allow" # Allow extra fields if any
+
+class PPOConfig(BaseModel):
+    clip_param: float = 0.2
+    ppo_epoch: int = 4
+    num_mini_batches: int = 4
+    value_loss_coef: float = 0.5
+    entropy_coef: float = 0.01
+    gamma: float = 0.99
+    gae_lambda: float = 0.95
+    max_grad_norm: float = 0.5
+    num_steps: int = 2048
+
 class Config(BaseModel):
     train: TrainConfig
     model: ModelConfig
-    buffer: BufferConfig
+    buffer: Optional[BufferConfig] = None
+    ppo: Optional[PPOConfig] = None
     randomization: Optional[RandomizationConfig] = Field(default_factory=RandomizationConfig)

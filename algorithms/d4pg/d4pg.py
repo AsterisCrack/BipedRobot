@@ -62,7 +62,7 @@ class DistributionalDeterministicPolicyGradient:
         # Use critic_observations if provided (for privileged critic)
         critic_obs = critic_observations if critic_observations is not None else observations
         value_distributions = self.model.critic(critic_obs, actions)
-        values = value_distributions.mean()
+        values = value_distributions.mean
         loss = -values.mean()
 
         loss.backward()

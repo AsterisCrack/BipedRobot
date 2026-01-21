@@ -95,22 +95,31 @@ class CNNCritic(nn.Module):
         self.action_size = action_space.shape[0]
         
         # Note: CNN Critic traditionally concatenates action AFTER CNN
-        sizes = [self.torso.output_size + self.action_size] + hidden_sizes
+        if critic_type == "value":
+            sizes = [self.torso.output_size] + hidden_sizes
+        else:
+            sizes = [self.torso.output_size + self.action_size] + hidden_sizes
+            
         layers = []
         for i in range(len(sizes) - 1):
             layers += [nn.Linear(sizes[i], sizes[i + 1]), nn.Tanh()]
         self.net = nn.Sequential(*layers)
         
-        if critic_type == "deterministic":
+        if critic_type == "deterministic" or critic_type == "value":
             self.value_layer = nn.Linear(hidden_sizes[-1], 1)
         elif critic_type == "distributional":
             self.value_layer = DistributionalValueHead(-150, 150, 51, hidden_sizes[-1])
 
-    def forward(self, observations, actions):
+    def forward(self, observations, actions=None):
         out = self.torso(observations)
-        out = torch.cat([out, actions], dim=-1)
-        out = self.net(out)
-        if self.critic_type == "deterministic":
+        
+        if self.critic_type == "value":
+            combined = out
+        else:
+            combined = torch.cat([out, actions], dim=-1)
+            
+        out = self.net(combined)
+        if self.critic_type == "deterministic" or self.critic_type == "value":
             value = self.value_layer(out)
             return torch.squeeze(value, -1)
         elif self.critic_type == "distributional":

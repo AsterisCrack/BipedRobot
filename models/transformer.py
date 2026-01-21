@@ -190,9 +190,12 @@ class TransformerCritic(nn.Module):
         self.action_size = action_space.shape[0]
         self.device = device
 
-        self.torso_out_layer = nn.Sequential(nn.Linear(d_model + self.action_size, d_model), nn.GELU())
+        if critic_type == "value":
+            self.torso_out_layer = nn.Sequential(nn.Linear(d_model, d_model), nn.GELU())
+        else:
+            self.torso_out_layer = nn.Sequential(nn.Linear(d_model + self.action_size, d_model), nn.GELU())
 
-        if critic_type == "deterministic":
+        if critic_type == "deterministic" or critic_type == "value":
             self.value_layer = nn.Linear(d_model, 1)
         elif critic_type == "distributional":
             self.value_layer = DistributionalValueHead(-150, 150, 51, d_model)
@@ -202,14 +205,18 @@ class TransformerCritic(nn.Module):
         # Print parameter count
         print(f"Parameter count critic: {sum(p.numel() for p in self.parameters())}")
 
-    def forward(self, observations, actions):
+    def forward(self, observations, actions=None):
         out = self.torso(observations)
         out = F.gelu(out)
         
-        combined = torch.cat([out, actions], dim=-1)
+        if self.critic_type == "value":
+            combined = out
+        else:
+            combined = torch.cat([out, actions], dim=-1)
+            
         out = self.torso_out_layer(combined)
         
-        if self.critic_type == "deterministic":
+        if self.critic_type == "deterministic" or self.critic_type == "value":
             value = self.value_layer(out)
             return torch.squeeze(value, -1)
         else:

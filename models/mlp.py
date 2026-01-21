@@ -59,20 +59,26 @@ class MLPActor(nn.Module):
 class MLPCritic(nn.Module):
     def __init__(self, observation_space, action_space, hidden_sizes, observation_normalizer=None, critic_type="deterministic"):
         super().__init__()
-        # Note: MLPCritic historically concatenated action at the start. 
-        self.torso = MLPTorso(observation_space.shape[0] + action_space.shape[0], hidden_sizes, observation_normalizer=observation_normalizer)
         self.critic_type = critic_type
+        
+        # Determine input size based on critic type
+        if critic_type == "value":
+            input_size = observation_space.shape[0]
+        else:
+            input_size = observation_space.shape[0] + action_space.shape[0]
+            
+        self.torso = MLPTorso(input_size, hidden_sizes, observation_normalizer=observation_normalizer)
         
         # Legacy temporal pooling components
         self.obs_reducer = nn.Linear(observation_space.shape[0], observation_space.shape[0])
         self.pool = nn.MaxPool1d(kernel_size=2, stride=2)
         
-        if critic_type == "deterministic":
+        if critic_type == "deterministic" or critic_type == "value":
             self.value_layer = nn.Linear(self.torso.output_size, 1)
         elif critic_type == "distributional":
             self.value_layer = DistributionalValueHead(-150, 150, 51, self.torso.output_size)
 
-    def forward(self, observations, actions):
+    def forward(self, observations, actions=None):
         if self.torso.observation_normalizer:
             observations = self.torso.observation_normalizer(observations)
         
@@ -80,12 +86,16 @@ class MLPCritic(nn.Module):
             # Sequential observations (legacy pooling logic)
             observations = self.obs_reducer(observations)
             observations = self.pool(observations.transpose(1, 2)).transpose(1, 2)
-            observations = observations.reshape(actions.shape[0], -1)
+            observations = observations.reshape(observations.shape[0], -1)
 
-        out = torch.cat([observations, actions], dim=-1)
+        if self.critic_type == "value":
+            out = observations
+        else:
+            out = torch.cat([observations, actions], dim=-1)
+            
         out = self.torso.net(out) 
         
-        if self.critic_type == "deterministic":
+        if self.critic_type == "deterministic" or self.critic_type == "value":
             value = self.value_layer(out)
             return torch.squeeze(value, -1)
         elif self.critic_type == "distributional":
