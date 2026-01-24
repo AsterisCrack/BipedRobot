@@ -94,7 +94,7 @@ class Model:
         else:
             obs = observation
             
-        action = self.model.actor.get_action(torch.from_numpy(obs).to(self.device).float())
+        action = self.model.actor.get_action(obs)
         return action
     
     def train(self, seed=42, test_environment=None, steps=int(1e7), epoch_steps=int(5e3), save_steps=int(5e3), test_episodes=5, show_progress=True, replace_checkpoint=False, log=True, log_dir=None, log_name=None, checkpoint_path=None, config=None):
@@ -248,6 +248,20 @@ class Buffer:
             rows = indices // self.num_workers
             columns = indices % self.num_workers
             yield {k: self.buffers[k][rows, columns] for k in keys}
+
+    def sample(self, batch_size=None, *keys):
+        '''Sample a single large batch without generator overhead.'''
+        bs = batch_size if batch_size is not None else self.batch_size
+        total_size = self.size * self.num_workers
+        indices = torch.randint(0, total_size, (bs,), device=self.device)
+        rows = indices // self.num_workers
+        columns = indices % self.num_workers
+        
+        # If no keys provided, return all
+        if not keys:
+            keys = self.buffers.keys()
+            
+        return {k: self.buffers[k][rows, columns] for k in keys}
 
         self.last_steps = steps
     
@@ -434,7 +448,7 @@ class DecayingEntropyCoeff:
         return self()
     
 class NormalActionNoise:
-    def __init__(self, policy, action_space, scale=0.3, min_scale=0.03, decay_rate=0.000001, start_steps=10000, seed=None):
+    def __init__(self, policy, action_space, scale=0.3, min_scale=0.03, decay_rate=0.000001, start_steps=10000, seed=None, device=torch.device("cpu")):
         self.scale = scale
         self.min_scale = min_scale
         self.decay_rate = decay_rate
@@ -442,44 +456,67 @@ class NormalActionNoise:
         self.start_steps = start_steps
         self.policy = policy
         self.action_size = action_space.shape[0]
-        self.np_random = np.random.RandomState(seed)
+        # self.np_random = np.random.RandomState(seed) # Not needed for pure torch
+        if seed is not None:
+            torch.manual_seed(seed)
+        self.device = device
 
     def __call__(self, observations, steps):
-        obs_for_len = observations['actor'] if isinstance(observations, dict) else observations
+        # Infer device if not set or just use self.device
+        
+        # Determine batch size
+        if isinstance(observations, dict):
+             # Assume dict obs has 'actor' or similar
+             obs_for_len = list(observations.values())[0]
+        else:
+             obs_for_len = observations
+             
+        batch_size = obs_for_len.shape[0]
 
         if steps > self.start_steps:
             actions = self.policy(observations)
+            if not isinstance(actions, torch.Tensor):
+                 actions = torch.as_tensor(actions, device=self.device, dtype=torch.float32)
+
             # Exponential decay of the scale
             scale = max(self.min_scale, self.scale * np.exp(-self.decay_rate * steps))
-            noises = scale * self.np_random.normal(size=actions.shape)
-            actions = (actions + noises).astype(np.float32)
-            actions = np.clip(actions, -1, 1)
+            
+            # Generate noise on the same device as actions
+            noises = torch.randn_like(actions) * scale
+            actions = torch.clamp(actions + noises, -1, 1)
         else:
-            shape = (len(obs_for_len), self.action_size)
-            actions = self.np_random.uniform(-1, 1, shape)
+            # Random actions
+            actions = torch.rand((batch_size, self.action_size), device=self.device) * 2.0 - 1.0
+            
         return actions
 
     def update(self, resets):
         pass
 
 class NoActionNoise:
-    def __init__(self, policy, action_space, seed=None, start_steps=10000):
+    def __init__(self, policy, action_space, seed=None, start_steps=10000, device=torch.device("cpu")):
         self.start_steps = start_steps
         self.policy = policy
         self.action_size = action_space.shape[0]
-        self.np_random = np.random.RandomState(seed)
+        # self.np_random = np.random.RandomState(seed)
+        if seed is not None:
+             torch.manual_seed(seed)
+        self.device = device
 
     def __call__(self, observations, steps):
         if isinstance(observations, dict) and "actor" in observations:
             obs_for_len = observations["actor"]
         else:
-            obs_for_len = observations
+            obs_for_len = list(observations.values())[0] if isinstance(observations, dict) else observations
+
+        batch_size = obs_for_len.shape[0]
 
         if steps > self.start_steps:
             actions = self.policy(observations)
+            if not isinstance(actions, torch.Tensor):
+                 actions = torch.as_tensor(actions, device=self.device, dtype=torch.float32)
         else:
-            shape = (len(obs_for_len), self.action_size)
-            actions = self.np_random.uniform(-1, 1, shape)
+            actions = torch.rand((batch_size, self.action_size), device=self.device) * 2.0 - 1.0
         return actions
 
     def update(self, resets):
@@ -615,6 +652,13 @@ class Trainer:
                         elif isinstance(value, np.ndarray):
                             value = value.mean()
                         writer.add_scalar(f'train/{key}', value, self.steps)
+                        
+                # Log environment extras (e.g. detailed reward terms)
+                if self.log and "log" in infos and infos["log"]:
+                    for key, value in infos["log"].items():
+                        if isinstance(value, torch.Tensor):
+                            value = value.item()
+                        writer.add_scalar(key, value, self.steps)
 
                 scores += infos['rewards']
                 lengths += 1

@@ -310,9 +310,9 @@ class BipedEnv(DirectRLEnv):
         r_stall = rewards.stall_penalty(self.base_lin_vel_b, self.commands)
         r_base_stability = rewards.base_stability_reward(self.base_ang_vel_b)
         
-        r_torque = rewards.torque_reward(self.joint_efforts)
-        r_action_diff = rewards.action_diff_reward(self.actions, self.previous_actions)
-        r_acceleration = rewards.acceleration_reward(self.robot.data.joint_acc)
+        r_torque = rewards.torque_penalty(self.joint_efforts)
+        r_action_diff = rewards.action_diff_penalty(self.actions, self.previous_actions)
+        r_acceleration = rewards.acceleration_penalty(self.robot.data.joint_acc)
         r_flat_orient = rewards.flat_orientation_reward(self.projected_gravity_b)
         r_feet_flat = rewards.feet_flat_reward(feet_quat)
         r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
@@ -324,51 +324,42 @@ class BipedEnv(DirectRLEnv):
         
         # Termination check for reward
         net_contact_forces = self.contact_sensor.data.force_matrix_w_history
-        died = torch.any(torch.max(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=-1)[0], dim=-1)[0] > 1.0, dim=1)
+        died = torch.any(torch.max(torch.max(torch.norm(net_contact_forces[:, :, self._undesired_contact_body_ids], dim=-1), dim=-1)[0], dim=-1)[0] > 1.0, dim=1)
         r_termination = rewards.termination_penalty(died)
         
+        # Term dict
+        reward_terms = {
+            "survived": torch.ones(self.num_envs, device=self.device) * self.cfg.rewards["survived"],
+            "velocity": r_vel_tracking * self.cfg.rewards.get("velocity", 0.0),
+            "ang_vel_tracking": r_ang_vel_tracking * self.cfg.rewards.get("ang_vel_tracking", 0.0),
+            "height_vel_tracking": r_height_vel_tracking * self.cfg.rewards.get("height_vel_tracking", 0.0),
+            "height": r_height * self.cfg.rewards.get("height", 0.0),
+            "stall": r_stall * self.cfg.rewards.get("stall", 0.0),
+            "base_stability": r_base_stability * self.cfg.rewards.get("base_stability", 0.0),
+            "torque": r_torque * self.cfg.rewards["torque"],
+            "action_diff": r_action_diff * self.cfg.rewards["action_diff"],
+            "acceleration": r_acceleration * self.cfg.rewards["acceleration"],
+            "flat_orientation": r_flat_orient * self.cfg.rewards.get("flat_orientation", 0.0),
+            "feet_flat": r_feet_flat * self.cfg.rewards.get("feet_flat", 0.0),
+            "torso_centering": r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0),
+            "feet_airtime": r_feet_airtime * self.cfg.rewards.get("feet_airtime", 0.0),
+            "termination": r_termination * self.cfg.rewards.get("termination", 0.0),
+        }
+        
         # Weighted sum
-        total_reward += self.cfg.rewards["survived"]
-        total_reward += r_vel_tracking * self.cfg.rewards.get("velocity", 0.0)
-        total_reward += r_ang_vel_tracking * self.cfg.rewards.get("ang_vel_tracking", 0.0)
-        total_reward += r_height_vel_tracking * self.cfg.rewards.get("height_vel_tracking", 0.0)
+        total_reward = torch.sum(torch.stack(list(reward_terms.values())), dim=0)
         
-        total_reward += r_height * self.cfg.rewards.get("height", 0.0)
-        total_reward += r_stall * self.cfg.rewards.get("stall", 0.0)
-        total_reward += r_base_stability * self.cfg.rewards.get("base_stability", 0.0)
-        
-        total_reward += r_torque * self.cfg.rewards["torque"]
-        total_reward += r_action_diff * self.cfg.rewards["action_diff"]
-        total_reward += r_acceleration * self.cfg.rewards["acceleration"]
-        total_reward += r_flat_orient * self.cfg.rewards.get("flat_orientation", 0.0)
-        total_reward += r_feet_flat * self.cfg.rewards.get("feet_flat", 0.0)
-        total_reward += r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0)
-        total_reward += r_feet_airtime * self.cfg.rewards.get("feet_airtime", 0.0)
-        total_reward += r_termination * self.cfg.rewards.get("termination", 0.0)
-        
-        # Update logging
-        self.episode_sums["velocity"] = self.episode_sums.get("velocity", 0.0) + r_vel_tracking
-        self.episode_sums["ang_vel_tracking"] = self.episode_sums.get("ang_vel_tracking", 0.0) + r_ang_vel_tracking
-        self.episode_sums["height_vel_tracking"] = self.episode_sums.get("height_vel_tracking", 0.0) + r_height_vel_tracking
-        self.episode_sums["height"] = self.episode_sums.get("height", 0.0) + r_height
-        self.episode_sums["stall"] = self.episode_sums.get("stall", 0.0) + r_stall
-        self.episode_sums["base_stability"] = self.episode_sums.get("base_stability", 0.0) + r_base_stability
-        
-        self.episode_sums["feet_flat"] = self.episode_sums.get("feet_flat", 0.0) + r_feet_flat
-        self.episode_sums["torso_centering"] = self.episode_sums.get("torso_centering", 0.0) + r_torso_centering
-        self.episode_sums["feet_airtime"] = self.episode_sums.get("feet_airtime", 0.0) + r_feet_airtime
-        self.episode_sums["termination"] = self.episode_sums.get("termination", 0.0) + r_termination
-        self.episode_sums["torque"] += r_torque
-        self.episode_sums["action_diff"] += r_action_diff
-        self.episode_sums["acceleration"] += r_acceleration
-        self.episode_sums["flat_orientation"] = self.episode_sums.get("flat_orientation", 0.0) + r_flat_orient
+        # Logging
+        for key, value in reward_terms.items():
+            if key in self.episode_sums:
+                self.episode_sums[key] += value
         
         return total_reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         net_contact_forces = self.contact_sensor.data.force_matrix_w_history
-        died = torch.any(torch.max(torch.max(torch.norm(net_contact_forces[:, :, self._base_id], dim=-1), dim=-1)[0], dim=-1)[0] > 1.0, dim=1)
+        died = torch.any(torch.max(torch.max(torch.norm(net_contact_forces[:, :, self._undesired_contact_body_ids], dim=-1), dim=-1)[0], dim=-1)[0] > 1.0, dim=1)
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -405,6 +396,25 @@ class BipedEnv(DirectRLEnv):
                 params = self.cfg.events["randomize_friction"].params.copy()
                 self.friction_randomizer(self, env_ids, **params)
         
+        # Logging
+        extras = dict()
+        for key in self.episode_sums.keys():
+            episodic_sum_avg = torch.mean(self.episode_sums[key][env_ids])
+            extras["Reward_Terms/" + key] = episodic_sum_avg / (self.max_episode_length * self.step_dt)
+            self.episode_sums[key][env_ids] = 0.0
+        self.extras["log"] = dict()
+        self.extras["log"].update(extras)
+        extras_term = dict()
+        extras_term["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        extras_term["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+        self.extras["log"].update(extras_term)
+        
+        # Console Logging
+        if len(self.extras["log"]) > 0:
+            logging.info("Episode Reward:")
+            for key, value in self.extras["log"].items():
+                logging.info(f"  {key}: {value}")
+
         # Reset buffers
         self.previous_actions[env_ids] = 0.0
         self.commands[env_ids] = 0.0

@@ -52,9 +52,16 @@ class MLPActor(nn.Module):
     
     def get_action(self, observations):
         out = self.forward(observations)
+        if isinstance(out, torch.Tensor):
+            return out
         if hasattr(out, 'mean'):
-             return out.mean.detach().cpu().numpy()
-        return out.detach().cpu().numpy()
+             # Return mean for deterministic action, but stay on device
+             return out.mean
+        # For other distributions, sample or return mean? 
+        # Usually get_action implies deterministic/greedy for eval.
+        if hasattr(out, 'loc'):
+            return out.loc
+        return out
 
 class MLPCritic(nn.Module):
     def __init__(self, observation_space, action_space, hidden_sizes, observation_normalizer=None, critic_type="deterministic"):

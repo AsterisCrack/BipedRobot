@@ -59,12 +59,12 @@ BIPED_ROBOT_CFG = ArticulationCfg(
     actuators={
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[".*"],
-            stiffness=21.1,
-            damping=1.084,
-            armature=0.045,
-            friction=0.03,
-            effort_limit_sim=5.0,
-            velocity_limit_sim=100.0,
+            stiffness=200,
+            damping=20,
+            armature=0.01,
+            friction=0.0,
+            effort_limit_sim=30.0,
+            velocity_limit_sim=500.0,
         ),
     },
 )

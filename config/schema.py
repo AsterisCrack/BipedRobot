@@ -8,6 +8,7 @@ class NetworkType(str, Enum):
     TRANSFORMER = "transformer"
 class ModelType(str, Enum):
     SAC = "sac"
+    FastSAC = "fast_sac"
     DDPG = "ddpg"
     D4PG = "d4pg"
     MPO = "mpo"

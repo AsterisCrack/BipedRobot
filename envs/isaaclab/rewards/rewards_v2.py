@@ -1,8 +1,9 @@
 import torch
 from typing import Tuple
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils.math import quat_apply
 
-@torch.jit.script
+# @torch.jit.script
 def velocity_tracking_reward(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, sigma: float = 5.0):
     """
     Reward for tracking the target velocity (Negative MSE).
@@ -13,7 +14,7 @@ def velocity_tracking_reward(commands: torch.Tensor, base_lin_vel_b: torch.Tenso
     return torch.exp(-sigma * lin_vel_error)
 
 @torch.jit.script
-def angular_velocity_tracking_reward(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, sigma: float = 5.0):
+def angular_velocity_tracking_reward(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, sigma: float = 1.0):
     """
     Reward for tracking the target angular velocity (Negative MSE).
     """
@@ -48,32 +49,26 @@ def base_stability_reward(base_ang_vel_b: torch.Tensor, sigma: float = 5.0):
     return torch.exp(-sigma * ang_vel_error)
 
 @torch.jit.script
-def torque_reward(joint_efforts: torch.Tensor, sigma: float = 1.0):
+def torque_penalty(joint_efforts: torch.Tensor, scale: float = 1.0):
     """
-    Reward for minimizing torque
+    Penalty (negative) proportional to absolute torque.
+    Normalized by number of joints to keep magnitudes stable.
     """
-    return torch.exp(-sigma * torch.sum(torch.abs(joint_efforts), dim=-1))
+    n = joint_efforts.shape[-1]
+    return - scale * torch.sum(torch.abs(joint_efforts), dim=-1) / float(n)
 
 @torch.jit.script
-def action_diff_reward(actions: torch.Tensor, previous_actions: torch.Tensor, sigma: float = 0.02):
-    """
-    Reward for smooth actions (Gaussian).
-    Matches MuJoCo BaseReward._action_diff_penalty implementation.
-    """
+def action_diff_penalty(actions: torch.Tensor, previous_actions: torch.Tensor, scale: float = 1.0):
     diff = torch.sum(torch.abs(actions - previous_actions), dim=-1)
-    return torch.exp(-sigma * diff)
+    return - scale * diff / float(actions.shape[-1])
 
 @torch.jit.script
-def acceleration_reward(joint_acc: torch.Tensor, sigma: float = 0.01):
-    """
-    Reward for minimizing acceleration (Gaussian).
-    Matches MuJoCo BaseReward._acceleration_penalty implementation.
-    """
+def acceleration_penalty(joint_acc: torch.Tensor, scale: float = 1.0):
     acc_sum = torch.sum(torch.abs(joint_acc), dim=-1)
-    return torch.exp(-sigma * acc_sum)
+    return - scale * acc_sum / float(joint_acc.shape[-1])
 
 @torch.jit.script
-def feet_airtime_reward(first_contact: torch.Tensor, last_air_time: torch.Tensor, commands: torch.Tensor, min_airtime_threshold: float = 0.5, min_speed_command_threshold: float = 0.1):
+def feet_airtime_reward(first_contact: torch.Tensor, last_air_time: torch.Tensor, commands: torch.Tensor, min_airtime_threshold: float = 0.2, min_speed_command_threshold: float = 0.1):
     """
     Reward for airtime. Directly proportional to airtime when foot makes contact. But only if airtime more than a threshold.
     Onlu active if speed command is above a threshold because low speed walking may not require as much foot lift.
@@ -107,23 +102,20 @@ def stall_penalty(base_lin_vel_b: torch.Tensor, commands: torch.Tensor, epsilon:
 
 
 @torch.jit.script
-def feet_flat_reward(feet_orientations: torch.Tensor, sigma: float = 30.0):
+def feet_flat_reward(feet_orientations: torch.Tensor, sigma: float = 3.0):
     """
-    Reward for feet not being flat and facing forward (identity orientation).
+    Reward for feet being flat (z-axis alignment with world z).
     feet_orientations: (num_envs, num_feet, 4) (w, x, y, z)
-    Renamed from feet_orientation_penalty.
     """
-    # We want q to be close to (1, 0, 0, 0) or (-1, 0, 0, 0).
-    # Error = 1 - q_w^2 = q_x^2 + q_y^2 + q_z^2
-    # This is approximately theta^2/4 for small angles.
+    z_vec = torch.zeros_like(feet_orientations[..., :3])
+    z_vec[..., 2] = 1.0
+    foot_z = quat_apply(feet_orientations, z_vec)
+    cos_angle = foot_z[..., 2]
+    error = 1.0 - cos_angle
+    total_error = torch.sum(error, dim=-1)
     
-    # Extract x, y, z components
-    q_vec = feet_orientations[..., 1:] # (num_envs, num_feet, 3)
-    error = torch.sum(torch.square(q_vec), dim=-1) # (num_envs, num_feet)
-    
-    # Sum over feet
-    total_error = torch.sum(error, dim=1)
     return torch.exp(-sigma * total_error)
+    
 
 @torch.jit.script
 def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma: float = 20.0):

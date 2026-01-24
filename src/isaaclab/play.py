@@ -90,29 +90,17 @@ class IsaacLabWrapper:
             actions = torch.from_numpy(actions).to(self.device)
         obs, rew, terminated, truncated, info = self.env.step(actions)
         
-        # Convert to numpy
-        rew = rew.detach().cpu().numpy()
-        terminated = terminated.detach().cpu().numpy()
-        truncated = truncated.detach().cpu().numpy()
+        # Keep on device
+        # rew = rew.detach().cpu().numpy()
+        # terminated = terminated.detach().cpu().numpy()
+        # truncated = truncated.detach().cpu().numpy()
         
         return self._process_obs(obs), rew, terminated, truncated, info
 
     def _process_obs(self, obs):
         if isinstance(obs, dict):
-            new_obs = {}
-            if "policy" in obs:
-                new_obs["actor"] = obs["policy"].detach().cpu().numpy()
-            if "critic" in obs:
-                new_obs["critic"] = obs["critic"].detach().cpu().numpy()
-            for k, v in obs.items():
-                if k not in ["policy", "critic"]:
-                    if isinstance(v, torch.Tensor):
-                        new_obs[k] = v.detach().cpu().numpy()
-                    else:
-                        new_obs[k] = v
-            return new_obs
-        if isinstance(obs, torch.Tensor):
-            return obs.detach().cpu().numpy()
+             # Keep tensors on device
+             return obs
         return obs
 
 def play():
@@ -183,6 +171,45 @@ def play():
     
     # Load model
     checkpoint_path = args_cli.checkpoint
+    if not checkpoint_path:
+        # Search for latest checkpoint
+        # Base checkpoints dir relative to this file
+        checkpoints_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../checkpoints"))
+        
+        if os.path.exists(checkpoints_root):
+             # Find all subdirectories
+             dirs = [os.path.join(checkpoints_root, d) for d in os.listdir(checkpoints_root) if os.path.isdir(os.path.join(checkpoints_root, d))]
+             if dirs:
+                 # Sort by modification time (latest first)
+                 dirs.sort(key=os.path.getmtime, reverse=True)
+                 latest_dir = dirs[0]
+                 
+                 print(f"Searching for checkpoints in: {latest_dir}")
+                 
+                 # Find pt files
+                 files = [f for f in os.listdir(latest_dir) if f.endswith(".pt")]
+                 if files:
+                     # Sort files to find latest step (assuming name step_X.pt)
+                     def get_step_num(filename):
+                         try:
+                             parts = filename.split("_")
+                             if len(parts) >= 2:
+                                 num = parts[1].replace(".pt","")
+                                 return int(num)
+                             return 0
+                         except:
+                             return 0
+
+                     files.sort(key=get_step_num, reverse=True)
+                     latest_file = files[0]
+                     
+                     checkpoint_path = os.path.join(latest_dir, latest_file)
+                     print(f"Auto-selected latest checkpoint: {checkpoint_path}")
+                 else:
+                     print(f"No .pt files found in {latest_dir}")
+             else:
+                 print(f"No checkpoint directories found in {checkpoints_root}")
+    
     if not checkpoint_path:
         print("No checkpoint provided. Please provide a checkpoint path using --checkpoint")
         return

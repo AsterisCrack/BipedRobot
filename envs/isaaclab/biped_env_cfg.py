@@ -34,7 +34,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 1 # Match MuJoCo's 100Hz (assuming sim_frequency=100)
-    action_scale = 0.5  # Scale normalized actions to radians
+    action_scale = math.radians(90)  # Scale normalized actions to joint target positions (radians)
     action_space = 12
     observation_space = 48
     state_space = 59 # Observations + privileged info

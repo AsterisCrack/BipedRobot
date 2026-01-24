@@ -181,7 +181,7 @@ class SAC(ddpg.DDPG):
     ):
         model = model
         self.entropy_coeff = DecayingEntropyCoeff(initial=0.2, minimum=0.01, decay_rate=1e-6, start_steps=10000)
-        exploration = NoActionNoise(policy=self._policy, action_space=action_space, seed=seed) if exploration is None else exploration
+        exploration = NoActionNoise(policy=self._policy, action_space=action_space, seed=seed, device=device) if exploration is None else exploration
         actor_updater = TwinCriticSoftDeterministicPolicyGradient(model=model, action_space=action_space, device=device, optimizer=actor_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=0, recurrent_model=recurrent_model, seq_length=max_seq_length) if actor_updater is None else actor_updater
         critic_updater = TwinCriticSoftQLearning(model=model, device=device, optimizer=critic_optimizer, entropy_coeff=self.entropy_coeff, gradient_clip=1.0, recurrent_model=recurrent_model, seq_length=max_seq_length) if critic_updater is None else critic_updater
         
@@ -205,8 +205,8 @@ class SAC(ddpg.DDPG):
             return self.model.actor(observations).sample()
 
     def _policy(self, observations):
-        # Send observations to device
-        return self._stochastic_actions(observations).cpu().numpy()
+        # Return tensors (stay on device)
+        return self._stochastic_actions(observations)
 
     def _greedy_actions(self, observations):
         observations = self._ensure_actor_tensor(observations)

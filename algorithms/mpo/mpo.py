@@ -438,12 +438,12 @@ class MPO():
             
     def step(self, observations, steps):
         actions = self._step(observations)
-        actions = actions.cpu().numpy()
-        self.last_actions = actions.copy()
+        # actions = actions.cpu().numpy()
+        self.last_actions = actions.clone()
         
         # Keep some values for the next update.
         if not self.recurrent_model:
-            self.last_observations = observations.copy()
+            self.last_observations = observations
         else:
             # First, store action into last actions
             self.action_memory = np.roll(self.action_memory, shift=-1, axis=0)  # Shift all past obs up

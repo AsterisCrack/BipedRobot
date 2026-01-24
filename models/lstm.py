@@ -86,8 +86,10 @@ class LSTMActor(nn.Module):
     def get_action(self, observations, hidden_state=None):
         out = self.forward(observations, hidden_state)
         if hasattr(out, 'mean'):
-             return out.mean.detach().cpu().numpy()
-        return out.detach().cpu().numpy()
+             return out.mean
+        if hasattr(out, 'loc'):
+            return out.loc
+        return out
 
 class LSTMCritic(nn.Module):
     def __init__(self, observation_space, action_space, hidden_size=64, num_layers=2, observation_normalizer=None, history_size=0, critic_type="deterministic", device=torch.device("cpu")):

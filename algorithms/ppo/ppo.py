@@ -115,7 +115,7 @@ class PPO:
                  else:
                      self.model.critic_observation_normalizer.record(obs_tensor)
         
-        return action.cpu().numpy()
+        return action
 
     def update(self, **kwargs):
         # Retrieve data

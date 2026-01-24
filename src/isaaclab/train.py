@@ -38,6 +38,7 @@ simulation_app = app_launcher.app
 from envs.isaaclab.biped_env import BipedEnv
 from envs.isaaclab.biped_env_cfg import BipedEnvCfg
 from algorithms.sac.model import SAC
+from algorithms.fast_sac.model import FastSAC
 from algorithms.ddpg.model import DDPG
 from algorithms.d4pg.model import D4PG
 from algorithms.mpo.model import MPO
@@ -89,8 +90,8 @@ class IsaacLabWrapper:
         
     def step(self, actions):
         # Actions are numpy from the agent, convert to torch for Isaac Lab
-        if isinstance(actions, np.ndarray):
-            actions = torch.from_numpy(actions).to(self.device)
+        # if isinstance(actions, np.ndarray):
+        #     actions = torch.from_numpy(actions).to(self.device)
             
         obs, rew, terminated, truncated, info = self.env.step(actions)
         
@@ -110,6 +111,10 @@ class IsaacLabWrapper:
             "terminations": terminated,
             "observations": processed_obs # Next obs
         }
+        
+        # Pass through logging info if available
+        if isinstance(info, dict) and "log" in info:
+            infos["log"] = info["log"]
         
         # If dict obs, SAC/DDPG update expects specific keys in kwargs
         if isinstance(processed_obs, dict):
@@ -290,6 +295,8 @@ def train():
     model_type = config.train.model
     if model_type == ModelType.SAC:
         ModelClass = SAC
+    elif model_type == ModelType.FastSAC:
+        ModelClass = FastSAC
     elif model_type == ModelType.DDPG:
         ModelClass = DDPG
     elif model_type == ModelType.D4PG:
@@ -302,6 +309,8 @@ def train():
         # Fallback for string values if not using Enum directly or if config loaded as dict
         if str(model_type).lower() == "sac":
             ModelClass = SAC
+        elif str(model_type).lower() == "fast_sac" or str(model_type).lower() == "fastsac":
+            ModelClass = FastSAC
         elif str(model_type).lower() == "ddpg":
             ModelClass = DDPG
         elif str(model_type).lower() == "d4pg":

@@ -84,8 +84,10 @@ class CNNActor(nn.Module):
     def get_action(self, observations):
         out = self.forward(observations)
         if hasattr(out, 'mean'):
-             return out.mean.detach().cpu().numpy()
-        return out.detach().cpu().numpy()
+             return out.mean
+        if hasattr(out, 'loc'):
+            return out.loc
+        return out
 
 class CNNCritic(nn.Module):
     def __init__(self, observation_space, history_size, action_space, hidden_sizes, cnn_sizes, observation_normalizer=None, critic_type="deterministic"):

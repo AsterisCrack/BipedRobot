@@ -179,8 +179,10 @@ class TransformerActor(nn.Module):
         
         out = self.forward(observations)
         if hasattr(out, 'mean'):
-             return out.mean.detach().cpu().numpy()
-        return out.detach().cpu().numpy()
+             return out.mean
+        if hasattr(out, 'loc'):
+            return out.loc
+        return out
 
 class TransformerCritic(nn.Module):
     def __init__(self, observation_space, action_space, d_model, nhead, num_layers, dim_feedforward, observation_normalizer=None, history_size=0, critic_type="deterministic", device=torch.device("cpu")):
