@@ -89,8 +89,13 @@ class Model:
         self.device = device
     
     def step(self, observation):
-        if isinstance(observation, dict) and "actor" in observation:
-            obs = observation["actor"]
+        if isinstance(observation, dict):
+            if "policy" in observation:
+                obs = observation["policy"]
+            elif "actor" in observation:
+                obs = observation["actor"]
+            else:
+                obs = observation
         else:
             obs = observation
             

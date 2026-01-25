@@ -49,32 +49,33 @@ train:
       velocity: 0.6        # much larger
       ang_vel_tracking: 0.1
       height_vel_tracking: 0.00
-      height: 0.0
-      stall: 1.0           # larger negative impact (note stall returns -1 when triggered)
+      height: 0.05
+      stall: 1          # larger negative impact (note stall returns -1 when triggered)
       torque: 0.01       # negative weight, or use penalty function and positive weight
-      action_diff: 0.00
-      acceleration: 0.00
+      action_diff: 0.002
+      acceleration: 0.0002
       flat_orientation: 0.01
-      feet_flat: 0.00
+      feet_flat: 0.1
       base_stability: 0.02
-      feet_airtime: 0.0
-      torso_centering: 0.0
+      feet_airtime: 1.0
+      torso_centering: 0.05
+      joint_deviation: 0.05
       termination: -1.0    # larger negative impact
       
     # Commands
     commands:
       base_velocity:
         ranges:
-          lin_vel_x: [0.3, 0.3]
-          lin_vel_y: [0.0, 0.0]
-          ang_vel_z: [0.0, 0.0]
+          lin_vel_x: [-0.2, 0.3]
+          lin_vel_y: [-0.2, 0.2]
+          ang_vel_z: [-0.1, 0.1]
 
     # Randomization & Events
-    enable_perturbations: False
-    push_interval_s: 15.0
+    enable_perturbations: True
+    push_interval_s: 3.0
     push_vel_range: 1.0
     
-    enable_physics_randomization: False
+    enable_physics_randomization: True
     events:
       reset_base:
         params:
@@ -94,14 +95,14 @@ train:
           position_range: [-0.1, 0.1]
           velocity_range: [0.0, 0.0]
       push_robot:
-        interval_range_s: [10.0, 15.0]
+        interval_range_s: [3.0, 6.0]
         params:
           velocity_range:
-            x: [-0.5, 0.5]
-            y: [-0.5, 0.5]
+            x: [-0.3, 0.3]
+            y: [-0.3, 0.3]
       randomize_mass:
         params:
-          mass_distribution_params: [-1.0, 1.0]
+          mass_distribution_params: [-0.2, 0.2]
           operation: "add"
       randomize_friction:
         params:

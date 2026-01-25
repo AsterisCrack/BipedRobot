@@ -5,6 +5,7 @@ This configuration mirrors the MuJoCo configuration found in `Robot_description/
 It defines the robot asset, initial state, and actuator properties.
 """
 
+import math
 import os
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
@@ -13,6 +14,25 @@ from isaaclab.actuators import ImplicitActuatorCfg
 # Get the directory of the current file
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 USD_PATH = os.path.join(CURRENT_DIR, "robot.usd")
+
+# Joint limits in degrees [min, max]
+_JOINT_LIMITS_DEG = [
+    [-90, 45],  # r_hip_z
+    [-45, 90],  # r_hip_x
+    [-45, 45],  # r_hip_y
+    [-45, 45],  # r_knee
+    [-90, 90],  # r_ankle_y
+    [-90, 90],  # r_ankle_x
+    [-90, 90],  # l_hip_z
+    [-90, 90],  # l_hip_x
+    [-90, 90],  # l_hip_y
+    [-90, 90],  # l_knee
+    [-90, 30],  # l_ankle_y
+    [-30, 90],  # l_ankle_x
+]
+
+# Convert to radians
+JOINT_LIMITS = [[math.radians(lim) for lim in joint] for joint in _JOINT_LIMITS_DEG]
 
 BIPED_ROBOT_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
@@ -56,6 +76,16 @@ BIPED_ROBOT_CFG = ArticulationCfg(
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.9,
+    # actuators={
+    #     "legs": ImplicitActuatorCfg(
+    #         joint_names_expr=[".*"],
+    #         stiffness=100.0,
+    #         damping=10.0,
+    #         armature=0.045,
+    #         friction=0.03,
+    #         effort_limit_sim=10.0,
+    #         velocity_limit_sim=100.0, ),
+    #     },
     actuators={
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[".*"],

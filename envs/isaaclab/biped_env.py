@@ -16,6 +16,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from .biped_env_cfg import BipedEnvCfg
 from .rewards import rewards_v2 as rewards
+from envs.assets.robot.biped_robot import JOINT_LIMITS
 
 class BipedEnv(DirectRLEnv):
     cfg: BipedEnvCfg
@@ -99,6 +100,10 @@ class BipedEnv(DirectRLEnv):
         self.policy_history_buf = torch.zeros(self.num_envs, self.history_size, self.num_obs_policy // self.history_size, device=self.device) if self.history_size > 0 else None
         self.critic_history_buf = torch.zeros(self.num_envs, self.history_size, self.num_obs_critic // self.history_size, device=self.device) if self.history_size > 0 else None
         
+        # Track last foot contact for alternating gait reward
+        # 0: Right, 1: Left. Initialize to 1 so Right foot (0) can start.
+        self.last_feet_indices = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
+
         # Randomization
         self.push_interval_steps = int(self.cfg.push_interval_s / self.step_dt)
         
@@ -108,18 +113,31 @@ class BipedEnv(DirectRLEnv):
             self._observation_noise_model = self.cfg.observation_noise_model.class_type(
                 self.cfg.observation_noise_model, num_envs=self.num_envs, device=self.device
             )
-        
+
+        # Action Noise
+        self._action_noise_model = None
+        if self.cfg.action_noise_model:
+            self._action_noise_model = self.cfg.action_noise_model.class_type(
+                self.cfg.action_noise_model, num_envs=self.num_envs, device=self.device
+            )
+
         # Physics Randomizers
         self.mass_randomizer = None
         self.friction_randomizer = None
         if self.cfg.enable_physics_randomization:
             if "randomize_mass" in self.cfg.events:
-                self.mass_randomizer = randomize_rigid_body_mass(self.cfg.events["randomize_mass"], self)
+                try:
+                    self.mass_randomizer = randomize_rigid_body_mass(self.cfg.events["randomize_mass"], self)
+                except Exception as e:
+                    logging.warning(f"Failed to initialize mass randomizer: {e}")
             else:
                 logging.warning("Physics randomization is enabled but 'randomize_mass' event is missing in config.")
 
             if "randomize_friction" in self.cfg.events:
-                self.friction_randomizer = randomize_rigid_body_material(self.cfg.events["randomize_friction"], self)
+                try:
+                    self.friction_randomizer = randomize_rigid_body_material(self.cfg.events["randomize_friction"], self)
+                except Exception as e:
+                    logging.warning(f"Failed to initialize friction randomizer: {e}")
             else:
                 logging.warning("Physics randomization is enabled but 'randomize_friction' event is missing in config.")
 
@@ -127,6 +145,11 @@ class BipedEnv(DirectRLEnv):
         self._base_id, _ = self.contact_sensor.find_bodies("torso_link")
         self._feet_ids, _ = self.contact_sensor.find_bodies(".*foot")
         self._undesired_contact_body_ids, _ = self.contact_sensor.find_bodies("(?!.*_foot).*")
+
+        # Custom joint limit scaling
+        self.joint_limits_min = torch.tensor([x[0] for x in JOINT_LIMITS], device=self.device)
+        self.joint_limits_max = torch.tensor([x[1] for x in JOINT_LIMITS], device=self.device)
+        self.joint_range = self.joint_limits_max - self.joint_limits_min
         
     def _setup_scene(self):
         self.robot = self.scene.articulations["robot"]
@@ -178,11 +201,20 @@ class BipedEnv(DirectRLEnv):
             self.vis_vel = VisualizationMarkers(marker_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
-        self.actions = actions.clone() # Action noise is handled by DirectRLEnv
+        self.actions = actions.clone()
         
-        # Clip actions
-        self.actions = torch.clamp(self.actions, *self.cfg.action_space_limits)
-        self.targets = self.robot.data.default_joint_pos + self.actions * self.cfg.action_scale
+        # Apply action noise
+        if self._action_noise_model:
+            self.actions = self._action_noise_model(self.actions)
+        
+        # Clip actions to [-1, 1] as they come from the policy
+        self.actions = torch.clamp(self.actions, -1.0, 1.0)
+        
+        # Scale actions to joint limits
+        # action in [-1, 1] -> [0, 1] -> [min, max]
+        # target = min + (action + 1) * 0.5 * (max - min)
+        normalized_action_01 = (self.actions + 1.0) * 0.5
+        self.targets = self.joint_limits_min + normalized_action_01 * self.joint_range
         
         # Random pushes
         if self.cfg.enable_perturbations and self.cfg.push_interval_s > 0:
@@ -316,11 +348,30 @@ class BipedEnv(DirectRLEnv):
         r_flat_orient = rewards.flat_orientation_reward(self.projected_gravity_b)
         r_feet_flat = rewards.feet_flat_reward(feet_quat)
         r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
+        r_joint_deviation = rewards.joint_deviation_reward(self.joint_pos, self.default_joint_pos)
         
         # Airtime reward
         first_contact = self.contact_sensor.compute_first_contact(self.step_dt)
         last_air_time = self.contact_sensor.data.last_air_time
-        r_feet_airtime = rewards.feet_airtime_reward(first_contact, last_air_time, self.commands)
+        
+        # Extract feet specific data using known IDs
+        feet_first_contact = first_contact[:, self._feet_ids]
+        feet_last_air_time = last_air_time[:, self._feet_ids]
+        
+        # Valid contact mask for feet only
+        valid_feet_contact = torch.zeros_like(feet_first_contact, dtype=torch.bool)
+        
+        # Right Foot (0 if _feet_ids sorted) - Valid if last was Left (1)
+        valid_feet_contact[:, 0] = feet_first_contact[:, 0] & (self.last_feet_indices == 1)
+        # Left Foot (1 if _feet_ids sorted) - Valid if last was Right (0)
+        valid_feet_contact[:, 1] = feet_first_contact[:, 1] & (self.last_feet_indices == 0)
+        
+        # Update last_feet_indices
+        self.last_feet_indices[feet_first_contact[:, 0]] = 0
+        self.last_feet_indices[feet_first_contact[:, 1]] = 1
+        
+        # Pass filtered feet tensors to reward function
+        r_feet_airtime = rewards.feet_airtime_reward(valid_feet_contact, feet_last_air_time, self.commands)
         
         # Termination check for reward
         net_contact_forces = self.contact_sensor.data.force_matrix_w_history
@@ -342,6 +393,7 @@ class BipedEnv(DirectRLEnv):
             "flat_orientation": r_flat_orient * self.cfg.rewards.get("flat_orientation", 0.0),
             "feet_flat": r_feet_flat * self.cfg.rewards.get("feet_flat", 0.0),
             "torso_centering": r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0),
+            "joint_deviation": r_joint_deviation * self.cfg.rewards.get("joint_deviation", 0.0),
             "feet_airtime": r_feet_airtime * self.cfg.rewards.get("feet_airtime", 0.0),
             "termination": r_termination * self.cfg.rewards.get("termination", 0.0),
         }
@@ -361,7 +413,7 @@ class BipedEnv(DirectRLEnv):
         net_contact_forces = self.contact_sensor.data.force_matrix_w_history
         died = torch.any(torch.max(torch.max(torch.norm(net_contact_forces[:, :, self._undesired_contact_body_ids], dim=-1), dim=-1)[0], dim=-1)[0] > 1.0, dim=1)
         return died, time_out
-
+        
     def _reset_idx(self, env_ids: torch.Tensor):
         super()._reset_idx(env_ids)
         
@@ -391,7 +443,7 @@ class BipedEnv(DirectRLEnv):
             if self.mass_randomizer:
                 params = self.cfg.events["randomize_mass"].params.copy()
                 self.mass_randomizer(self, env_ids, **params)
-                
+            
             if self.friction_randomizer:
                 params = self.cfg.events["randomize_friction"].params.copy()
                 self.friction_randomizer(self, env_ids, **params)
@@ -423,6 +475,9 @@ class BipedEnv(DirectRLEnv):
         if self.critic_history_buf is not None:
             self.critic_history_buf[env_ids] = 0.0
         
+        # Reset last feet indices to 1 (Left) so Right foot (0) is valid first
+        self.last_feet_indices[env_ids] = 1
+
         # Resample commands
         self._resample_commands(env_ids)
 

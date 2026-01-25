@@ -3,7 +3,7 @@ from typing import Tuple
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply
 
-# @torch.jit.script
+@torch.jit.script
 def velocity_tracking_reward(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, sigma: float = 5.0):
     """
     Reward for tracking the target velocity (Negative MSE).
@@ -89,7 +89,7 @@ def flat_orientation_reward(projected_gravity_b: torch.Tensor, sigma: float = 5.
     return torch.exp(-sigma * torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1))
 
 @torch.jit.script
-def stall_penalty(base_lin_vel_b: torch.Tensor, commands: torch.Tensor, epsilon: float = 0.01):
+def stall_penalty(base_lin_vel_b: torch.Tensor, commands: torch.Tensor, epsilon: float = 0.05):
     """
     Penalty for not moving when commanded to move.
     Returns -1.0 if velocity is below epsilon, only for non-zero commands.
@@ -131,6 +131,15 @@ def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma
     dist = torch.norm(base_pos[:, :2] - feet_midpoint[:, :2], dim=1)
     
     return torch.exp(-sigma * dist)
+
+@torch.jit.script
+def joint_deviation_reward(joint_pos: torch.Tensor, default_joint_pos: torch.Tensor, scale: float = 1.0):
+    """
+    Penalty for deviation from default joint positions (L1 norm).
+    Returns negative value.
+    """
+    return -scale * torch.sum(torch.abs(joint_pos - default_joint_pos), dim=1)
+
 @torch.jit.script
 def termination_penalty(terminated: torch.Tensor):
     """
