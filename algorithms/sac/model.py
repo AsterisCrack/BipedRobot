@@ -18,5 +18,7 @@ class SAC(Model):
             device=device,
             config=config,
         )
+        if hasattr(self.agent, "set_env"):
+            self.agent.set_env(env)
 
         

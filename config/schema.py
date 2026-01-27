@@ -123,6 +123,7 @@ class TrainConfig(BaseModel):
     show_progress: bool = False
     replace_checkpoint: bool = False
     log: bool = True
+    symmetry_augmentation: bool = False
     
     class Config:
         extra = "ignore"

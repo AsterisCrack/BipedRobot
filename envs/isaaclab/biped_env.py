@@ -286,11 +286,26 @@ class BipedEnv(DirectRLEnv):
         
         # Privileged observations (Standard Critic)
         feet_contact_forces = self.contact_sensor.data.force_matrix_w_history[:, :, self._feet_ids]
-        forces = torch.max(torch.max(torch.norm(feet_contact_forces, dim=-1), dim=-1)[0], dim=-1)[0]
+        
+        # feet_contact_forces shape: [N, History, Feet, SensorDat, 3]
+        # We process this to a single scalar [N] representing max contact force intensity
+        
+        # 1. Norm of the 3D force vector -> [N, H, F, S]
+        contact_norm = torch.norm(feet_contact_forces, dim=-1)
+        
+        # 2. Max over sensor points (S) -> [N, H, F]
+        max_over_sensors = torch.max(contact_norm, dim=-1)[0]
+        
+        # 3. Max over feet (F) -> [N, H]
+        max_over_feet = torch.max(max_over_sensors, dim=-1)[0]
+        
+        # 4. Max over history (H) -> [N]
+        forces = torch.max(max_over_feet, dim=-1)[0]
         
         obs_priv = torch.cat([
             forces.unsqueeze(-1),
         ], dim=-1)
+
         
         # Mirroring
         if self.cfg.enable_mirroring:

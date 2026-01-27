@@ -93,7 +93,7 @@ BIPED_ROBOT_CFG = ArticulationCfg(
             damping=20,
             armature=0.01,
             friction=0.0,
-            effort_limit_sim=30.0,
+            effort_limit_sim=10.0,
             velocity_limit_sim=500.0,
         ),
     },

@@ -24,6 +24,10 @@ train:
   show_progress: False
   replace_checkpoint: False
   log: True
+  
+  # Symmetry Augmentation
+  # If true, duplicates every transition by applying left-right symmetry
+  symmetry_augmentation: True
 
 model:
 # Old style network configuration

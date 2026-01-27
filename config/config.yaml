@@ -7,6 +7,7 @@ train:
   sim_frequency: 100
   use_history: False
   history_size: 0
+  symmetry_augmentation: True
   actor_obs: "normal"
   critic_obs: "normal"
   log_dir: "runs"
@@ -24,9 +25,6 @@ train:
 
   env_config:
     objective: "target" # Options: walk, target, balance
-    enable_mirroring: False
-    mirror_joint_indices: [6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5]
-    
     # Rewards
     # reward_weights:
     #   survived: 0.001

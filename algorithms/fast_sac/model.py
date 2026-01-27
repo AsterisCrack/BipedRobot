@@ -58,3 +58,6 @@ class FastSAC(Model):
             device=device,
             config=config,
         )
+        # Pass environment to agent for symmetry augmentation
+        if hasattr(self.agent, "set_env"):
+            self.agent.set_env(env)
