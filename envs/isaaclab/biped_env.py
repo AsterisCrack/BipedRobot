@@ -15,7 +15,7 @@ from isaaclab.terrains import TerrainImporter
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from .biped_env_cfg import BipedEnvCfg
-from .rewards import rewards_v2 as rewards
+from .rewards import rewards_v3 as rewards
 from envs.assets.robot.biped_robot import JOINT_LIMITS
 
 class BipedEnv(DirectRLEnv):
@@ -126,26 +126,6 @@ class BipedEnv(DirectRLEnv):
                 self.cfg.action_noise_model, num_envs=self.num_envs, device=self.device
             )
 
-        # Physics Randomizers
-        self.mass_randomizer = None
-        self.friction_randomizer = None
-        if self.cfg.enable_physics_randomization:
-            if "randomize_mass" in self.cfg.events:
-                try:
-                    self.mass_randomizer = randomize_rigid_body_mass(self.cfg.events["randomize_mass"], self)
-                except Exception as e:
-                    logging.warning(f"Failed to initialize mass randomizer: {e}")
-            else:
-                logging.warning("Physics randomization is enabled but 'randomize_mass' event is missing in config.")
-
-            if "randomize_friction" in self.cfg.events:
-                try:
-                    self.friction_randomizer = randomize_rigid_body_material(self.cfg.events["randomize_friction"], self)
-                except Exception as e:
-                    logging.warning(f"Failed to initialize friction randomizer: {e}")
-            else:
-                logging.warning("Physics randomization is enabled but 'randomize_friction' event is missing in config.")
-
         # Get specific body indices
         self._base_id, _ = self.contact_sensor.find_bodies("torso_link")
         self._feet_ids, _ = self.contact_sensor.find_bodies(".*foot")
@@ -215,20 +195,17 @@ class BipedEnv(DirectRLEnv):
         # Clip actions to [-1, 1] as they come from the policy
         self.actions = torch.clamp(self.actions, -1.0, 1.0)
         
+        """# Scale actions with a factor and add to default joint positions
+        self.targets = self.default_joint_pos + self.actions * self.cfg.action_scale
+        
+        # Clip targets to valid limits
+        self.targets = torch.clamp(self.targets, self.joint_limits_min, self.joint_limits_max)"""
         # Scale actions to joint limits
         # action in [-1, 1] -> [0, 1] -> [min, max]
         # target = min + (action + 1) * 0.5 * (max - min)
         normalized_action_01 = (self.actions + 1.0) * 0.5
-        self.targets = self.joint_limits_min + normalized_action_01 * self.joint_range
-        
-        # Random pushes
-        if self.cfg.enable_perturbations and self.cfg.push_interval_s > 0:
-            push_indices = (self.episode_length_buf % self.push_interval_steps == 0) & (self.episode_length_buf > 0)
-            if torch.any(push_indices):
-                # Use the event function
-                if "push_robot" in self.cfg.events:
-                    params = self.cfg.events["push_robot"].params.copy()
-                    push_by_setting_velocity(self, push_indices.nonzero(as_tuple=True)[0], **params)
+        self.targets = self.joint_limits_min + normalized_action_01 * self.joint_range * self.cfg.action_scale
+        self.targets = torch.clamp(self.targets, self.joint_limits_min, self.joint_limits_max)
 
     def _apply_action(self):
         self.robot.set_joint_position_target(self.targets)
@@ -347,74 +324,115 @@ class BipedEnv(DirectRLEnv):
         # Get feet state
         feet_pos = self.robot.data.body_pos_w[:, self.feet_indices]
         feet_quat = self.robot.data.body_quat_w[:, self.feet_indices]
-
+        
         # Compute individual rewards
-        r_vel_tracking = rewards.velocity_tracking_reward(self.commands, self.base_lin_vel_b)
-        r_ang_vel_tracking = rewards.angular_velocity_tracking_reward(self.commands, self.base_ang_vel_b)
-        r_height_vel_tracking = rewards.height_velocity_tracking_reward(self.base_lin_vel_b)
         
-        r_height = rewards.base_height_reward(self.robot.data.root_pos_w)
-        r_stall = rewards.stall_penalty(self.base_lin_vel_b, self.commands)
-        r_base_stability = rewards.base_stability_reward(self.base_ang_vel_b)
+        # 1. Track Linear Velocity XY (Exp)
+        r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp(self.commands, self.base_lin_vel_b, std=math.sqrt(0.25))
         
-        r_torque = rewards.torque_penalty(self.joint_efforts)
-        r_action_diff = rewards.action_diff_penalty(self.actions, self.previous_actions)
-        r_action_smoothness = rewards.action_smoothness_penalty(self.actions, self.previous_actions, self.previous_previous_actions)
-        r_acceleration = rewards.acceleration_penalty(self.robot.data.joint_acc)
-        r_flat_orient = rewards.flat_orientation_reward(self.projected_gravity_b)
-        r_feet_flat = rewards.feet_flat_reward(feet_quat)
-        r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
-        r_joint_deviation = rewards.joint_deviation_reward(self.joint_pos, self.default_joint_pos)
-        r_abduction = rewards.joint_position_target_penalty(self.joint_pos[:, self.abduction_joint_indices])
+        # 2. Track Angular Velocity Z (Exp)
+        r_track_ang_vel_z = rewards.track_ang_vel_z_exp(self.commands, self.base_ang_vel_b, std=math.sqrt(0.25))
         
-        # Airtime reward
+        # 3. Linear Velocity Z (L2) - Penalty
+        r_lin_vel_z = rewards.lin_vel_z_l2(self.base_lin_vel_b)
+        
+        # 4. Angular Velocity XY (L2) - Penalty
+        r_ang_vel_xy = rewards.ang_vel_xy_l2(self.base_ang_vel_b)
+        
+        # 5. Joint Torques (L2) - Penalty
+        r_joint_torques = rewards.joint_torques_l2(self.joint_efforts)
+        
+        # 6. Action Rate (L2) - Penalty
+        r_action_rate = rewards.action_rate_l2(self.actions, self.previous_actions)
+        
+        # 7. Feet Air Time
         first_contact = self.contact_sensor.compute_first_contact(self.step_dt)
         last_air_time = self.contact_sensor.data.last_air_time
-        
-        # Extract feet specific data using known IDs
         feet_first_contact = first_contact[:, self._feet_ids]
         feet_last_air_time = last_air_time[:, self._feet_ids]
         
-        # Valid contact mask for feet only
-        valid_feet_contact = torch.zeros_like(feet_first_contact, dtype=torch.bool)
+        # Note: rough_env_cfg uses a sophisticated air time reward logic in skyentific_mdp.
+        # Here we use the simplified logic from rewards_v3 which matches the intent.
+        # Using default thresholds (min_airtime=0.2, min_speed=0.1) as implemented in rewards_v3
+        r_feet_air_time = rewards.feet_air_time(
+            feet_first_contact, 
+            feet_last_air_time, 
+            self.commands, 
+            min_airtime_threshold=0.2, 
+            min_speed_command_threshold=0.1
+        )
         
-        # Right Foot (0 if _feet_ids sorted) - Valid if last was Left (1)
-        valid_feet_contact[:, 0] = feet_first_contact[:, 0] & (self.last_feet_indices == 1)
-        # Left Foot (1 if _feet_ids sorted) - Valid if last was Right (0)
-        valid_feet_contact[:, 1] = feet_first_contact[:, 1] & (self.last_feet_indices == 0)
+        # 8. Feet Slide
+        # Check contact status using history (matching _get_dones logic for robust contact detection)
+        # Force matrix: [num_envs, history, num_bodies, 3]
+        net_contact_forces = self.contact_sensor.data.force_matrix_w_history[:, :, self._feet_ids]
+        # Norm of force vectors -> [num_envs, history, num_feet]
+        forces_norm = torch.norm(net_contact_forces, dim=-1)
+        # Max over history -> [num_envs, num_feet]
+        feet_in_contact = torch.max(forces_norm, dim=1)[0] > 1.0
         
-        # Update last_feet_indices
-        self.last_feet_indices[feet_first_contact[:, 0]] = 0
-        self.last_feet_indices[feet_first_contact[:, 1]] = 1
+        # Get feet velocity xy
+        feet_vel_w = self.robot.data.body_lin_vel_w[:, self.feet_indices]
+        feet_vel_xy_norm = torch.norm(feet_vel_w[:, :, :2], dim=-1)
         
-        # Pass filtered feet tensors to reward function
-        r_feet_airtime = rewards.feet_airtime_reward(valid_feet_contact, feet_last_air_time, self.commands)
+        # Fix shape mismatch [N, F, 1] -> [N, F]
+        if feet_in_contact.dim() == 3:
+             feet_in_contact = feet_in_contact.squeeze(-1)
         
-        # Termination check for reward
-        net_contact_forces = self.contact_sensor.data.force_matrix_w_history
-        died = torch.any(torch.max(torch.max(torch.norm(net_contact_forces[:, :, self._undesired_contact_body_ids], dim=-1), dim=-1)[0], dim=-1)[0] > 1.0, dim=1)
-        r_termination = rewards.termination_penalty(died)
+        r_feet_slide = rewards.feet_slide_with_vel(feet_in_contact.float(), feet_vel_xy_norm)
         
+        # 9. Undesired Contacts
+        # Same logic as feet slide: max over history > 1.0
+        # Force matrix: [num_envs, history, num_undesired_bodies, 3]
+        undesired_forces_history = self.contact_sensor.data.force_matrix_w_history[:, :, self._undesired_contact_body_ids]
+        # Norm -> Max over history -> [num_envs, num_undesired_bodies]
+        undesired_forces_max = torch.max(torch.norm(undesired_forces_history, dim=-1), dim=1)[0]
+        
+        r_undesired_contacts = rewards.undesired_contacts(undesired_forces_max, threshold=1.0)
+        
+        # 10. Joint Deviation (Hip & Knee separated)
+        # Hip joints: 0-5, Knee joints: 6-7 (as per user spec)
+        hip_indices = [0, 1, 2, 3, 4, 5]
+        knee_indices = [6, 7]
+        
+        r_joint_deviation_hip = rewards.joint_deviation_l1(
+            self.joint_pos[:, hip_indices], 
+            self.default_joint_pos[hip_indices]
+        )
+        
+        r_joint_deviation_knee = rewards.joint_deviation_l1(
+            self.joint_pos[:, knee_indices], 
+            self.default_joint_pos[knee_indices]
+        )
+        
+        # 11. Flat Orientation (L2) - Penalty (usually 0 weight but user set to -0.5 in post_init)
+        r_flat_orientation = rewards.flat_orientation_l2(self.projected_gravity_b)
+        
+        # 12. DOF Pos Limits
+        # Use soft limits from robot data to match standard implementation
+        soft_limits = self.robot.data.soft_joint_pos_limits
+        r_dof_pos_limits = rewards.joint_pos_limits(
+            self.joint_pos, 
+            soft_limits[:, :, 0], 
+            soft_limits[:, :, 1]
+        )
+
         # Term dict
         reward_terms = {
-            "survived": torch.ones(self.num_envs, device=self.device) * self.cfg.rewards["survived"],
-            "velocity": r_vel_tracking * self.cfg.rewards.get("velocity", 0.0),
-            "ang_vel_tracking": r_ang_vel_tracking * self.cfg.rewards.get("ang_vel_tracking", 0.0),
-            "height_vel_tracking": r_height_vel_tracking * self.cfg.rewards.get("height_vel_tracking", 0.0),
-            "height": r_height * self.cfg.rewards.get("height", 0.0),
-            "stall": r_stall * self.cfg.rewards.get("stall", 0.0),
-            "base_stability": r_base_stability * self.cfg.rewards.get("base_stability", 0.0),
-            "torque": r_torque * self.cfg.rewards["torque"],
-            "action_diff": r_action_diff * self.cfg.rewards["action_diff"],
-            "action_smoothness": r_action_smoothness * self.cfg.rewards.get("action_smoothness", 0.0),
-            "acceleration": r_acceleration * self.cfg.rewards["acceleration"],
-            "flat_orientation": r_flat_orient * self.cfg.rewards.get("flat_orientation", 0.0),
-            "feet_flat": r_feet_flat * self.cfg.rewards.get("feet_flat", 0.0),
-            "torso_centering": r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0),
-            "joint_deviation": r_joint_deviation * self.cfg.rewards.get("joint_deviation", 0.0),
-            "abduction": r_abduction * self.cfg.rewards.get("abduction", 0.0),
-            "feet_airtime": r_feet_airtime * self.cfg.rewards.get("feet_airtime", 0.0),
-            "termination": r_termination * self.cfg.rewards.get("termination", 0.0),
+            "track_lin_vel_xy_exp": r_track_lin_vel_xy * self.cfg.rewards.get("track_lin_vel_xy_exp", 0.0),
+            "track_ang_vel_z_exp": r_track_ang_vel_z * self.cfg.rewards.get("track_ang_vel_z_exp", 0.0),
+            "lin_vel_z_l2": r_lin_vel_z * self.cfg.rewards.get("lin_vel_z_l2", 0.0),
+            "ang_vel_xy_l2": r_ang_vel_xy * self.cfg.rewards.get("ang_vel_xy_l2", 0.0),
+            "joint_torques_l2": r_joint_torques * self.cfg.rewards.get("joint_torques_l2", 0.0),
+            "action_rate_l2": r_action_rate * self.cfg.rewards.get("action_rate_l2", 0.0),
+            "feet_air_time": r_feet_air_time * self.cfg.rewards.get("feet_air_time", 0.0),
+            "feet_slide": r_feet_slide * self.cfg.rewards.get("feet_slide", 0.0),
+            "undesired_contacts": r_undesired_contacts * self.cfg.rewards.get("undesired_contacts", 0.0),
+            "joint_deviation_hip": r_joint_deviation_hip * self.cfg.rewards.get("joint_deviation_hip", 0.0),
+            "joint_deviation_knee": r_joint_deviation_knee * self.cfg.rewards.get("joint_deviation_knee", 0.0),
+            "flat_orientation_l2": r_flat_orientation * self.cfg.rewards.get("flat_orientation_l2", 0.0),
+            "dof_pos_limits": r_dof_pos_limits * self.cfg.rewards.get("dof_pos_limits", 0.0),
+            "survived": torch.ones(self.num_envs, device=self.device) * self.cfg.rewards.get("survived", 0.0),
         }
         
         # Weighted sum
@@ -460,16 +478,6 @@ class BipedEnv(DirectRLEnv):
                 ang_vel=torch.zeros(len(env_ids), 3, device=self.device),
                 env_ids=env_ids,
             )
-        
-        # Physics Randomization
-        if self.cfg.enable_physics_randomization:
-            if self.mass_randomizer:
-                params = self.cfg.events["randomize_mass"].params.copy()
-                self.mass_randomizer(self, env_ids, **params)
-            
-            if self.friction_randomizer:
-                params = self.cfg.events["randomize_friction"].params.copy()
-                self.friction_randomizer(self, env_ids, **params)
         
         # Logging
         extras = dict()

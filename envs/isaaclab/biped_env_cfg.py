@@ -34,7 +34,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 10.0
     decimation = 2
-    action_scale = 1.0 
+    action_scale = 0.7
     action_space = 12
     observation_space = 48
     state_space = 59 # Observations + privileged info
@@ -135,13 +135,13 @@ class BipedEnvCfg(DirectRLEnvCfg):
         "push_robot": EventTerm(
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
-            interval_range_s=(10.0, 15.0),
+            interval_range_s=(1.0, 3.0),
             params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
         ),
         # Physics Randomization
         "randomize_mass": EventTerm(
             func="isaaclab.envs.mdp:randomize_rigid_body_mass",
-            mode="startup",
+            mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
                 "mass_distribution_params": (-1.0, 1.0),
@@ -150,7 +150,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
         ),
         "randomize_friction": EventTerm(
             func="isaaclab.envs.mdp:randomize_rigid_body_material",
-            mode="startup",
+            mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
                 "static_friction_range": (0.5, 1.5),
@@ -170,22 +170,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     
     # rewards
     rewards = {
-        "survived": 0.001,
-        "velocity": 0.15,
-        "ang_vel_tracking": 0.05,
-        "height_vel_tracking": 0.05,
-        "torque": 0.01,
-        "action_diff": 0.01,
-        "acceleration": 0.05,
-        "flat_orientation": 0.04,
-        "feet_flat": 0.3,
-        "height": 0.1,
-        "stall": 0.1,
-        "base_stability": 0.05,
-        "feet_airtime": 0.1,
-        "torso_centering": 0.1,
-        "joint_deviation": 0.05,
-        "termination": -0.05,
+        
     }
     
     # commands

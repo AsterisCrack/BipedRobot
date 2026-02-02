@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
+from typing import Optional
 
 class Torso(nn.Module, ABC):
     """Abstract base class for network backbones (torsos)."""
-    def __init__(self, observation_normalizer=None):
+    def __init__(self, observation_normalizer: Optional[nn.Module] = None):
         super().__init__()
         self.observation_normalizer = observation_normalizer
 
@@ -13,7 +14,7 @@ class Torso(nn.Module, ABC):
         pass
 
     def normalize(self, x):
-        if self.observation_normalizer:
+        if self.observation_normalizer is not None:
             return self.observation_normalizer(x)
         return x
 

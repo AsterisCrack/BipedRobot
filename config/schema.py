@@ -44,6 +44,13 @@ class LRSchedulerConfig(BaseModel):
     min_lr: float = 0
     eps: float = 1e-8
     start_step: int = 0
+
+class ExplorationConfig(BaseModel):
+    scale: float = 0.3
+    min_scale: float = 0.03
+    decay_rate: float = 1e-6
+    start_steps: int = 10000
+
 class NetworkConfig(BaseModel):
     network_type: NetworkType = Field(default=NetworkType.MLP)
     hidden_sizes: List[int] = Field(default=[256, 256])
@@ -69,6 +76,7 @@ class ModelConfig(BaseModel):
     actor_lr: float = 1e-4
     critic_lr: float = 1e-4
     lr_scheduler: Optional[LRSchedulerConfig] = None
+    exploration: Optional[ExplorationConfig] = None
     
     class Config:
         extra = "ignore"

@@ -23,8 +23,8 @@ _JOINT_LIMITS_DEG = [
     [-45, 45],  # r_knee
     [-90, 90],  # r_ankle_y
     [-90, 90],  # r_ankle_x
-    [0, 90],  # l_hip_z
-    [0, 90],  # l_hip_x
+    [0, 110],  # l_hip_z
+    [0, 110],  # l_hip_x
     [-90, 90],  # l_hip_y
     [-90, 90],  # l_knee
     [-90, 30],  # l_ankle_y
@@ -89,12 +89,12 @@ BIPED_ROBOT_CFG = ArticulationCfg(
     actuators={
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[".*"],
-            stiffness=50,
-            damping=8,
-            armature=0.03,
-            friction=0.2,
-            effort_limit=3.0,
-            velocity_limit=5.0,
+            stiffness=60,
+            damping=2,
+            armature=0.002,
+            friction=0.05,
+            effort_limit=2.94,
+            velocity_limit=4.7,
         ),
     },
 )

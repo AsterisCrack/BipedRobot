@@ -174,7 +174,31 @@ class DDPG():
         self.device = device
         self.num_workers = num_workers
         self.replay = Buffer(return_steps=5, seed=seed, device=device, config=config) if replay is None else replay
-        self.exploration = exploration or NormalActionNoise(self._policy, action_space, seed=seed, device=device)
+        
+        # Setup Exploration
+        if exploration is not None:
+            self.exploration = exploration
+        else:
+            # Default options
+            noise_kwargs = {}
+            if self.config:
+                # Check directly in pydantic model structure if applicable
+                model_cfg = getattr(self.config, "model", None)
+                if model_cfg:
+                     expl_cfg = getattr(model_cfg, "exploration", None)
+                     if expl_cfg:
+                         # It is likely a pydantic model or dict
+                         if hasattr(expl_cfg, "dict"): # Pydantic v1
+                             noise_kwargs = expl_cfg.dict()
+                         elif hasattr(expl_cfg, "model_dump"): # Pydantic v2
+                             noise_kwargs = expl_cfg.model_dump()
+                         elif isinstance(expl_cfg, dict):
+                             noise_kwargs = expl_cfg
+            
+            # Filter None values just in case
+            noise_kwargs = {k: v for k, v in noise_kwargs.items() if v is not None}
+            self.exploration = NormalActionNoise(self._policy, action_space, seed=seed, device=device, **noise_kwargs)
+
         self.actor_updater = DeterministicPolicyGradient(model=model, device=device, optimizer=actor_optimizer) if actor_updater is None else actor_updater
         self.critic_updater = DeterministicQLearning(model=model, device=device, optimizer=critic_optimizer) if critic_updater is None else critic_updater
         
