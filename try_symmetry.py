@@ -8,6 +8,9 @@ import torch
 import numpy as np
 import tkinter as tk
 from tkinter import ttk
+import datetime
+import pandas as pd
+from torch.utils.tensorboard import SummaryWriter
 
 # Isaac Lab imports
 from isaaclab.app import AppLauncher
@@ -41,66 +44,23 @@ class SymmetryTestEnv(BipedEnv):
     
     def step(self, actions):
         # 1. Symmetrize Actions
-        # Force Robot 1 to take the symmetric actions of Robot 0
+        # Apply normal actions to Robot 0
+        # Apply symmetric actions to Robot 1
         with torch.inference_mode():
-            actions_sym = _transform_actions_left_right(actions[0:1])
-            actions[1] = actions_sym[0]
+            # Get Robot 0 actions (actions coming from UI are same for all, so take [0:1])
+            act_0 = actions[0:1].clone()
+            
+            # Compute Symmetric actions for Robot 1 (Symmetry(act_0))
+            # returns batch of same size as input
+            act_1_sym = _transform_actions_left_right(act_0)
+            
+            # Set actions for env 1
+            actions[1] = act_1_sym[0]
             
             # 2. Step Physics
+            # Robot 0 runs with act_0
+            # Robot 1 runs with Symmetry(act_0)
             obs, rew, term, trunc, info = super().step(actions)
-            
-            # 3. Hard-Copy State for Visual Verification
-            # This ensures Robot 1 is EXACTLY the symmetry of Robot 0, correcting any physics drift.
-            
-            # Read Robot 0 State
-            root_pos_0 = self.robot.data.root_pos_w[0].clone()
-            root_quat_0 = self.robot.data.root_quat_w[0].clone()
-            lin_vel_0 = self.robot.data.root_lin_vel_w[0].clone()
-            ang_vel_0 = self.robot.data.root_ang_vel_w[0].clone()
-            joint_pos_0 = self.robot.data.joint_pos[0].clone()
-            joint_vel_0 = self.robot.data.joint_vel[0].clone()
-
-            # Calculate Robot 1 State (Symmetric)
-            
-            # Root Position: Shift Y by 1.5m so they are side-by-side
-            # If we want pure symmetry, we might want (x, -y, z), but that overlaps if y=0.
-            # Here we just visualize the pose symmetry adjacent to the original.
-            root_pos_1 = root_pos_0.clone()
-            root_pos_1[1] += 1.5 
-            
-            # Root Orientation: Roll -> -Roll, Pitch -> Pitch, Yaw -> -Yaw
-            # Convert Quat to Euler
-            r, p, y = math_utils.euler_xyz_from_quat(root_quat_0.unsqueeze(0))
-            # Apply Symmetry
-            root_quat_1 = math_utils.quat_from_euler_xyz(-r, p, -y).squeeze(0)
-
-            # Velocities (Linear: x -> x, y -> -y, z -> z) ?? 
-            # Needs to match the body frame inversion.
-            # Use utility if available or just approximate for visual static check.
-            # Local velocities are handled by symmetry.py, but here we deal with World frame root.
-            # Let's simple-copy velocities for now or zero them if testing static poses.
-            lin_vel_1 = lin_vel_0.clone() # Approximation
-            ang_vel_1 = ang_vel_0.clone()
-
-            # Joints: Use the symmetry function
-            joint_pos_1 = _switch_biped_joints_left_right(joint_pos_0.unsqueeze(0)).squeeze(0)
-            joint_vel_1 = _switch_biped_joints_left_right(joint_vel_0.unsqueeze(0)).squeeze(0)
-            
-            # Apply to Robot 1
-            env_ids = torch.tensor([1], device=self.device)
-            self.robot.write_root_pose_to_sim(
-                torch.cat([root_pos_1.unsqueeze(0), root_quat_1.unsqueeze(0)], dim=-1),
-                env_ids=env_ids
-            )
-            self.robot.write_root_velocity_to_sim(
-                torch.cat([lin_vel_1.unsqueeze(0), ang_vel_1.unsqueeze(0)], dim=-1),
-                env_ids=env_ids
-            )
-            self.robot.write_joint_state_to_sim(
-                joint_pos_1.unsqueeze(0),
-                joint_vel_1.unsqueeze(0),
-                env_ids=env_ids
-            )
             
             return obs, rew, term, trunc, info
 
@@ -138,6 +98,26 @@ def main():
     root = tk.Tk()
     root.title("Symmetry Test Control")
     root.geometry("600x800")
+    
+    # Logging Setup
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    session_dir = os.path.join("logs", "symmetry_test", f"{timestamp}_session")
+    
+    log_dir_real = os.path.join(session_dir, "real")
+    log_dir_mirror = os.path.join(session_dir, "mirror")
+    log_dir_diff = os.path.join(session_dir, "diff")
+    
+    os.makedirs(session_dir, exist_ok=True)
+    
+    writer_real = SummaryWriter(log_dir_real)
+    writer_mirror = SummaryWriter(log_dir_mirror)
+    writer_diff = SummaryWriter(log_dir_diff)
+    
+    print(f"Logging session to {session_dir}")
+    print(f"Run 'tensorboard --logdir logs/symmetry_test' to view live.")
+    
+    data_log = []
+    step_idx = 0
 
     main_frame = ttk.Frame(root, padding="10")
     main_frame.pack(fill=tk.BOTH, expand=True)
@@ -192,6 +172,8 @@ def main():
     
     text_info = tk.Text(info_frame, height=20, font=("Consolas", 9))
     text_info.pack(fill=tk.BOTH, expand=True)
+    text_info.tag_config("match", foreground="green")
+    text_info.tag_config("mismatch", foreground="red")
 
     # Helper to map degrees to actions
     def get_actions_from_gui():
@@ -219,6 +201,18 @@ def main():
             
         return actions
 
+    # Define Labels (Static)
+    base_labels = ["Lin Vel X", "Lin Vel Y", "Lin Vel Z", 
+                   "Ang Vel X", "Ang Vel Y", "Ang Vel Z",
+                   "Grav X", "Grav Y", "Grav Z",
+                   "Cmd X", "Cmd Y", "Cmd Yaw"]
+    
+    joint_labels = [f"Pos {name}" for name in JOINT_NAMES]
+    joint_vel_labels = [f"Vel {name}" for name in JOINT_NAMES]
+    prev_act_labels = [f"Act {name}" for name in JOINT_NAMES]
+    
+    all_labels = base_labels + joint_labels + joint_vel_labels + prev_act_labels
+
     # Main Loop
     while simulation_app.is_running():
         # Handle UI
@@ -228,56 +222,84 @@ def main():
         actions = get_actions_from_gui()
         obs, _, _, _, _ = env.step(actions)
         
-        # Compute Symmetry (Just for text display validation still)
-        obs_aug, act_aug = compute_symmetric_states(env, obs=obs, actions=actions)
+        # 1. Get Normal Robot Obs (Robot 0) and Mirrored Robot Obs (Robot 1)
+        obs_policy = obs["policy"] # [2, 48]
+        obs_1 = obs_policy[1].cpu()
+
+        # 2. Compute Symmetric of Robot 0
+        # We wrap in dict as expected by compute_symmetric_states
+        obs_dict_0 = {"policy": obs_policy[0:1]} 
+        # Returns [Original(0), Symmetric(0)]
+        obs_aug_dict, _ = compute_symmetric_states(env, obs=obs_dict_0)
+        obs_0_sym = obs_aug_dict["policy"][1].cpu()
+
+        # 3. Calculate Differences
+        diff = torch.abs(obs_0_sym - obs_1)
         
-        # Display Text
-        if obs_aug is not None and "policy" in obs_aug:
-            # Note: obs_aug is [2*N, ...]. 
-            # obs_aug[0] is Env 0 Original
-            # obs_aug[N] is Env 0 Fliped
-            
-            proprio_dim = 48
-            
-            # We want to compare:
-            # Robot 0's actual state (policy[0])
-            # Robot 1's actual state (policy[1])
-            # They SHOULD be symmetric.
-            
-            pol_0 = obs["policy"][0, :proprio_dim].cpu()
-            pol_1 = obs["policy"][1, :proprio_dim].cpu()
-            
-            msg = "--- Live Validation (Robot 0 vs Robot 1) ---\n"
-            msg += f"Robot 1 is explicitly forced to be Symmetry(Robot 0)\n"
-            msg += f"{'Feature':<20} | {'Robot 0':<30} | {'Robot 1':<30}\n"
-            msg += "-" * 85 + "\n"
-            
-            # 0-2 Lin Vel
-            msg += f"{'Base Lin Vel':<20} | {str(pol_0[0:3].numpy()):<30} | {str(pol_1[0:3].numpy()):<30}\n"
-            # 3-5 Ang Vel
-            msg += f"{'Base Ang Vel':<20} | {str(pol_0[3:6].numpy()):<30} | {str(pol_1[3:6].numpy()):<30}\n"
-            
-            msg += "\n--- Joint Positions (Normalized/Relative) ---\n"
-            for j in range(12):
-                name = JOINT_NAMES[j]
+        # Tensorboard Logging
+        # Global stats (diff only)
+        writer_diff.add_scalar("Global/Mean_Diff", diff.mean().item(), step_idx)
+        writer_diff.add_scalar("Global/Max_Diff", diff.max().item(), step_idx)
+        
+        # Individual Component Logging
+        for i, label in enumerate(all_labels):
+            if i < len(diff):
+                # Common tag for overlay in TensorBoard
+                tag = f"Observation/{label.replace(' ', '_')}"
                 
-                # Check mapping for display:
-                # If Robot 0 is r_hip_z (0), Robot 1's corresponding slot (0) holds l_hip_z data (flipped)
-                # But physically, Robot 1's joint 0 IS r_hip_z.
-                # So if Robot 0 moves r_hip_z to +0.5
-                # Robot 1 should move l_hip_z (6) to +0.5? Or -0.5?
-                # The symmetry logic swaps LEFT and RIGHT.
-                # So Robot 1's Left Leg = Robot 0's Right Leg (flipped)
-                # And Robot 1's Right Leg = Robot 0's Left Leg (flipped)
-                
-                # Let's just print simple values
-                val_0 = pol_0[12+j].item()
-                val_1 = pol_1[12+j].item()
-                
-                msg += f"{name:<15} | {val_0:>10.4f} | {val_1:>10.4f}\n"
-                
-            text_info.delete("1.0", tk.END)
-            text_info.insert("1.0", msg)
+                writer_real.add_scalar(tag, obs_0_sym[i].item(), step_idx)
+                writer_mirror.add_scalar(tag, obs_1[i].item(), step_idx)
+                writer_diff.add_scalar(tag, diff[i].item(), step_idx)
+
+        # CSV Logging
+        row = {"step": step_idx}
+        for i, name in enumerate(all_labels):
+            if i < len(diff):
+                # Save all 3 values per component
+                row[f"{name}_real"] = obs_0_sym[i].item()
+                row[f"{name}_mirror"] = obs_1[i].item()
+                row[f"{name}_diff"] = diff[i].item()
+        data_log.append(row)
+
+        step_idx += 1
+
+        # 4. Compare obs_0_sym vs obs_1 (UI Update)
+        
+        # Clear Text
+        text_info.delete("1.0", tk.END)
+        
+        # Header
+        header = f"{'Observation':<25} | {'Exp (Sym)':<15} | {'Act (Rob1)':<15} | {'Match'}\n"
+        header += "-" * 75 + "\n"
+        text_info.insert("end", header)
+        
+        for i, label in enumerate(all_labels):
+            if i >= len(obs_0_sym): break
+            
+            val_sym = obs_0_sym[i].item() # Theoretical
+            val_act = obs_1[i].item()     # Actual
+            
+            # Comparison (Tolerance 1e-3)
+            is_close = np.isclose(val_sym, val_act, atol=1e-1, rtol=1e-1)
+            
+            tag = "match" if is_close else "mismatch"
+            status = "TRUE" if is_close else "FALSE"
+            
+            line = f"{label:<25} | {val_sym:>15.4f} | {val_act:>15.4f} | {status}\n"
+            text_info.insert("end", line, tag)
+
+    # Save Data
+    writer_real.close()
+    writer_mirror.close()
+    writer_diff.close()
+    
+    if data_log:
+        df = pd.DataFrame(data_log)
+        csv_path = os.path.join(session_dir, "symmetry_data.csv")
+        df.to_csv(csv_path, index=False)
+        print(f"Saved CSV logs to {csv_path}")
+        # Note: plot script might need updates to handle new CSV structure
+        # print(f"You can plot this using: python BipedRobot/plot_symmetry_logs.py {csv_path}")
 
     simulation_app.close()
 

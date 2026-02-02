@@ -41,7 +41,7 @@ class BipedEnv(DirectRLEnv):
             self.num_obs_critic += self.obs_priv_dim
             
         # Apply history
-        if cfg.history_size > 0:
+        if cfg.history_size > 0 and cfg.use_history:
             self.num_obs_policy *= cfg.history_size
             self.num_obs_critic *= cfg.history_size
             
@@ -61,7 +61,11 @@ class BipedEnv(DirectRLEnv):
         self.right_foot_idx = self.feet_indices[0]
         self.left_foot_idx = self.feet_indices[1]
 
+        # Specific joints for penalty (user specified 2, 3 for abduction/sumo pose)
+        self.abduction_joint_indices = torch.tensor([2, 3], device=self.device, dtype=torch.long)
+
         # Joint limits
+
         self.joint_pos_limits = self.robot.data.soft_joint_pos_limits[0, :, :]
         self.joint_vel_limits = self.robot.data.soft_joint_vel_limits[0, :]
         self.joint_effort_limits = self.robot.data.joint_effort_limits[0, :]
@@ -76,6 +80,7 @@ class BipedEnv(DirectRLEnv):
         
         self.actions = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         self.previous_actions = torch.zeros(self.num_envs, self.num_actions, device=self.device)
+        self.previous_previous_actions = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         self.joint_efforts = torch.zeros(self.num_envs, self.num_joints, device=self.device)
         self.targets = torch.zeros(self.num_envs, self.num_joints, device=self.device)
         
@@ -96,7 +101,7 @@ class BipedEnv(DirectRLEnv):
         }
         
         # History
-        self.history_size = self.cfg.history_size
+        self.history_size = self.cfg.history_size if self.cfg.use_history else 0
         self.policy_history_buf = torch.zeros(self.num_envs, self.history_size, self.num_obs_policy // self.history_size, device=self.device) if self.history_size > 0 else None
         self.critic_history_buf = torch.zeros(self.num_envs, self.history_size, self.num_obs_critic // self.history_size, device=self.device) if self.history_size > 0 else None
         
@@ -230,6 +235,7 @@ class BipedEnv(DirectRLEnv):
 
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         obs, rew, terminated, truncated, info = super().step(actions)
+        self.previous_previous_actions = self.previous_actions.clone()
         self.previous_actions = self.actions.clone()
 
         if self.sim.has_gui():
@@ -306,12 +312,6 @@ class BipedEnv(DirectRLEnv):
             forces.unsqueeze(-1),
         ], dim=-1)
 
-        
-        # Mirroring
-        if self.cfg.enable_mirroring:
-            # TODO: Implement mirroring logic
-            pass
-
         # Construct Policy Observations
         if self.cfg.policy_has_privileged_info:
             obs_policy = torch.cat([obs_proprio, obs_priv], dim=-1)
@@ -359,11 +359,13 @@ class BipedEnv(DirectRLEnv):
         
         r_torque = rewards.torque_penalty(self.joint_efforts)
         r_action_diff = rewards.action_diff_penalty(self.actions, self.previous_actions)
+        r_action_smoothness = rewards.action_smoothness_penalty(self.actions, self.previous_actions, self.previous_previous_actions)
         r_acceleration = rewards.acceleration_penalty(self.robot.data.joint_acc)
         r_flat_orient = rewards.flat_orientation_reward(self.projected_gravity_b)
         r_feet_flat = rewards.feet_flat_reward(feet_quat)
         r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
         r_joint_deviation = rewards.joint_deviation_reward(self.joint_pos, self.default_joint_pos)
+        r_abduction = rewards.joint_position_target_penalty(self.joint_pos[:, self.abduction_joint_indices])
         
         # Airtime reward
         first_contact = self.contact_sensor.compute_first_contact(self.step_dt)
@@ -404,17 +406,23 @@ class BipedEnv(DirectRLEnv):
             "base_stability": r_base_stability * self.cfg.rewards.get("base_stability", 0.0),
             "torque": r_torque * self.cfg.rewards["torque"],
             "action_diff": r_action_diff * self.cfg.rewards["action_diff"],
+            "action_smoothness": r_action_smoothness * self.cfg.rewards.get("action_smoothness", 0.0),
             "acceleration": r_acceleration * self.cfg.rewards["acceleration"],
             "flat_orientation": r_flat_orient * self.cfg.rewards.get("flat_orientation", 0.0),
             "feet_flat": r_feet_flat * self.cfg.rewards.get("feet_flat", 0.0),
             "torso_centering": r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0),
             "joint_deviation": r_joint_deviation * self.cfg.rewards.get("joint_deviation", 0.0),
+            "abduction": r_abduction * self.cfg.rewards.get("abduction", 0.0),
             "feet_airtime": r_feet_airtime * self.cfg.rewards.get("feet_airtime", 0.0),
             "termination": r_termination * self.cfg.rewards.get("termination", 0.0),
         }
         
         # Weighted sum
         total_reward = torch.sum(torch.stack(list(reward_terms.values())), dim=0)
+        
+        # Apply global scaling
+        if hasattr(self.cfg, "reward_scale"):
+            total_reward *= self.cfg.reward_scale
         
         # Logging
         for key, value in reward_terms.items():
@@ -484,6 +492,7 @@ class BipedEnv(DirectRLEnv):
 
         # Reset buffers
         self.previous_actions[env_ids] = 0.0
+        self.previous_previous_actions[env_ids] = 0.0
         self.commands[env_ids] = 0.0
         if self.policy_history_buf is not None:
             self.policy_history_buf[env_ids] = 0.0

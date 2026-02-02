@@ -42,13 +42,19 @@ from algorithms.d4pg.model import D4PG
 from algorithms.mpo.model import MPO
 from config.schema import ModelType
 from utils import Config
+from algorithms.utils import RunningMeanStd
 
 class IsaacLabWrapper:
-    def __init__(self, env):
+    def __init__(self, env, config=None):
         self.env = env
         self.device = env.device
         self.num_envs = env.num_envs
+        self.config = config
+        self.normalize_obs = False
         
+        if config and hasattr(config.train, "normalize_obs"):
+             self.normalize_obs = config.train.normalize_obs
+
         # Handle batched spaces from Isaac Lab
         # We need to expose single-env spaces to the algorithms
         import gymnasium.spaces as spaces
@@ -69,6 +75,15 @@ class IsaacLabWrapper:
              )
         else:
              self.observation_space = env.observation_space
+             
+        # Initialize scalers if needed
+        self.obs_scalers = {}
+        if self.normalize_obs:
+            if isinstance(self.observation_space, spaces.Dict):
+                for key, space in self.observation_space.spaces.items():
+                    self.obs_scalers[key] = RunningMeanStd(shape=space.shape, device=self.device)
+            else:
+                self.obs_scalers["default"] = RunningMeanStd(shape=self.observation_space.shape, device=self.device)
 
         # Action space
         if hasattr(env.action_space, "shape") and len(env.action_space.shape) == 2:
@@ -100,8 +115,68 @@ class IsaacLabWrapper:
     def _process_obs(self, obs):
         if isinstance(obs, dict):
              # Keep tensors on device
-             return obs
+             pass
+        
+        # Map Isaac Lab keys to what SAC expects (if needed, mostly relevant if dict)
+        # Assuming obs structure is compatible or we just pass it through for play if model handles it.
+        # But for normalization we need dictionary keys if it is a dict
+        
+        # Normalize if enabled
+        if self.normalize_obs:
+            if isinstance(obs, dict):
+                # Copy to avoid inplace modification of original dict keys loop issues if any, 
+                # though here we modify values.
+                # Note: obs from env.step might be read-only or shared, be careful.
+                # Assuming standard tensor dict.
+                
+                # Check for policy/actor key mapping if needed. 
+                # Similar to train.py, but play loop might expect raw env obs structure? 
+                # The model expects "actor" key usually if dict.
+                
+                # Let's check what 'obs' contains. BipedEnv returns 'policy' and 'critic'.
+                # But our scalers are keyed 'actor', 'critic' in init because we mapped them.
+                # So we need to map keys here too to match scalers.
+                
+                # We can update scalers using the env keys if we map them effectively.
+                
+                if "policy" in obs and "actor" in self.obs_scalers:
+                    self.obs_scalers["actor"].update(obs["policy"])
+                    obs["policy"] = self.obs_scalers["actor"].normalize(obs["policy"])
+                    
+                if "critic" in obs and "critic" in self.obs_scalers:
+                    self.obs_scalers["critic"].update(obs["critic"])
+                    obs["critic"] = self.obs_scalers["critic"].normalize(obs["critic"])
+                    
+                # Handle other keys if they match exactly
+                for k, v in obs.items():
+                    if k in self.obs_scalers and k not in ["policy", "critic"]:
+                        self.obs_scalers[k].update(v)
+                        obs[k] = self.obs_scalers[k].normalize(v)
+            else:
+                 if "default" in self.obs_scalers:
+                     self.obs_scalers["default"].update(obs)
+                     obs = self.obs_scalers["default"].normalize(obs)
+                     
         return obs
+
+    def load(self, path):
+        if self.normalize_obs and self.obs_scalers:
+            # If path ends with .pt, strip it to construct scaler path
+            load_path = path
+            if path.endswith(".pt"):
+                base_path = path[:-3]
+                load_path = base_path + "_obs_scalers.pt"
+            else:
+                load_path = path + "_obs_scalers.pt"
+
+            if os.path.exists(load_path):
+                scalers_state = torch.load(load_path, map_location=self.device)
+                for k, v in scalers_state.items():
+                    if k in self.obs_scalers:
+                        self.obs_scalers[k].load_state_dict(v)
+                print(f"Loaded observation scalers from {load_path}")
+            else:
+                print(f"Warning: Observation scalers not found at {load_path}")
 
 def play():
     # Load config
@@ -160,7 +235,7 @@ def play():
             env_cfg.critic_has_privileged_info = (config.train.critic_obs == "privileged")
             
     env = BipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video or args_cli.headless else None)
-    wrapped_env = IsaacLabWrapper(env)
+    wrapped_env = IsaacLabWrapper(env, config)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")

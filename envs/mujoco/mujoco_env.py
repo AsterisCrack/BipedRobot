@@ -212,9 +212,9 @@ class MujocoEnv(BaseEnv):
 
     def _reset_target(self):
         """Reset target velocity in robot reference frame."""
-        x_range = getattr(self.config, "target_x_vel_range", [-0.5, 0.5])
-        y_range = getattr(self.config, "target_y_vel_range", [-0.3, 0.3])
-        w_range = getattr(self.config, "target_w_vel_range", [-1.0, 1.0])
+        x_range = self.config.commands["base_velocity"]["ranges"]["lin_vel_x"]
+        y_range = self.config.commands["base_velocity"]["ranges"]["lin_vel_y"]
+        w_range = self.config.commands["base_velocity"]["ranges"]["ang_vel_z"]
         
         self.target[0] = np.random.uniform(x_range[0], x_range[1])  # x_vel
         self.target[1] = np.random.uniform(y_range[0], y_range[1])  # y_vel

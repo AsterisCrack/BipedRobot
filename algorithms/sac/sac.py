@@ -41,7 +41,7 @@ class TwinCriticSoftDeterministicPolicyGradient:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         print(f"Loaded mpo model from {path}")
         
-    def __call__(self, observations, critic_observations=None):
+    def __call__(self, observations, critic_observations=None, steps=0):
         critic_1_variables = [param for param in self.model.critic_1.parameters() if param.requires_grad]
         critic_2_variables = [param for param in self.model.critic_2.parameters() if param.requires_grad]
         critic_variables = critic_1_variables + critic_2_variables
@@ -72,7 +72,7 @@ class TwinCriticSoftDeterministicPolicyGradient:
         loss.backward()
         if self.gradient_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
-        self.optimizer.step()
+        self.optimizer.step(loss.item(), steps=steps)
 
         for var in critic_variables:
             var.requires_grad = True
@@ -123,7 +123,7 @@ class TwinCriticSoftQLearning:
         
     def __call__(
         self, observations, actions, next_observations, rewards, discounts,
-        next_actor_observations=None
+        next_actor_observations=None, steps=0
     ):
         with torch.no_grad():
             if self.recurrent_model:
@@ -165,7 +165,7 @@ class TwinCriticSoftQLearning:
         loss.backward()
         if self.gradient_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
-        self.optimizer.step()
+        self.optimizer.step(loss.item(), steps=steps)
 
         return dict(
             loss=loss.detach(), q1=values_1.detach(), q2=values_2.detach())

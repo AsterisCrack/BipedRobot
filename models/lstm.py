@@ -85,6 +85,8 @@ class LSTMActor(nn.Module):
 
     def get_action(self, observations, hidden_state=None):
         out = self.forward(observations, hidden_state)
+        if isinstance(out, torch.Tensor):
+            return out
         if hasattr(out, 'mean'):
              return out.mean
         if hasattr(out, 'loc'):

@@ -83,6 +83,8 @@ class CNNActor(nn.Module):
 
     def get_action(self, observations):
         out = self.forward(observations)
+        if isinstance(out, torch.Tensor):
+            return out
         if hasattr(out, 'mean'):
              return out.mean
         if hasattr(out, 'loc'):

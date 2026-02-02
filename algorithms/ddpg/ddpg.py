@@ -43,7 +43,7 @@ class DeterministicPolicyGradient:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         print(f"Loaded mpo model from {path}")
         
-    def __call__(self, observations, critic_observations=None):
+    def __call__(self, observations, critic_observations=None, steps=0):
         critic_variables = [p for p in self.model.critic.parameters() if p.requires_grad]
 
         for var in critic_variables:
@@ -68,7 +68,7 @@ class DeterministicPolicyGradient:
         loss.backward()
         if self.gradient_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
-        self.optimizer.step()
+        self.optimizer.step(loss.item(), steps=steps)
 
         for var in critic_variables:
             var.requires_grad = True
@@ -112,7 +112,7 @@ class DeterministicQLearning:
         # print(f"Loaded mpo model from {path}")
         
     def __call__(
-        self, observations, actions, next_observations, rewards, discounts, next_actor_observations=None
+        self, observations, actions, next_observations, rewards, discounts, next_actor_observations=None, steps=0
     ):
         with torch.no_grad():
             if self.recurrent_model:
@@ -141,7 +141,7 @@ class DeterministicQLearning:
         loss.backward()
         if self.gradient_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
-        self.optimizer.step()
+        self.optimizer.step(loss.item(), steps=steps)
 
         return dict(loss=loss.detach(), q=values.detach())
 
@@ -363,7 +363,7 @@ class DDPG():
         # Update both the actor and the critic multiple times.
         for batch in self.replay.get(*self.keys, steps=steps):
             batch = {k: torch.as_tensor(v) for k, v in batch.items()}
-            infos = self._update_actor_critic(**batch)
+            infos = self._update_actor_critic(steps=steps, **batch)
 
             actor_loss += infos['actor']['loss']
             critic_loss += infos['critic']['loss']
@@ -387,6 +387,7 @@ class DDPG():
             actor_loss=actor_loss.detach(), critic_loss=critic_loss.detach())
         
     def _update_actor_critic(self, **kwargs):
+        steps = kwargs.pop('steps', 0)
         if self.is_dict_obs:
             observations = kwargs['observations_actor'] 
             critic_observations = kwargs['observations_critic']
@@ -399,9 +400,10 @@ class DDPG():
             critic_infos = self.critic_updater(
                 critic_observations, actions, next_critic_observations, 
                 rewards, discounts, 
-                next_actor_observations=next_observations
+                next_actor_observations=next_observations,
+                steps=steps
             )
-            actor_infos = self.actor_updater(observations, critic_observations=critic_observations)
+            actor_infos = self.actor_updater(observations, critic_observations=critic_observations, steps=steps)
         else:
             observations = kwargs['observations']
             actions = kwargs['actions']
@@ -415,7 +417,7 @@ class DDPG():
             rewards = torch.as_tensor(rewards, dtype=torch.float32).to(self.device)
             discounts = torch.as_tensor(discounts, dtype=torch.float32).to(self.device)
             
-            critic_infos = self.critic_updater(observations, actions, next_observations, rewards, discounts)
-            actor_infos = self.actor_updater(observations)
+            critic_infos = self.critic_updater(observations, actions, next_observations, rewards, discounts, steps=steps)
+            actor_infos = self.actor_updater(observations, steps=steps)
 
         return dict(critic=critic_infos, actor=actor_infos)

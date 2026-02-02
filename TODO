@@ -1,0 +1,2 @@
+Correctly handle polocy and critic different observations in model
+Check why actor and critic sizes are different if same observations

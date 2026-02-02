@@ -1,10 +1,11 @@
+from networkx import sigma
 import torch
 from typing import Tuple
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply
 
 @torch.jit.script
-def velocity_tracking_reward(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, sigma: float = 5.0):
+def velocity_tracking_reward(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, sigma: float = 2.0):
     """
     Reward for tracking the target velocity (Negative MSE).
     Matches MuJoCo TargetReward implementation.
@@ -23,7 +24,7 @@ def angular_velocity_tracking_reward(commands: torch.Tensor, base_ang_vel_b: tor
     return torch.exp(-sigma * ang_vel_error)
 
 @torch.jit.script
-def height_velocity_tracking_reward(base_lin_vel_b: torch.Tensor, target_height_vel: float = 0.0, sigma: float = 10.0):
+def height_velocity_tracking_reward(base_lin_vel_b: torch.Tensor, target_height_vel: float = 0.0, sigma: float = 2.0):
     """
     Reward for maintaining a specific height velocity.
     """
@@ -32,15 +33,16 @@ def height_velocity_tracking_reward(base_lin_vel_b: torch.Tensor, target_height_
     return torch.exp(-sigma * error)
 
 @torch.jit.script
-def base_height_reward(base_pos: torch.Tensor, min_height: float = 0.2):
+def base_height_reward(base_pos: torch.Tensor, min_height: float = 0.20, sigma: float = 2.0):
     """
     Reward for maintaining a specific base height.
     """
     base_height = base_pos[:, 2]
-    return (base_height >= min_height).float()
+    error = torch.clamp(min_height - base_height, min=0.0)
+    return torch.exp(-sigma * torch.square(error))
 
 @torch.jit.script
-def base_stability_reward(base_ang_vel_b: torch.Tensor, sigma: float = 5.0):
+def base_stability_reward(base_ang_vel_b: torch.Tensor, sigma: float = 2.0):
     """
     Reward for minimizing angular velocity (xy components).
     Renamed from angular_velocity_penalty.
@@ -81,7 +83,7 @@ def feet_airtime_reward(first_contact: torch.Tensor, last_air_time: torch.Tensor
     return air_time
 
 @torch.jit.script
-def flat_orientation_reward(projected_gravity_b: torch.Tensor, sigma: float = 5.0):
+def flat_orientation_reward(projected_gravity_b: torch.Tensor, sigma: float = 2.0):
     """
     Reward for flat base orientation (pitch/roll).
     Renamed from orientation_penalty.
@@ -118,7 +120,7 @@ def feet_flat_reward(feet_orientations: torch.Tensor, sigma: float = 3.0):
     
 
 @torch.jit.script
-def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma: float = 20.0):
+def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma: float = 1.0):
     """
     Reward for keeping torso centered between feet.
     base_pos: (num_envs, 3)
@@ -128,9 +130,9 @@ def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma
     feet_midpoint = torch.mean(feet_pos, dim=1) # (num_envs, 3)
     
     # Compute horizontal distance
-    dist = torch.norm(base_pos[:, :2] - feet_midpoint[:, :2], dim=1)
+    dist_sq = torch.sum(torch.square(base_pos[:, :2] - feet_midpoint[:, :2]), dim=1)
     
-    return torch.exp(-sigma * dist)
+    return torch.exp(-sigma * dist_sq)
 
 @torch.jit.script
 def joint_deviation_reward(joint_pos: torch.Tensor, default_joint_pos: torch.Tensor, scale: float = 1.0):
@@ -147,3 +149,22 @@ def termination_penalty(terminated: torch.Tensor):
     Returns 1.0 if terminated.
     """
     return terminated.float()
+
+@torch.jit.script
+def action_smoothness_penalty(actions: torch.Tensor, previous_actions: torch.Tensor, previous_previous_actions: torch.Tensor, scale: float = 1.0):
+    """
+    Penalty for second derivative of actions (smoothness)
+    Minimizing (Action_t - 2 * Action_{t-1} + Action_{t-2})^2
+    """
+    diff1 = actions - previous_actions
+    diff2 = previous_actions - previous_previous_actions
+    smoothness_error = torch.sum(torch.square(diff1 - diff2), dim=-1)
+    return - scale * smoothness_error / float(actions.shape[-1])
+
+@torch.jit.script
+def joint_position_target_penalty(selected_joint_pos: torch.Tensor, target: float = 0.0, scale: float = 1.0):
+    """
+    Penalize deviation of selected joints from a target value.
+    """
+    return -scale * torch.sum(torch.square(selected_joint_pos - target), dim=-1)
+

@@ -178,6 +178,8 @@ class TransformerActor(nn.Module):
             observations = torch.from_numpy(observations).to(self.device).float()
         
         out = self.forward(observations)
+        if isinstance(out, torch.Tensor):
+            return out
         if hasattr(out, 'mean'):
              return out.mean
         if hasattr(out, 'loc'):

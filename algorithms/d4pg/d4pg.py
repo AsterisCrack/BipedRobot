@@ -42,7 +42,7 @@ class DistributionalDeterministicPolicyGradient:
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         print(f"Loaded mpo model from {path}")
         
-    def __call__(self, observations, critic_observations=None):
+    def __call__(self, observations, critic_observations=None, steps=0):
         critic_variables = [param for param in self.model.critic.parameters() if param.requires_grad]
 
         for var in critic_variables:
@@ -68,7 +68,7 @@ class DistributionalDeterministicPolicyGradient:
         loss.backward()
         if self.gradient_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
-        self.optimizer.step()
+        self.optimizer.step(loss.item(), steps=steps)
 
         for var in critic_variables:
             var.requires_grad = True
@@ -112,7 +112,7 @@ class DistributionalDeterministicQLearning:
         
     def __call__(
         self, observations, actions, next_observations, rewards, discounts,
-        next_actor_observations=None
+        next_actor_observations=None, steps=0
     ):
         with torch.no_grad():
             # If actor and critic have different observation spaces, 
@@ -134,7 +134,7 @@ class DistributionalDeterministicQLearning:
         loss.backward()
         if self.gradient_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.variables, self.gradient_clip)
-        self.optimizer.step()
+        self.optimizer.step(loss.item(), steps=steps)
 
         return dict(loss=loss.detach())
 

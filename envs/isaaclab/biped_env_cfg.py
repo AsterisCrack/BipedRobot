@@ -32,15 +32,17 @@ class BipedSceneCfg(InteractiveSceneCfg):
 @configclass
 class BipedEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 20.0
-    decimation = 1 # Match MuJoCo's 100Hz (assuming sim_frequency=100)
+    episode_length_s = 10.0
+    decimation = 2
     action_scale = 1.0 
     action_space = 12
     observation_space = 48
     state_space = 59 # Observations + privileged info
     action_space_limits = (-1.0, 1.0) # Normalized action space
     history_size = 0 # Default history size
+    use_history = False # Whether to use history in observations
     logging_level = "INFO" # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+    reward_scale = 1.0 # Scale all rewards by this factor
     
     # Observations
     observation_type = "normal" # Options: "normal", "basic"
@@ -70,9 +72,12 @@ class BipedEnvCfg(DirectRLEnvCfg):
     sim: sim_utils.SimulationCfg = sim_utils.SimulationCfg(
         dt=1 / 100,
         render_interval=decimation,
-        use_fabric=True,
-        physx=sim_utils.PhysxCfg(
-            enable_external_forces_every_iteration=True,
+        physics_material=sim_utils.RigidBodyMaterialCfg(
+            friction_combine_mode="multiply",
+            restitution_combine_mode="multiply",
+            static_friction=1.0,
+            dynamic_friction=1.0,
+            restitution=0.0,
         ),
     )
     
@@ -194,14 +199,3 @@ class BipedEnvCfg(DirectRLEnvCfg):
             },
         }
     }
-    
-    # Mirroring settings
-    enable_mirroring = True
-    # Define mirror indices for joints and observations
-    # This will be used in the env class to swap left/right
-    # Assuming 12 joints: 0-5 (Right), 6-11 (Left) based on the XML
-    # r_hip_z, r_hip_x, r_hip_y, r_knee, r_ankle_y, r_ankle_x
-    # l_hip_z, l_hip_x, l_hip_y, l_knee, l_ankle_y, l_ankle_x
-    mirror_joint_indices = [6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5]
-    mirror_action_indices = mirror_joint_indices
-    # Observation mirroring indices need to be constructed based on the obs vector layout

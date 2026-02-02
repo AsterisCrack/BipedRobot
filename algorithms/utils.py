@@ -13,34 +13,96 @@ def to_tensor(obs, device):
         return {k: torch.as_tensor(v, dtype=torch.float32, device=device) for k, v in obs.items()}
     return torch.as_tensor(obs, dtype=torch.float32, device=device)
 
+class RunningMeanStd:
+    def __init__(self, shape, device='cpu', epsilon=1e-4):
+        self.mean = torch.zeros(shape, device=device)
+        self.var = torch.ones(shape, device=device)
+        self.count = epsilon
+        self.epsilon = epsilon
+
+    def update(self, x):
+        batch_mean = torch.mean(x, dim=0)
+        batch_var = torch.var(x, dim=0, unbiased=False)
+        batch_count = x.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + torch.square(delta) * self.count * batch_count / tot_count
+        new_var = M2 / tot_count
+        new_count = tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = new_count
+        
+    def normalize(self, x):
+        return (x - self.mean) / torch.sqrt(self.var + self.epsilon)
+
+    def state_dict(self):
+        return {
+            'mean': self.mean,
+            'var': self.var,
+            'count': self.count
+        }
+
+    def load_state_dict(self, state_dict):
+        self.mean = state_dict['mean'].to(self.mean.device)
+        self.var = state_dict['var'].to(self.var.device)
+        self.count = state_dict['count']
+        if isinstance(self.count, torch.Tensor):
+             self.count = self.count.to(self.mean.device)
+
 class OptimizerWithScheduler(torch.optim.Optimizer):
     """ Wrapper for optimizers with a scheduler. """
-    def __init__(self, optimizer, scheduler):
+    def __init__(self, optimizer, scheduler, start_step=0):
         self.optimizer = optimizer
-        self.scheduler = scheduler(self.optimizer)
+        self.scheduler = scheduler(self.optimizer) if scheduler else None
+        self.start_step = start_step
     
-    def step(self):
+    def step(self, metrics=None, steps=0):
+        # Get current LRs before scheduler step
+        old_lrs = [group["lr"] for group in self.optimizer.param_groups]
+        
         self.optimizer.step()
-        self.scheduler.step()
+        
+        if self.scheduler is not None and steps >= self.start_step:
+            if isinstance(self.scheduler, lr_scheduler.ReduceLROnPlateau):
+                if metrics is not None:
+                    self.scheduler.step(metrics)
+            else:
+                self.scheduler.step()
+            
+            # Check for LR changes
+            new_lrs = [group["lr"] for group in self.optimizer.param_groups]
+            for i, (old_lr, new_lr) in enumerate(zip(old_lrs, new_lrs)):
+                if new_lr < old_lr:
+                    print(f"[INFO] Learning rate for group {i} decreased from {old_lr:.6e} to {new_lr:.6e}")
     
     def zero_grad(self):
         self.optimizer.zero_grad()
     
     def state_dict(self):
-        return {
-            'optimizer': self.optimizer.state_dict(),
-            'scheduler': self.scheduler.state_dict()
-        }
+        state = {'optimizer': self.optimizer.state_dict()}
+        if self.scheduler:
+            state['scheduler'] = self.scheduler.state_dict()
+        return state
     
     def load_state_dict(self, state_dict):
         self.optimizer.load_state_dict(state_dict['optimizer'])
-        self.scheduler.load_state_dict(state_dict['scheduler'])
+        if self.scheduler and 'scheduler' in state_dict:
+            self.scheduler.load_state_dict(state_dict['scheduler'])
         
     def __getattr__(self, name):
         return getattr(self.optimizer, name)
     
     def __setattr__(self, name, value):
-        if name in ['optimizer', 'scheduler']:
+        if name in ['optimizer', 'scheduler', 'start_step']:
             self.__dict__[name] = value
         else:
             setattr(self.optimizer, name, value)
@@ -55,22 +117,57 @@ class Model:
         critic_lr = model_cfg.get("critic_lr", 1e-3)
         
         lr_sched_cfg = model_cfg.get("lr_scheduler")
+        
+        def get_scheduler_fn(cfg):
+            if not cfg:
+                # Default Cosine
+                return lambda optimizer: lr_scheduler.CosineAnnealingLR(optimizer, T_max=5e5, eta_min=1e-5)
+            
+            sched_type = cfg.get("scheduler_type", "cosine")
+            
+            if sched_type == "none":
+                return None
+                
+            if sched_type == "plateau":
+                 mode = cfg.get("mode", "min")
+                 factor = cfg.get("factor", 0.1)
+                 patience = cfg.get("patience", 10)
+                 threshold = cfg.get("threshold", 1e-4)
+                 threshold_mode = cfg.get("threshold_mode", "rel")
+                 cooldown = cfg.get("cooldown", 0)
+                 min_lr = cfg.get("min_lr", 0)
+                 eps = cfg.get("eps", 1e-8)
+                 return lambda optimizer: lr_scheduler.ReduceLROnPlateau(
+                     optimizer, mode=mode, factor=factor, patience=patience,
+                     threshold=threshold, threshold_mode=threshold_mode,
+                     cooldown=cooldown, min_lr=min_lr, eps=eps
+                 )
+            else:
+                 # Cosine
+                 T_max = cfg.get("T_max", 5e5)
+                 if T_max is None: T_max = 5e5
+                 eta_min = cfg.get("eta_min", 1e-5)
+                 return lambda optimizer: lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+
+        scheduler_fn = get_scheduler_fn(lr_sched_cfg)
+        
+        # Get start step from config
+        start_step = 0
         if lr_sched_cfg:
-            T_max = lr_sched_cfg.get("T_max", 5e5)
-            eta_min = lr_sched_cfg.get("eta_min", 1e-5)
-        else:
-            T_max = 5e5
-            eta_min = 1e-5
+            start_step = lr_sched_cfg.get("start_step", 0)
+
         self.actor_optimizer = (
             lambda params: OptimizerWithScheduler(
                 torch.optim.Adam(params, lr=actor_lr),
-                lambda optimizer: lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+                scheduler_fn,
+                start_step
             )
         )
         self.critic_optimizer = (
             lambda params: OptimizerWithScheduler(
                 torch.optim.Adam(params, lr=critic_lr),
-                lambda optimizer: lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+                scheduler_fn,
+                start_step
             )
         )
         """
@@ -80,6 +177,10 @@ class Model:
         # Load the saved model
         if model_path:
             self.model.load_state_dict(torch.load(model_path, map_location=device))
+            
+            # Load environment state
+            if hasattr(env, "load"):
+                env.load(model_path)
         
         self.model.to(device)
         
@@ -574,6 +675,10 @@ class Trainer:
         print(f"Saving checkpoint {name} to {path}...")
         save_path = os.path.join(path, name)
         self.agent.save(save_path)
+        
+        # Save environment state (e.g. running mean/std)
+        if hasattr(self.environment, "save"):
+            self.environment.save(save_path)
         
         # Save the config file used
         if hasattr(self.config, "copy_in_file"):

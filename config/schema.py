@@ -21,9 +21,29 @@ class EnvObjective(str, Enum):
     WALK = "walk"
     TARGET = "target"
     BALANCE = "balance"
+
+class SchedulerType(str, Enum):
+    COSINE = "cosine"
+    PLATEAU = "plateau"
+    NONE = "none"
+
 class LRSchedulerConfig(BaseModel):
-    T_max: float
-    eta_min: float
+    scheduler_type: SchedulerType = Field(default=SchedulerType.COSINE)
+    
+    # Cosine args
+    T_max: Optional[float] = None
+    eta_min: float = 1e-5
+
+    # Plateau args
+    mode: str = "min"
+    factor: float = 0.1
+    patience: int = 10
+    threshold: float = 1e-4
+    threshold_mode: str = "rel"
+    cooldown: int = 0
+    min_lr: float = 0
+    eps: float = 1e-8
+    start_step: int = 0
 class NetworkConfig(BaseModel):
     network_type: NetworkType = Field(default=NetworkType.MLP)
     hidden_sizes: List[int] = Field(default=[256, 256])
@@ -68,15 +88,10 @@ class EnvConfig(BaseModel):
     objective: EnvObjective = Field(default=EnvObjective.WALK)
     enable_mirroring: bool = Field(default=False)
     reward_weights: Dict[str, float] = Field(default_factory=dict)
+    reward_scale: float = 1.0
     
     # Commands structure matching config.yaml
     commands: Optional[Dict[str, Any]] = None
-
-    # Target velocity randomization (when objective == "target")
-    # Velocities are in robot reference frame
-    target_x_vel_range: List[float] = Field(default=[-0.5, 0.5])  # Forward/backward (m/s)
-    target_y_vel_range: List[float] = Field(default=[-0.3, 0.3])  # Left/right (m/s)
-    target_w_vel_range: List[float] = Field(default=[-1.0, 1.0])  # Angular velocity (rad/s)
 
     # Mirroring
     mirror_joint_indices: Optional[List[int]] = None
@@ -105,6 +120,7 @@ class TrainConfig(BaseModel):
     sim_frequency: int = 100
     use_history: bool = False
     history_size: int = 0
+    normalize_obs: bool = False
     actor_obs: ObsType = ObsType.NORMAL
     critic_obs: ObsType = ObsType.PRIVILEGED
     log_dir: str = "runs"

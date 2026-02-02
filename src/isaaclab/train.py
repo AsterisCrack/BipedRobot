@@ -45,13 +45,19 @@ from algorithms.mpo.model import MPO
 from algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
+from algorithms.utils import RunningMeanStd
 
 class IsaacLabWrapper:
-    def __init__(self, env):
+    def __init__(self, env, config=None):
         self.env = env
         self.device = env.device
         self.num_envs = env.num_envs
+        self.config = config
+        self.normalize_obs = False
         
+        if config and hasattr(config.train, "normalize_obs"):
+             self.normalize_obs = config.train.normalize_obs
+
         # Handle batched spaces from Isaac Lab
         # We need to expose single-env spaces to the algorithms
         import gymnasium.spaces as spaces
@@ -72,6 +78,15 @@ class IsaacLabWrapper:
              )
         else:
              self.observation_space = env.observation_space
+             
+        # Initialize scalers if needed
+        self.obs_scalers = {}
+        if self.normalize_obs:
+            if isinstance(self.observation_space, spaces.Dict):
+                for key, space in self.observation_space.spaces.items():
+                    self.obs_scalers[key] = RunningMeanStd(shape=space.shape, device=self.device)
+            else:
+                self.obs_scalers["default"] = RunningMeanStd(shape=self.observation_space.shape, device=self.device)
 
         # Action space
         if hasattr(env.action_space, "shape") and len(env.action_space.shape) == 2:
@@ -131,6 +146,7 @@ class IsaacLabWrapper:
 
     def _process_obs(self, obs):
         # Map Isaac Lab keys to what SAC expects
+        new_obs = obs
         if isinstance(obs, dict):
             new_obs = {}
             if "policy" in obs:
@@ -141,10 +157,71 @@ class IsaacLabWrapper:
             for k, v in obs.items():
                 if k not in ["policy", "critic"]:
                     new_obs[k] = v
-            return new_obs
-        return obs
+                    
+        # Normalize if enabled and not evaluating (implied by training loop, but we do it regardless here)
+        # Note: In a cleaner impl, we should freeze stats during eval. But wrapped_env doesn't know mode.
+        if self.normalize_obs:
+            if isinstance(new_obs, dict):
+                for k, v in new_obs.items():
+                    if k in self.obs_scalers:
+                        self.obs_scalers[k].update(v)
+                        new_obs[k] = self.obs_scalers[k].normalize(v)
+            else:
+                 if "default" in self.obs_scalers:
+                     self.obs_scalers["default"].update(new_obs)
+                     new_obs = self.obs_scalers["default"].normalize(new_obs)
+            
+        return new_obs
+
+    def save(self, path):
+        if self.normalize_obs and self.obs_scalers:
+            save_path = path + "_obs_scalers.pt"
+            scalers_state = {k: v.state_dict() for k, v in self.obs_scalers.items()}
+            torch.save(scalers_state, save_path)
+            print(f"Saved observation scalers to {save_path}")
+
+    def load(self, path):
+        if self.normalize_obs and self.obs_scalers:
+            load_path = path + "_obs_scalers.pt"
+            # Handle if path doesn't have .pt extension in the argument but file has it?
+            # Usually path passed here assumes just base path or full path. 
+            # In utils.py: self.agent.save(save_path) calls torch.save(..., path + '.pt').
+            # So save_path in utils usually doesn't have .pt.
+            # But here I am appending _obs_scalers.pt.
+            
+            # If path ends with .pt, strip it
+            if path.endswith(".pt"):
+                base_path = path[:-3]
+                load_path = base_path + "_obs_scalers.pt"
+            
+            if os.path.exists(load_path):
+                scalers_state = torch.load(load_path, map_location=self.device)
+                for k, v in scalers_state.items():
+                    if k in self.obs_scalers:
+                        self.obs_scalers[k].load_state_dict(v)
+                print(f"Loaded observation scalers from {load_path}")
+            else:
+                print(f"Warning: Observation scalers not found at {load_path}")
 
 def train():
+    # Resolve Config Path from Checkpoint if applicable
+    if args_cli.checkpoint and "--config_path" not in sys.argv:
+        # User provided checkpoint but not config. Try to find config in checkpoint dir.
+        ckpt_path = os.path.abspath(args_cli.checkpoint)
+        ckpt_dir = os.path.dirname(ckpt_path)
+        
+        # Check in the checkpoint directory
+        found_config = None
+        # 1. Find first fide with .yaml or .yml extension
+        for name in os.listdir(ckpt_dir):
+            if name.endswith(".yaml") or name.endswith(".yml"):
+                found_config = os.path.join(ckpt_dir, name)
+                break
+                    
+        if found_config:
+            print(f"[INFO] Auto-detected config from checkpoint: {found_config}")
+            args_cli.config_path = found_config
+
     # Load config
     # Adjust path if running from different directory
     if not os.path.exists(args_cli.config_path):
@@ -193,6 +270,10 @@ def train():
         if env_conf.reward_weights and hasattr(env_cfg, "rewards"):
             env_cfg.rewards.update(env_conf.reward_weights)
             
+        # Reward Scale
+        if hasattr(env_conf, "reward_scale"):
+            env_cfg.reward_scale = env_conf.reward_scale
+            
         # Commands (Target velocities)
         # Check if commands are defined in env_config (as dict) or as fields
         if hasattr(env_conf, "commands") and env_conf.commands:
@@ -209,11 +290,6 @@ def train():
                      env_cfg.commands["base_velocity"]["ranges"]["lin_vel_y"] = tuple(ranges["lin_vel_y"])
                  if "ang_vel_z" in ranges:
                      env_cfg.commands["base_velocity"]["ranges"]["ang_vel_z"] = tuple(ranges["ang_vel_z"])
-        elif hasattr(env_conf, "target_x_vel_range"):
-            # Fallback to schema fields if commands dict not present
-            env_cfg.commands["base_velocity"]["ranges"]["lin_vel_x"] = tuple(env_conf.target_x_vel_range)
-            env_cfg.commands["base_velocity"]["ranges"]["lin_vel_y"] = tuple(env_conf.target_y_vel_range)
-            env_cfg.commands["base_velocity"]["ranges"]["ang_vel_z"] = tuple(env_conf.target_w_vel_range)
 
         # Mirroring Indices
         if hasattr(env_conf, "mirror_joint_indices") and env_conf.mirror_joint_indices:
@@ -282,7 +358,7 @@ def train():
         env = BipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video or args_cli.headless else None)
     
     # Wrap environment
-    wrapped_env = IsaacLabWrapper(env)
+    wrapped_env = IsaacLabWrapper(env, config)
     
     # Initialize Model (SAC)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
