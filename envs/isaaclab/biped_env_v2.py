@@ -336,16 +336,16 @@ class BipedEnv(DirectRLEnv):
         # 12. feet_slide (w=-0.1)
         # Pass raw history and velocity (sliced to feet) for internal computation
         r_feet_slide = rewards.feet_slide(
-             self.contact_sensor.data.net_forces_w_history[:, :, self._feet_ids, :], 
+             self.contact_sensor.data.force_matrix_w_history[:, :, self._feet_ids, :], 
              self.robot.data.body_lin_vel_w[:, self.feet_indices]
         )
         
         # 13. undesired_contacts (w=-1.0) ~ threshold 1.0
         # Contact forces for Undesired Contacts (hips, knees, base)
-        net_contact_forces_undesired = self.contact_sensor.data.net_forces_w_history[:, :, self._undesired_contact_body_ids]
+        net_contact_forces_undesired = self.contact_sensor.data.force_matrix_w_history[:, :, self._undesired_contact_body_ids]
         # Max over history -> [N, History, Bodies, 3] -> Norm -> [N, History, Bodies] -> Max History -> [N, Bodies]
         undesired_forces_norm = torch.norm(net_contact_forces_undesired, dim=-1) # [N, T, B]
-        undesired_forces_max_per_body = torch.max(undesired_forces_norm, dim=1)[0] # [N, B]
+        undesired_forces_max_per_body = torch.max(torch.max(undesired_forces_norm, dim=1)[0], dim=-1)[0]
         r_undesired_contacts = rewards.undesired_contacts(undesired_forces_max_per_body, threshold=1.0)
         
         # 14. joint_deviation_hip (w=-0.2)

@@ -48,7 +48,7 @@ BIPED_ROBOT_CFG = ArticulationCfg(
             max_depenetration_velocity=1.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=False,
+            enabled_self_collisions=True,
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=4,
         )

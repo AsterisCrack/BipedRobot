@@ -100,7 +100,7 @@ def feet_slide(net_forces_w_history: torch.Tensor, body_lin_vel_w: torch.Tensor)
     # Calculate contacts from history
     # norm(dim=-1) -> [N, T, F]
     # max(dim=1)[0] -> [N, F]
-    contacts = torch.max(torch.norm(net_forces_w_history, dim=-1), dim=1)[0] > 1.0
+    contacts = torch.max(torch.max(torch.norm(net_forces_w_history, dim=-1), dim=1)[0], dim=-1)[0] > 1.0
     
     # Calculate velocity norm (xy plane)
     feet_vel_xy = torch.norm(body_lin_vel_w[:, :, :2], dim=-1)

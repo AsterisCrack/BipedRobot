@@ -36,7 +36,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # scene
     scene: BipedSceneCfg = BipedSceneCfg(
         num_envs=4096,
-        env_spacing=2.5
+        env_spacing=2.5,
     )
     
     # env
@@ -98,12 +98,13 @@ class BipedEnvCfg(DirectRLEnvCfg):
         terrain_type="plane",
         terrain_generator=None,
         max_init_terrain_level=5,
-        collision_group=-1,
+        collision_group=0,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
+            restitution=0.0,
         ),
         visual_material=sim_utils.MdlFileCfg(
             mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
@@ -130,12 +131,12 @@ class BipedEnvCfg(DirectRLEnvCfg):
             params={
                 "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
                 "velocity_range": {
-                    "x": (-0.00, 0.00),
-                    "y": (-0.00, 0.00),
-                    "z": (0.0, 0.0),
-                    "roll": (-0.00, 0.00),
-                    "pitch": (-0.00, 0.00),
-                    "yaw": (-0.00, 0.00),
+                    "x": (-0.01, 0.01),
+                    "y": (-0.01, 0.01),
+                    "z": (-0.01, 0.01),
+                    "roll": (-0.01, 0.01),
+                    "pitch": (-0.01, 0.01),
+                    "yaw": (-0.01, 0.01),
                 },
             },
         ),
@@ -143,16 +144,16 @@ class BipedEnvCfg(DirectRLEnvCfg):
             func="isaaclab.envs.mdp:reset_joints_by_scale",
             mode="reset",
             params={
-                "position_range": (0.0, 0.0),
-                "velocity_range": (0.0, 0.0),
+                "position_range": (-0.01, 0.01),
+                "velocity_range": (-0.01, 0.01),
             },
         ),
         # Random perturbations (push)
         "push_robot": EventTerm(
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
-            interval_range_s=(10.0, 15.0),
-            params={"velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1)}},
+            interval_range_s=(5.0, 10.0),
+            params={"velocity_range": {"x": (-0.03, 0.03), "y": (-0.03, 0.03)}},
         ),
         # Physics Randomization
         "randomize_mass": EventTerm(
@@ -160,7 +161,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "mass_distribution_params": (0.0, 0.0),
+                "mass_distribution_params": (-0.2, 0.2),
                 "operation": "add",
             },
         ),
@@ -169,8 +170,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "static_friction_range": (0.0, 0.0),
-                "dynamic_friction_range": (0.0, 0.0),
+                "static_friction_range": (0.8, 1.1),
+                "dynamic_friction_range": (0.8, 1.1),
                 "restitution_range": (0.0, 0.0),
                 "num_buckets": 64,
             },
