@@ -34,8 +34,6 @@ if args_cli.video:
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-from envs.isaaclab.biped_env import BipedEnv
-from envs.isaaclab.biped_env_cfg import BipedEnvCfg
 from algorithms.sac.model import SAC
 from algorithms.ddpg.model import DDPG
 from algorithms.d4pg.model import D4PG
@@ -43,6 +41,14 @@ from algorithms.mpo.model import MPO
 from config.schema import ModelType
 from utils import Config
 from algorithms.utils import RunningMeanStd
+if args_cli.task == "BipedV2":
+    from envs.isaaclab.biped_env_cfg_v2 import BipedEnvCfg
+    from envs.isaaclab.biped_env_v2 import BipedEnv
+elif args_cli.task == "Biped":
+    from envs.isaaclab.biped_env_cfg import BipedEnvCfg
+    from envs.isaaclab.biped_env import BipedEnv
+else:
+    raise ValueError(f"Unknown task: {args_cli.task}")
 
 class IsaacLabWrapper:
     def __init__(self, env, config=None):

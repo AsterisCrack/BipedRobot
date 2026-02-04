@@ -50,6 +50,12 @@ class ExplorationConfig(BaseModel):
     min_scale: float = 0.03
     decay_rate: float = 1e-6
     start_steps: int = 10000
+    
+class ExplorationConfig(BaseModel):
+    scale: float = 0.3
+    min_scale: float = 0.03
+    decay_rate: float = 1e-6
+    start_steps: int = 10000
 
 class NetworkConfig(BaseModel):
     network_type: NetworkType = Field(default=NetworkType.MLP)
@@ -76,6 +82,7 @@ class ModelConfig(BaseModel):
     actor_lr: float = 1e-4
     critic_lr: float = 1e-4
     lr_scheduler: Optional[LRSchedulerConfig] = None
+    exploration: Optional[ExplorationConfig] = None
     exploration: Optional[ExplorationConfig] = None
     
     class Config:

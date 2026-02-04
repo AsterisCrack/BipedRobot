@@ -1,9 +1,7 @@
 import gymnasium as gym
 
-from .biped_env import BipedEnv
 from .biped_env_cfg import BipedEnvCfg
-from .basic_biped_env import BasicBipedEnv
-from .basic_biped_env_cfg import BasicBipedEnvCfg
+from .biped_env_cfg_v2 import BipedEnvCfg as BipedEnvCfgV2
 from . import agents
 
 ##
@@ -21,10 +19,10 @@ gym.register(
 )
 
 gym.register(
-    id="Isaac-BasicBiped-Direct-v0",
-    entry_point="envs.isaaclab.basic_biped_env:BasicBipedEnv",
+    id="Isaac-BipedV2-Direct-v0",
+    entry_point="envs.isaaclab.biped_env_v2:BipedEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": BasicBipedEnvCfg,
+        "env_cfg_entry_point": BipedEnvCfgV2,
     },
 )

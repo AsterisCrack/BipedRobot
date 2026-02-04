@@ -28,13 +28,21 @@ class BipedSceneCfg(InteractiveSceneCfg):
         force_threshold=1.0,
         filter_prim_paths_expr=["/World/ground/terrain/GroundPlane/CollisionPlane"]  # Only track contacts with the ground terrain
     )
+    
 
 @configclass
 class BipedEnvCfg(DirectRLEnvCfg):
+    
+    # scene
+    scene: BipedSceneCfg = BipedSceneCfg(
+        num_envs=4096,
+        env_spacing=2.5
+    )
+    
     # env
-    episode_length_s = 10.0
-    decimation = 2
-    action_scale = 1.0 
+    episode_length_s = 20.0
+    decimation = 4
+    action_scale = 0.5 
     action_space = 12
     observation_space = 48
     state_space = 59 # Observations + privileged info
@@ -70,42 +78,50 @@ class BipedEnvCfg(DirectRLEnvCfg):
 
     # simulation
     sim: sim_utils.SimulationCfg = sim_utils.SimulationCfg(
-        dt=1 / 100,
+        dt=1 / 200,
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
-            restitution=0.0,
         ),
+        physx=sim_utils.PhysxCfg(
+            gpu_max_rigid_patch_count=10 * 2**15,
+        )
     )
     
-    # scene
-    scene: BipedSceneCfg = BipedSceneCfg(
-        num_envs=4096,
-        env_spacing=2.5,
-        replicate_physics=True,
-    )
 
-    # terrain
-    terrain: TerrainImporterCfg = TerrainImporterCfg(
+    # ground terrain
+    terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
-        collision_group=0,
+        terrain_generator=None,
+        max_init_terrain_level=5,
+        collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
             restitution_combine_mode="multiply",
             static_friction=1.0,
             dynamic_friction=1.0,
-            restitution=0.0,
+        ),
+        visual_material=sim_utils.MdlFileCfg(
+            mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Architecture/Shingles_01.mdl",
+            project_uvw=True,
         ),
         debug_vis=False,
     )
-
-    # termination
-    termination_height = 0.2
-
+    
+    # lights
+    light = AssetBaseCfg(
+        prim_path="/World/light",
+        spawn=sim_utils.DistantLightCfg(color=(0.75, 0.75, 0.75), intensity=3000.0),
+    )
+    sky_light = AssetBaseCfg(
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(color=(0.13, 0.13, 0.13), intensity=1000.0),
+    )
+    
     # events
     events: dict[str, EventTerm] = {
         "reset_base": EventTerm(
@@ -114,20 +130,20 @@ class BipedEnvCfg(DirectRLEnvCfg):
             params={
                 "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
                 "velocity_range": {
-                    "x": (-0.1, 0.1),
-                    "y": (-0.1, 0.1),
-                    "z": (-0.1, 0.1),
-                    "roll": (-0.1, 0.1),
-                    "pitch": (-0.1, 0.1),
-                    "yaw": (-0.1, 0.1),
+                    "x": (-0.00, 0.00),
+                    "y": (-0.00, 0.00),
+                    "z": (0.0, 0.0),
+                    "roll": (-0.00, 0.00),
+                    "pitch": (-0.00, 0.00),
+                    "yaw": (-0.00, 0.00),
                 },
             },
         ),
         "reset_robot_joints": EventTerm(
-            func="isaaclab.envs.mdp:reset_joints_by_offset",
+            func="isaaclab.envs.mdp:reset_joints_by_scale",
             mode="reset",
             params={
-                "position_range": (-0.1, 0.1),
+                "position_range": (0.0, 0.0),
                 "velocity_range": (0.0, 0.0),
             },
         ),
@@ -136,25 +152,25 @@ class BipedEnvCfg(DirectRLEnvCfg):
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
             interval_range_s=(10.0, 15.0),
-            params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
+            params={"velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1)}},
         ),
         # Physics Randomization
         "randomize_mass": EventTerm(
             func="isaaclab.envs.mdp:randomize_rigid_body_mass",
-            mode="startup",
+            mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "mass_distribution_params": (-1.0, 1.0),
+                "mass_distribution_params": (0.0, 0.0),
                 "operation": "add",
             },
         ),
         "randomize_friction": EventTerm(
             func="isaaclab.envs.mdp:randomize_rigid_body_material",
-            mode="startup",
+            mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "static_friction_range": (0.5, 1.5),
-                "dynamic_friction_range": (0.5, 1.5),
+                "static_friction_range": (0.0, 0.0),
+                "dynamic_friction_range": (0.0, 0.0),
                 "restitution_range": (0.0, 0.0),
                 "num_buckets": 64,
             },
@@ -169,33 +185,21 @@ class BipedEnvCfg(DirectRLEnvCfg):
     }
     
     # rewards
-    rewards = {
-        "survived": 0.001,
-        "velocity": 0.15,
-        "ang_vel_tracking": 0.05,
-        "height_vel_tracking": 0.05,
-        "torque": 0.01,
-        "action_diff": 0.01,
-        "acceleration": 0.05,
-        "flat_orientation": 0.04,
-        "feet_flat": 0.3,
-        "height": 0.1,
-        "stall": 0.1,
-        "base_stability": 0.05,
-        "feet_airtime": 0.1,
-        "torso_centering": 0.1,
-        "joint_deviation": 0.05,
-        "termination": -0.05,
-    }
+    rewards = {}
     
     # commands
     # We can define command ranges here
     commands = {
         "base_velocity": {
+            "resampling_time_range": (10.0, 10.0),
+            "heading_control_stiffness": 0.3,
+            "rel_standing_envs": 0.02,
+            "rel_heading_envs": 1.0,
             "ranges": {
-                "lin_vel_x": (-1.0, 1.0),
-                "lin_vel_y": (-1.0, 1.0),
-                "ang_vel_z": (-1.0, 1.0),
+                "lin_vel_x": (-0.2, 0.3),
+                "lin_vel_y": (-0.2, 0.2),
+                "ang_vel_z": (-0.1, 0.1),
+                "heading": (-3.14159, 3.14159),
             },
         }
     }

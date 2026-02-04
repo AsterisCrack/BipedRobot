@@ -197,6 +197,7 @@ class DDPG():
             
             # Filter None values just in case
             noise_kwargs = {k: v for k, v in noise_kwargs.items() if v is not None}
+            print("Using NormalActionNoise with params:", noise_kwargs)
             self.exploration = NormalActionNoise(self._policy, action_space, seed=seed, device=device, **noise_kwargs)
 
         self.actor_updater = DeterministicPolicyGradient(model=model, device=device, optimizer=actor_optimizer) if actor_updater is None else actor_updater

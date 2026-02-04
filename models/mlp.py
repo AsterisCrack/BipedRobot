@@ -5,7 +5,7 @@ from algorithms.utils import SquashedMultivariateNormalDiag, DistributionalValue
 from models.utils.base import Torso
 
 class MLPTorso(Torso):
-    def __init__(self, input_size, hidden_sizes, activation=nn.ReLU, observation_normalizer=None):
+    def __init__(self, input_size, hidden_sizes, activation=nn.ELU, observation_normalizer=None):
         super().__init__(observation_normalizer)
         sizes = [input_size] + hidden_sizes
         layers = []

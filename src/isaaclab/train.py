@@ -35,8 +35,6 @@ if args_cli.video:
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-from envs.isaaclab.biped_env import BipedEnv
-from envs.isaaclab.biped_env_cfg import BipedEnvCfg
 from algorithms.sac.model import SAC
 from algorithms.fast_sac.model import FastSAC
 from algorithms.ddpg.model import DDPG
@@ -46,6 +44,14 @@ from algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
 from algorithms.utils import RunningMeanStd
+if args_cli.task == "BipedV2":
+    from envs.isaaclab.biped_env_cfg_v2 import BipedEnvCfg
+    from envs.isaaclab.biped_env_v2 import BipedEnv
+elif args_cli.task == "Biped":
+    from envs.isaaclab.biped_env_cfg import BipedEnvCfg
+    from envs.isaaclab.biped_env import BipedEnv
+else:
+    raise ValueError(f"Unknown task: {args_cli.task}")
 
 class IsaacLabWrapper:
     def __init__(self, env, config=None):
@@ -236,11 +242,7 @@ def train():
     config = Config(args_cli.config_path)
     
     # Initialize Isaac Lab Environment
-    if args_cli.task == "BasicBiped":
-        from envs.isaaclab.basic_biped_env_cfg import BasicBipedEnvCfg
-        env_cfg = BasicBipedEnvCfg()
-    else:
-        env_cfg = BipedEnvCfg()
+    env_cfg = BipedEnvCfg()
     
     # Override config values if needed based on train_config
     if hasattr(config.train, "history_size"):
@@ -351,11 +353,7 @@ def train():
     env_cfg.seed = seed
 
     # Create environment
-    if args_cli.task == "BasicBiped":
-        from envs.isaaclab.basic_biped_env import BasicBipedEnv
-        env = BasicBipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video or args_cli.headless else None)
-    else:
-        env = BipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video or args_cli.headless else None)
+    env = BipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video or args_cli.headless else None)
     
     # Wrap environment
     wrapped_env = IsaacLabWrapper(env, config)

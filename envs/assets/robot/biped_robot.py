@@ -35,12 +35,11 @@ _JOINT_LIMITS_DEG = [
 JOINT_LIMITS = [[math.radians(lim) for lim in joint] for joint in _JOINT_LIMITS_DEG]
 
 BIPED_ROBOT_CFG = ArticulationCfg(
-    prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
         usd_path=USD_PATH,
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-            disable_gravity=None,
+            disable_gravity=False,
             retain_accelerations=False,
             linear_damping=0.0,
             angular_damping=0.0,
@@ -49,13 +48,10 @@ BIPED_ROBOT_CFG = ArticulationCfg(
             max_depenetration_velocity=1.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=True,
-            solver_position_iteration_count=4,
-            solver_velocity_iteration_count=1,
-            sleep_threshold=0.005,
-            stabilization_threshold=0.001,
-        ),
-        copy_from_source=False,
+            enabled_self_collisions=False,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=4,
+        )
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.022936, 0.0, 0.29416), # Offset due to root offset in URDF
@@ -76,16 +72,6 @@ BIPED_ROBOT_CFG = ArticulationCfg(
         joint_vel={".*": 0.0},
     ),
     soft_joint_pos_limit_factor=0.9,
-    # actuators={
-    #     "legs": ImplicitActuatorCfg(
-    #         joint_names_expr=[".*"],
-    #         stiffness=100.0,
-    #         damping=10.0,
-    #         armature=0.045,
-    #         friction=0.03,
-    #         effort_limit_sim=10.0,
-    #         velocity_limit_sim=100.0, ),
-    #     },
     actuators={
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[".*"],

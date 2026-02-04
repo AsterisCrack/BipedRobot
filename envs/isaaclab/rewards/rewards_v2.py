@@ -33,7 +33,7 @@ def height_velocity_tracking_reward(base_lin_vel_b: torch.Tensor, target_height_
     return torch.exp(-sigma * error)
 
 @torch.jit.script
-def base_height_reward(base_pos: torch.Tensor, min_height: float = 0.20, sigma: float = 2.0):
+def base_height_reward(base_pos: torch.Tensor, min_height: float = 0.23, sigma: float = 2.0):
     """
     Reward for maintaining a specific base height.
     """

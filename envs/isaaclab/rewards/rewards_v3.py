@@ -48,6 +48,28 @@ def action_rate_l2(actions: torch.Tensor, last_actions: torch.Tensor):
     return torch.sum(torch.square(actions - last_actions), dim=1)
 
 @torch.jit.script
+def feet_air_time_positive_biped(current_air_time: torch.Tensor, current_contact_time: torch.Tensor, commands: torch.Tensor, threshold: float = 0.4, min_speed_command_threshold: float = 0.1):
+    """
+    Reward long steps taken by the feet for bipeds.
+    Rewards the agent for taking steps up to a specified threshold and also keeping one foot at a time in the air.
+    """
+    # Check if commands are above threshold (speed > min_speed)
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    mask = (cmd_norm > min_speed_command_threshold)
+    
+    in_contact = current_contact_time > 0.0
+    in_mode_time = torch.where(in_contact, current_contact_time, current_air_time)
+    
+    # Check for single stance (exactly one foot in contact)
+    single_stance = torch.sum(in_contact.int(), dim=1) == 1
+    reward = torch.min(torch.where(single_stance.unsqueeze(-1), in_mode_time, torch.zeros_like(in_mode_time)), dim=1)[0]
+    
+    # Clamp to threshold
+    reward = torch.clamp(reward, max=threshold)
+    
+    return reward * mask
+
+@torch.jit.script
 def feet_air_time(first_contact: torch.Tensor, last_air_time: torch.Tensor, commands: torch.Tensor, min_airtime_threshold: float = 0.2, min_speed_command_threshold: float = 0.1):
     """
     Reward for airtime. Directly proportional to airtime when foot makes contact. But only if airtime more than a threshold.
@@ -68,20 +90,23 @@ def feet_air_time(first_contact: torch.Tensor, last_air_time: torch.Tensor, comm
     return reward * mask
 
 @torch.jit.script
-def feet_slide(base_lin_vel: torch.Tensor, feet_contact: torch.Tensor):
+def feet_slide(net_forces_w_history: torch.Tensor, body_lin_vel_w: torch.Tensor):
     """
-    Penalty for feet sliding.
-    This typically requires foot velocity in world frame or base frame.
-    Given inputs roughly match what we have, but standard Isaac Lab implementation uses foot velocity.
-    
-    Since we don't have foot velocity passed in directly in the standard arguments for this port, 
-    we might need to adapt or rely on the env passing it.
-    
-    For now, returning 0 placeholder or requiring foot_vel_norm input.
+    Penalize feet sliding.
+
+    net_forces_w_history: (num_envs, history_len, num_feet, 3)
+    body_lin_vel_w: (num_envs, num_feet, 3)
     """
-    # Specialized implementation usually requires foot velocities.
-    # Assuming the user updates the env to pass foot velocities if they use this.
-    return torch.zeros_like(feet_contact[:, 0], dtype=torch.float)
+    # Calculate contacts from history
+    # norm(dim=-1) -> [N, T, F]
+    # max(dim=1)[0] -> [N, F]
+    contacts = torch.max(torch.norm(net_forces_w_history, dim=-1), dim=1)[0] > 1.0
+    
+    # Calculate velocity norm (xy plane)
+    feet_vel_xy = torch.norm(body_lin_vel_w[:, :, :2], dim=-1)
+    
+    # Sum of velocity * contact
+    return torch.sum(feet_vel_xy * contacts, dim=1)
 
 @torch.jit.script
 def feet_slide_with_vel(feet_contact: torch.Tensor, feet_vel_xy_norm: torch.Tensor):
@@ -96,7 +121,8 @@ def feet_slide_with_vel(feet_contact: torch.Tensor, feet_vel_xy_norm: torch.Tens
 def undesired_contacts(net_contact_forces: torch.Tensor, threshold: float = 1.0):
     """
     Penalty for contacts on undesired bodies (hips, thighs, etc).
-    net_contact_forces: (num_envs, num_undesired_bodies) magnitude or vector
+    net_contact_forces: (num_envs, num_bodies) magnitude 
+                        OR (num_envs, num_bodies, 3) vector
     """
     # If input is vector (num_envs, num_bodies, 3), take norm
     if net_contact_forces.dim() == 3:
@@ -105,7 +131,7 @@ def undesired_contacts(net_contact_forces: torch.Tensor, threshold: float = 1.0)
         forces = net_contact_forces
         
     # Check if any force exceeds threshold
-    return torch.any(forces > threshold, dim=1).float()
+    return torch.any(forces > threshold, dim=-1).float()
 
 @torch.jit.script
 def joint_deviation_l1(joint_pos: torch.Tensor, default_joint_pos: torch.Tensor):
