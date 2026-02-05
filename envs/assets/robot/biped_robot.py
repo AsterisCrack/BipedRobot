@@ -41,11 +41,13 @@ BIPED_ROBOT_CFG = ArticulationCfg(
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             retain_accelerations=False,
-            linear_damping=0.0,
-            angular_damping=0.0,
+            linear_damping=0.05,
+            angular_damping=0.1,
             max_linear_velocity=1000.0,
             max_angular_velocity=1000.0,
             max_depenetration_velocity=1.0,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=4,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
             enabled_self_collisions=True,
@@ -75,12 +77,12 @@ BIPED_ROBOT_CFG = ArticulationCfg(
     actuators={
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[".*"],
-            stiffness=60,
-            damping=2,
+            stiffness=40,
+            damping=6,
             armature=0.002,
-            friction=0.05,
+            friction=0.15,
             effort_limit=2.94,
-            velocity_limit=4.7,
+            velocity_limit=3.0,
         ),
     },
 )

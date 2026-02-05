@@ -88,6 +88,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
         ),
         physx=sim_utils.PhysxCfg(
             gpu_max_rigid_patch_count=10 * 2**15,
+            solver_type=1,
         )
     )
     
@@ -152,8 +153,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
         "push_robot": EventTerm(
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
-            interval_range_s=(5.0, 10.0),
-            params={"velocity_range": {"x": (-0.03, 0.03), "y": (-0.03, 0.03)}},
+            interval_range_s=(4.0, 8.0),
+            params={"velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1)}},
         ),
         # Physics Randomization
         "randomize_mass": EventTerm(
@@ -161,10 +162,22 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "mass_distribution_params": (-0.2, 0.2),
+                "mass_distribution_params": (-0.2, 0.4),
                 "operation": "add",
             },
         ),
+        # Randomize actuator gains
+        "randomize_actuator_gains": EventTerm(
+            func="isaaclab.envs.mdp:randomize_actuator_gains",
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+                "stiffness_distribution_params": (0.8, 1.2),
+                "damping_distribution_params": (0.8, 1.2),
+                "operation": "scale",
+            },
+        ),
+        # Randomize friction
         "randomize_friction": EventTerm(
             func="isaaclab.envs.mdp:randomize_rigid_body_material",
             mode="reset",

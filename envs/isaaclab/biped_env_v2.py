@@ -398,6 +398,14 @@ class BipedEnv(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         limit_angle = 0.784  # ~45 degrees
         died = torch.acos(-self.robot.data.projected_gravity_b[:, 2]).abs() > limit_angle
+        
+        # Terminate if both feet are airborne (after 1s of settling time)
+        feet_contact_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]
+        feet_in_contact = torch.norm(feet_contact_forces, dim=-1) > 1.0
+        both_airborne = torch.all(~feet_in_contact, dim=-1)
+        
+        min_time_steps = int(1.0 / self.step_dt)
+        died = died | (both_airborne & (self.episode_length_buf > min_time_steps))
         return died, time_out
         
     def _reset_idx(self, env_ids: torch.Tensor):
