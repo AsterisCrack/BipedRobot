@@ -24,7 +24,7 @@ train:
 
   env_config:
     objective: "target" # Options: walk, target, balance
-    reward_scale: 1.0
+    reward_scale: 0.3
     # Rewards
     reward_weights:
       track_lin_vel_xy_exp: 2.0
@@ -33,8 +33,8 @@ train:
       lin_vel_z_l2: -0.1
       ang_vel_xy_l2: -0.05
       flat_orientation_l2: -2.0
-      action_rate_l2: -0.001
-      dof_torques_l2: -0.001
+      action_rate_l2: -0.0005
+      dof_torques_l2: -0.0005
       dof_acc_l2: -0.000001
       dof_pos_limits: -1.0
       feet_air_time: 1.0
@@ -42,6 +42,9 @@ train:
       undesired_contacts: -1.0
       joint_deviation_hip: -0.2
       joint_deviation_ankle_roll: -0.2
+      step_length: 10.0
+      # swing_foot_height: 1.0
+      torso_centering: 0.1
       
     # Commands
     commands:
@@ -55,48 +58,6 @@ train:
           lin_vel_y: [-0.2, 0.2]
           ang_vel_z: [-0.1, 0.1]
           heading: [-3.14159, 3.14159]
-
-
-    # Randomization & Events
-    enable_perturbations: True
-    push_interval_s: 2.0
-    push_vel_range: 2.0
-    
-    enable_physics_randomization: True
-    events:
-      reset_base:
-        params:
-          pose_range:
-            x: [-0.5, 0.5]
-            y: [-0.5, 0.5]
-            yaw: [-3.14, 3.14]
-          velocity_range:
-            x: [-0.01, 0.01]
-            y: [-0.01, 0.01]
-            z: [-0.01, 0.01]
-            roll: [-0.01, 0.01]
-            pitch: [-0.01, 0.01]
-            yaw: [-0.01, 0.01]
-      reset_robot_joints:
-        params:
-          position_range: [0.0, 0.0]
-          velocity_range: [0.0, 0.0]
-      push_robot:
-        interval_range_s: [10.0, 15.0]
-        params:
-          velocity_range:
-            x: [-0.1, 0.1]
-            y: [-0.1, 0.1]
-      randomize_mass:
-        params:
-          mass_distribution_params: [-0.2, 0.3]
-          operation: "add"
-      randomize_friction:
-        params:
-          static_friction_range: [0.4, 1.2]
-          dynamic_friction_range: [0.54, 1.2]
-          restitution_range: [0.0, 0.0]
-          num_buckets: 64
 
     # Noise
     observation_noise_model:
@@ -129,7 +90,7 @@ model:
   actor_lr: 1e-3
   critic_lr: 1e-3
   lr_scheduler:
-    scheduler_type: "none" # Options: cosine, plateau, none
+    scheduler_type: "plateau" # Options: cosine, plateau, none
     # Cosine args
     T_max: 5e5
     eta_min: 1.0e-5
@@ -142,7 +103,7 @@ model:
     cooldown: 0
     min_lr: 1e-6
     eps: 1e-8
-    start_step: 30000000
+    start_step: 15000000
 
 exploration:
   scale: 0.3

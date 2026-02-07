@@ -2,7 +2,26 @@ import torch
 from isaaclab.utils.math import quat_apply
 
 @torch.jit.script
-def track_lin_vel_xy_exp(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, std: float = 0.5):
+def swing_foot_height(
+    feet_pos_w: torch.Tensor,
+    feet_contact: torch.Tensor,
+    min_height: float = 0.01,
+    max_height: float = 0.05,
+) -> torch.Tensor:
+    # feet_pos_w: (N, F, 3)
+    foot_height = feet_pos_w[:, :, 2]
+
+    # only reward when foot is NOT in contact
+    swing = (~feet_contact).float()
+
+    # clamp reward window
+    height_error = torch.clamp(foot_height - min_height, min=0.0)
+    height_reward = torch.clamp(height_error, max=max_height - min_height)
+
+    return torch.sum(height_reward * swing, dim=1)
+
+@torch.jit.script
+def track_lin_vel_xy_exp(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, std: float = 0.25):
     """
     Tracking of linear velocity commands (xy axes) using exponential kernel.
     """
@@ -11,7 +30,7 @@ def track_lin_vel_xy_exp(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, s
     return torch.exp(-lin_vel_error / std**2)
 
 @torch.jit.script
-def track_ang_vel_z_exp(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, std: float = 0.5):
+def track_ang_vel_z_exp(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, std: float = 0.25):
     """
     Tracking of angular velocity commands (yaw) using exponential kernel.
     """
@@ -70,7 +89,7 @@ def feet_air_time_positive_biped(current_air_time: torch.Tensor, current_contact
     return reward * mask
 
 @torch.jit.script
-def feet_air_time(first_contact: torch.Tensor, last_air_time: torch.Tensor, commands: torch.Tensor, min_airtime_threshold: float = 0.2, min_speed_command_threshold: float = 0.1):
+def feet_air_time(first_contact: torch.Tensor, last_air_time: torch.Tensor, commands: torch.Tensor, min_airtime_threshold: float = 0.5, min_speed_command_threshold: float = 0.05):
     """
     Reward for airtime. Directly proportional to airtime when foot makes contact. But only if airtime more than a threshold.
     Only active if speed command is above a threshold because low speed walking may not require as much foot lift.
@@ -148,6 +167,21 @@ def flat_orientation_l2(projected_gravity_b: torch.Tensor):
     return torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
 
 @torch.jit.script
+def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma: float = 1.0):
+    """
+    Reward for keeping torso centered between feet.
+    base_pos: (num_envs, 3)
+    feet_pos: (num_envs, num_feet, 3)
+    """
+    # Compute feet midpoint
+    feet_midpoint = torch.mean(feet_pos, dim=1) # (num_envs, 3)
+    
+    # Compute horizontal distance
+    dist_sq = torch.sum(torch.square(base_pos[:, :2] - feet_midpoint[:, :2]), dim=1)
+    
+    return torch.exp(-sigma * dist_sq)
+
+@torch.jit.script
 def joint_pos_limits(joint_pos: torch.Tensor, limits_min: torch.Tensor, limits_max: torch.Tensor):
     """
     Penalize joint positions if they cross the soft limits.
@@ -156,3 +190,19 @@ def joint_pos_limits(joint_pos: torch.Tensor, limits_min: torch.Tensor, limits_m
     out_of_limits = -(joint_pos - limits_min).clip(max=0.0)
     out_of_limits += (joint_pos - limits_max).clip(min=0.0)
     return torch.sum(out_of_limits, dim=1)
+
+@torch.jit.script
+def step_length(touchdown: torch.Tensor, stride_length: torch.Tensor, commands: torch.Tensor, min_speed_command_threshold: float = 0.05):
+    """
+    Reward for step length on touchdown.
+    touchdown: (num_envs, num_feet) bool
+    stride_length: (num_envs, num_feet) float
+    """
+    # Mask by command speed
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    mask = (cmd_norm > min_speed_command_threshold)
+    
+    # Reward stride length at the moment of touchdown
+    reward = torch.sum(torch.square(stride_length) * touchdown.float(), dim=1)
+    
+    return reward * mask

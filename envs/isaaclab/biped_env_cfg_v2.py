@@ -153,7 +153,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
         "push_robot": EventTerm(
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
-            interval_range_s=(4.0, 8.0),
+            interval_range_s=(3.0, 8.0),
             params={"velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1)}},
         ),
         # Physics Randomization
@@ -210,9 +210,9 @@ class BipedEnvCfg(DirectRLEnvCfg):
             "rel_standing_envs": 0.02,
             "rel_heading_envs": 1.0,
             "ranges": {
-                "lin_vel_x": (-0.2, 0.3),
-                "lin_vel_y": (-0.2, 0.2),
-                "ang_vel_z": (-0.1, 0.1),
+                "lin_vel_x": (-0.3, 0.4),
+                "lin_vel_y": (-0.3, 0.3),
+                "ang_vel_z": (-0.2, 0.2),
                 "heading": (-3.14159, 3.14159),
             },
         }

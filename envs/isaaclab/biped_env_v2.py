@@ -111,6 +111,10 @@ class BipedEnv(DirectRLEnv):
         # Track last foot contact for alternating gait reward
         # 0: Right, 1: Left. Initialize to 1 so Right foot (0) can start.
         self.last_feet_indices = torch.ones(self.num_envs, dtype=torch.long, device=self.device)
+        
+        # Step length buffers
+        self.feet_pos_liftoff = torch.zeros(self.num_envs, 2, 3, device=self.device) # 2 feet
+        self.feet_in_contact_prev = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
 
         # Randomization
         self.push_interval_steps = int(self.cfg.push_interval_s / self.step_dt)
@@ -295,6 +299,29 @@ class BipedEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         total_reward = torch.zeros(self.num_envs, device=self.device)
+        
+        # --- Prepare Data ---
+        feet_pos = self.robot.data.body_pos_w[:, self.feet_indices]
+        
+        # Feet Contact Mask (for sliding and stride)
+        # Check current contact force > threshold
+        feet_contact_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]
+        feet_in_contact = torch.norm(feet_contact_forces, dim=-1) > 1.0
+
+        # --- Update stride state ---
+        # Detect Liftoff: Contact -> Air
+        liftoff = self.feet_in_contact_prev & ~feet_in_contact
+        self.feet_pos_liftoff[liftoff] = feet_pos[liftoff]
+        
+        # Detect Touchdown: Air -> Contact
+        touchdown = ~self.feet_in_contact_prev & feet_in_contact
+        
+        # Calculate stride length: distance from liftoff to current (touchdown) pos
+        # We calculate it for all (vectorized), but only use it where touchdown is True
+        stride_dist = torch.norm(feet_pos - self.feet_pos_liftoff, dim=-1)
+        
+        # Update prev contact
+        self.feet_in_contact_prev[:] = feet_in_contact
 
         # 1. track_lin_vel_xy_exp (w=2.0)
         r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp(self.commands, self.base_lin_vel_b, std=0.25)
@@ -331,7 +358,7 @@ class BipedEnv(DirectRLEnv):
         # 11. feet_air_time (w=1.0) ~ threshold 0.4
         current_air_time = self.contact_sensor.data.current_air_time[:, self._feet_ids]
         current_contact_time = self.contact_sensor.data.current_contact_time[:, self._feet_ids]
-        r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.4)
+        r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.5, min_speed_command_threshold=0.05)
         
         # 12. feet_slide (w=-0.1)
         # Pass raw history and velocity (sliced to feet) for internal computation
@@ -359,7 +386,15 @@ class BipedEnv(DirectRLEnv):
             self.joint_pos[:, self.ankle_roll_indices],
             self.default_joint_pos[self.ankle_roll_indices]
         )
+        
+        # 16. step_length (w=0.0 default, set in config)
+        r_step_length = rewards.step_length(touchdown, stride_dist, self.commands, min_speed_command_threshold=0.1)
 
+        # 17. swing_foot_height (w=0.0 default)
+        r_swing_foot_height = rewards.swing_foot_height(feet_pos, feet_in_contact, min_height=0.05, max_height=0.15)
+        
+        # 18: Torso centering
+        r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
         
         # Term dict
         reward_terms = {
@@ -378,6 +413,9 @@ class BipedEnv(DirectRLEnv):
             "undesired_contacts": r_undesired_contacts * self.cfg.rewards.get("undesired_contacts", 0.0),
             "joint_deviation_hip": r_joint_deviation_hip * self.cfg.rewards.get("joint_deviation_hip", 0.0),
             "joint_deviation_ankle_roll": r_joint_deviation_ankle * self.cfg.rewards.get("joint_deviation_ankle_roll", 0.0),
+            "step_length": r_step_length * self.cfg.rewards.get("step_length", 0.0),
+            "swing_foot_height": r_swing_foot_height * self.cfg.rewards.get("swing_foot_height", 0.0),
+            "torso_centering": r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0),
         }
         
         # Weighted sum
@@ -400,12 +438,12 @@ class BipedEnv(DirectRLEnv):
         died = torch.acos(-self.robot.data.projected_gravity_b[:, 2]).abs() > limit_angle
         
         # Terminate if both feet are airborne (after 1s of settling time)
-        feet_contact_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]
-        feet_in_contact = torch.norm(feet_contact_forces, dim=-1) > 1.0
-        both_airborne = torch.all(~feet_in_contact, dim=-1)
+        # feet_contact_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]
+        # feet_in_contact = torch.norm(feet_contact_forces, dim=-1) > 1.0
+        # both_airborne = torch.all(~feet_in_contact, dim=-1)
         
-        min_time_steps = int(1.0 / self.step_dt)
-        died = died | (both_airborne & (self.episode_length_buf > min_time_steps))
+        # min_time_steps = int(1.0 / self.step_dt)
+        # died = died | (both_airborne & (self.episode_length_buf > min_time_steps))
         return died, time_out
         
     def _reset_idx(self, env_ids: torch.Tensor):
