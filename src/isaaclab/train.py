@@ -245,6 +245,9 @@ def train():
     env_cfg = BipedEnvCfg()
     
     # Override config values if needed based on train_config
+    if hasattr(config.train, "use_rough_terrain"):
+        env_cfg.use_rough_terrain = config.train.use_rough_terrain
+
     if hasattr(config.train, "history_size"):
         env_cfg.history_size = config.train.history_size
         

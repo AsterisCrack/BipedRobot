@@ -315,6 +315,12 @@ class BipedEnv(DirectRLEnv):
         
         # Detect Touchdown: Air -> Contact
         touchdown = ~self.feet_in_contact_prev & feet_in_contact
+
+        # Update last feet indices
+        hit_right = touchdown[:, 0]
+        hit_left = touchdown[:, 1]
+        self.last_feet_indices[hit_right] = 0
+        self.last_feet_indices[hit_left] = 1
         
         # Calculate stride length: distance from liftoff to current (touchdown) pos
         # We calculate it for all (vectorized), but only use it where touchdown is True
@@ -360,6 +366,11 @@ class BipedEnv(DirectRLEnv):
         current_contact_time = self.contact_sensor.data.current_contact_time[:, self._feet_ids]
         r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.5, min_speed_command_threshold=0.05)
         
+        # Reward only when alternating feet
+        target_air_foot = (self.last_feet_indices + 1) % 2
+        feet_in_contact_target = torch.gather(feet_in_contact, 1, target_air_foot.unsqueeze(-1)).squeeze(-1)
+        r_feet_air_time *= (~feet_in_contact_target).float()
+
         # 12. feet_slide (w=-0.1)
         # Pass raw history and velocity (sliced to feet) for internal computation
         r_feet_slide = rewards.feet_slide(
@@ -438,12 +449,12 @@ class BipedEnv(DirectRLEnv):
         died = torch.acos(-self.robot.data.projected_gravity_b[:, 2]).abs() > limit_angle
         
         # Terminate if both feet are airborne (after 1s of settling time)
-        # feet_contact_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]
-        # feet_in_contact = torch.norm(feet_contact_forces, dim=-1) > 1.0
-        # both_airborne = torch.all(~feet_in_contact, dim=-1)
+        feet_contact_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]
+        feet_in_contact = torch.norm(feet_contact_forces, dim=-1) > 1.0
+        both_airborne = torch.all(~feet_in_contact, dim=-1)
         
-        # min_time_steps = int(1.0 / self.step_dt)
-        # died = died | (both_airborne & (self.episode_length_buf > min_time_steps))
+        min_time_steps = int(1.0 / self.step_dt)
+        died = died | (both_airborne & (self.episode_length_buf > min_time_steps))
         return died, time_out
         
     def _reset_idx(self, env_ids: torch.Tensor):

@@ -14,8 +14,54 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelCfg
+import isaaclab.terrains as terrain_gen
+from isaaclab.terrains import TerrainGeneratorCfg
 
 from envs.assets.robot.biped_robot import BIPED_ROBOT_CFG
+
+ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
+    size=(8.0, 8.0),
+    border_width=20.0,
+    num_rows=10,
+    num_cols=20,
+    horizontal_scale=0.1,
+    vertical_scale=0.005,
+    slope_threshold=0.75,
+    use_cache=False,
+    sub_terrains={
+        "flat": terrain_gen.MeshPlaneTerrainCfg(
+            proportion=0.3,
+        ),
+        "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
+            proportion=0.1, slope_range=(0.0, 0.15), platform_width=2.0, border_width=0.25
+        ),
+        "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
+            proportion=0.1, slope_range=(0.0, 0.15), platform_width=2.0, border_width=0.25
+        ),
+        "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
+            proportion=0.05,
+            step_height_range=(0.0, 0.1),
+            step_width=0.3,
+            platform_width=3.0,
+            border_width=1.0,
+            holes=False,
+        ),
+        "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+            proportion=0.05,
+            step_height_range=(0.0, 0.1),
+            step_width=0.3,
+            platform_width=3.0,
+            border_width=1.0,
+            holes=False,
+        ),
+        "wave_terrain": terrain_gen.HfWaveTerrainCfg(
+            proportion=0.2, amplitude_range=(0.0, 0.05), num_waves=4, border_width=0.25
+        ),
+        "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
+            proportion=0.2, noise_range=(0.0, 0.03), noise_step=0.01, border_width=0.25
+        ),
+    },
+)
 
 @configclass
 class BipedSceneCfg(InteractiveSceneCfg):
@@ -32,7 +78,9 @@ class BipedSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class BipedEnvCfg(DirectRLEnvCfg):
-    
+    # Switches
+    use_rough_terrain: bool = False
+
     # scene
     scene: BipedSceneCfg = BipedSceneCfg(
         num_envs=4096,
@@ -153,7 +201,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
         "push_robot": EventTerm(
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
-            interval_range_s=(3.0, 8.0),
+            interval_range_s=(3.0, 6.0),
             params={"velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1)}},
         ),
         # Physics Randomization
@@ -217,3 +265,20 @@ class BipedEnvCfg(DirectRLEnvCfg):
             },
         }
     }
+
+    def __post_init__(self):
+        super().__post_init__()
+        
+        if self.use_rough_terrain:
+            # Update Terrain
+            self.terrain.terrain_type = "generator"
+            self.terrain.terrain_generator = ROUGH_TERRAINS_CFG
+            self.terrain.max_init_terrain_level = 5
+            self.terrain.collision_group = 0
+            
+@configclass
+class BipedRoughEnvCfg(BipedEnvCfg):
+    def __post_init__(self):
+        self.use_rough_terrain = True
+        super().__post_init__()
+

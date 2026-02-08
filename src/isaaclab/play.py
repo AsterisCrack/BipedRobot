@@ -38,6 +38,7 @@ from algorithms.sac.model import SAC
 from algorithms.ddpg.model import DDPG
 from algorithms.d4pg.model import D4PG
 from algorithms.mpo.model import MPO
+from algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
 from algorithms.utils import RunningMeanStd
@@ -305,6 +306,8 @@ def play():
         ModelClass = D4PG
     elif model_type == ModelType.MPO:
         ModelClass = MPO
+    elif model_type == ModelType.PPO:
+        ModelClass = PPO
     else:
         # Fallback
         if str(model_type).lower() == "sac":
@@ -315,6 +318,8 @@ def play():
             ModelClass = D4PG
         elif str(model_type).lower() == "mpo":
             ModelClass = MPO
+        elif str(model_type).lower() == "ppo":
+            ModelClass = PPO
         else:
             raise ValueError(f"Unknown model type: {model_type}")
 

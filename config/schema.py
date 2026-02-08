@@ -17,10 +17,6 @@ class ObsType(str, Enum):
     NORMAL = "normal"
     PRIVILEGED = "privileged"
     BASIC = "basic"
-class EnvObjective(str, Enum):
-    WALK = "walk"
-    TARGET = "target"
-    BALANCE = "balance"
 
 class SchedulerType(str, Enum):
     COSINE = "cosine"
@@ -100,7 +96,6 @@ class BufferConfig(BaseModel):
     class Config:
         extra = "ignore"
 class EnvConfig(BaseModel):
-    objective: EnvObjective = Field(default=EnvObjective.WALK)
     enable_mirroring: bool = Field(default=False)
     reward_weights: Dict[str, float] = Field(default_factory=dict)
     reward_scale: float = 1.0
@@ -133,6 +128,7 @@ class TrainConfig(BaseModel):
     worker_groups: int = 8
     workers_per_group: int = 16
     sim_frequency: int = 100
+    use_rough_terrain: bool = False
     use_history: bool = False
     history_size: int = 0
     normalize_obs: bool = False
@@ -158,22 +154,6 @@ class TrainConfig(BaseModel):
     
     class Config:
         extra = "ignore"
-class RandomizationConfig(BaseModel):
-    randomize_dynamics: bool = False
-    randomize_sensors: bool = False
-    randomize_perturbations: bool = False
-    
-    friction: Optional[List[float]] = None
-    joint_damping: Optional[List[float]] = None
-    mass: Optional[List[float]] = None
-    inertia: Optional[List[float]] = None
-    imu_noise: Optional[float] = None
-    vel_noise: Optional[float] = None
-    t_perturbation: Optional[List[float]] = None
-    force: Optional[List[float]] = None
-    
-    class Config:
-        extra = "allow" # Allow extra fields if any
 
 class PPOConfig(BaseModel):
     clip_param: float = 0.2
@@ -191,4 +171,3 @@ class Config(BaseModel):
     model: ModelConfig
     buffer: Optional[BufferConfig] = None
     ppo: Optional[PPOConfig] = None
-    randomization: Optional[RandomizationConfig] = Field(default_factory=RandomizationConfig)
