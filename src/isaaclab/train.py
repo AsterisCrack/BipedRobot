@@ -248,6 +248,9 @@ def train():
     if hasattr(config.train, "use_rough_terrain"):
         env_cfg.use_rough_terrain = config.train.use_rough_terrain
 
+    if hasattr(config.train, "use_history"):
+        env_cfg.use_history = config.train.use_history
+
     if hasattr(config.train, "history_size"):
         env_cfg.history_size = config.train.history_size
         

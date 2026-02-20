@@ -24,7 +24,7 @@ train:
   replace_checkpoint: true
 
   env_config:
-    reward_scale: 0.3
+    reward_scale: 1.0
     # Rewards
     reward_weights:
       track_lin_vel_xy_exp: 2.0

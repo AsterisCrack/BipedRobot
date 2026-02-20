@@ -9,7 +9,7 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg, RayCasterCfg, patterns
+from isaaclab.sensors import ContactSensorCfg, ImuCfg, RayCasterCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -74,6 +74,9 @@ class BipedSceneCfg(InteractiveSceneCfg):
         force_threshold=1.0,
         filter_prim_paths_expr=["/World/ground/terrain/GroundPlane/CollisionPlane"]  # Only track contacts with the ground terrain
     )
+    imu: ImuCfg = ImuCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/Robot/torso_link",
+    )
     
 
 @configclass
@@ -90,7 +93,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 4
-    action_scale = 0.5 
+    action_scale = 0.7 
     action_space = 12
     observation_space = 48
     state_space = 59 # Observations + privileged info
@@ -201,8 +204,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
         "push_robot": EventTerm(
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
-            interval_range_s=(3.0, 6.0),
-            params={"velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1)}},
+            interval_range_s=(10.0, 15.0),
+            params={"velocity_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05)}},
         ),
         # Physics Randomization
         "randomize_mass": EventTerm(

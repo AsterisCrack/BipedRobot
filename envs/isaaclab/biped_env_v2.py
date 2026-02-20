@@ -7,7 +7,7 @@ import math
 import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.sensors import ContactSensor
+from isaaclab.sensors import ContactSensor, Imu
 from isaaclab.sim import SimulationContext
 from isaaclab.utils.math import quat_apply_inverse, wrap_to_pi, quat_apply, quat_from_euler_xyz
 from isaaclab.envs.mdp import randomize_rigid_body_mass, randomize_rigid_body_material, push_by_setting_velocity, reset_joints_by_offset, reset_root_state_uniform
@@ -29,7 +29,7 @@ class BipedEnv(DirectRLEnv):
             logging.getLogger().setLevel(getattr(logging, cfg.logging_level.upper()))
 
         # Calculate Observation Dimensions
-        # Proprio: 3+3+4+3+12+12+12 = 48
+        # Proprio: 3+3+3+3+12+12+12 = 48
         self.obs_proprio_dim = 48
         # Privileged: 3 (lin_vel_w) + 1 (height) + 6 (contacts: 2 feet * 3 forces) = 10
         self.obs_priv_dim = 10
@@ -96,6 +96,10 @@ class BipedEnv(DirectRLEnv):
         self.projected_gravity_b = torch.zeros(self.num_envs, 3, device=self.device)
         self.base_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.base_quat = torch.zeros(self.num_envs, 4, device=self.device)
+
+        # IMU data (body frame)
+        self.imu_lin_acc_b = torch.zeros(self.num_envs, 3, device=self.device)
+        self.imu_ang_vel_b = torch.zeros(self.num_envs, 3, device=self.device)
         
         # Logging
         self.episode_sums = {
@@ -146,6 +150,9 @@ class BipedEnv(DirectRLEnv):
         
         self.contact_sensor = ContactSensor(self.scene.sensors["contact_forces"].cfg)
         self.scene.sensors["contact_sensor"] = self.contact_sensor
+
+        self.imu_sensor = Imu(self.scene.sensors["imu"].cfg)
+        self.scene.sensors["imu_sensor"] = self.imu_sensor
         
         # add ground plane
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
@@ -228,17 +235,21 @@ class BipedEnv(DirectRLEnv):
         self.base_quat = self.robot.data.root_quat_w
         self.base_lin_vel_b = self.robot.data.root_lin_vel_b
         self.base_ang_vel_b = self.robot.data.root_ang_vel_b
-        self.projected_gravity_b = self.robot.data.projected_gravity_b
+
+        imu_data = self.imu_sensor.data
+        self.imu_lin_acc_b = imu_data.lin_acc_b
+        self.imu_ang_vel_b = imu_data.ang_vel_b
+        self.projected_gravity_b = imu_data.projected_gravity_b
         self.joint_pos = self.robot.data.joint_pos
         self.joint_vel = self.robot.data.joint_vel
         self.joint_efforts = self.robot.data.applied_torque
         
         # Proprioceptive observations (Standard Policy)
-        # 3 (lin vel) + 3 (ang vel) + 3 (Gravity) + 3 (commands) + 12 (joint pos) + 12 (joint vel) + 12 (prev_action) = 48
+        # 3 (lin acc) + 3 (ang vel) + 3 (gravity) + 3 (commands) + 12 (joint pos) + 12 (joint vel) + 12 (prev_action) = 48
         # Removed scaling to match MuJoCo
         obs_proprio = torch.cat([
-            self.base_lin_vel_b, 
-            self.base_ang_vel_b,
+            self.imu_lin_acc_b,
+            self.imu_ang_vel_b,
             self.projected_gravity_b,
             self.commands,
             (self.joint_pos - self.default_joint_pos),
@@ -509,6 +520,9 @@ class BipedEnv(DirectRLEnv):
         if self.critic_history_buf is not None:
             self.critic_history_buf[env_ids] = 0.0
         
+        # Reset feet contact history to True.
+        self.feet_in_contact_prev[env_ids] = True
+
         # Reset last feet indices to 1 (Left) so Right foot (0) is valid first
         self.last_feet_indices[env_ids] = 1
 

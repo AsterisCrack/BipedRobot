@@ -1,15 +1,15 @@
 train:
   seed: 42
   steps: 500000
-  max_episode_steps: 2000
   worker_groups: 1
   workers_per_group: 1
   use_history: False
   history_size: 0
-  normalize_obs: True
+  normalize_obs: False
   symmetry_augmentation: True
   actor_obs: "normal"
   critic_obs: "normal"
+  use_rough_terrain: false
   log_dir: "runs"
   checkpoint_path: "checkpoints/"
   # model_name: "complete_model"
@@ -24,77 +24,40 @@ train:
   replace_checkpoint: true
 
   env_config:
-    objective: "target" # Options: walk, target, balance
     reward_scale: 1.0
     # Rewards
     reward_weights:
-      abduction: 0.05
-      acceleration: 0.0002
-      action_diff: 0.05
-      action_smoothness: 0.05
-      ang_vel_tracking: 0.1
-      base_stability: 0.02
-      feet_airtime: 1.0
-      feet_flat: 0.1
-      flat_orientation: 0.05
-      height: 0.05
-      height_vel_tracking: 0.01
-      joint_deviation: 0.01
-      stall: 0.0
-      survived: 0.001
-      termination: -1.0
-      torque: 0.05
-      torso_centering: 0.05
-      velocity: 0.5
+      track_lin_vel_xy_exp: 2.0
+      track_ang_vel_z_exp: 1.0
+      termination_penalty: -10.0
+      lin_vel_z_l2: -0.1
+      ang_vel_xy_l2: -0.05
+      flat_orientation_l2: -2.0
+      action_rate_l2: -0.0002
+      dof_torques_l2: -0.0002
+      dof_acc_l2: -0.000001
+      dof_pos_limits: -1.0
+      feet_air_time: 1.0
+      feet_slide: -0.5
+      undesired_contacts: -1.0
+      joint_deviation_hip: -0.2
+      joint_deviation_ankle_roll: -0.2
+      step_length: 10.0
+      # swing_foot_height: 1.0
+      torso_centering: 0.1
       
     # Commands
     commands:
       base_velocity:
+        resampling_time_range: [10.0, 10.0]
+        heading_control_stiffness: 0.3
+        rel_standing_envs: 0.02
+        rel_heading_envs: 1.0
         ranges:
-          lin_vel_x: [0.0, 0.0]
-          lin_vel_y: [0.0, 0.0]
-          ang_vel_z: [0.0, 0.0]
-
-    # Randomization & Events
-    enable_perturbations: False
-    push_interval_s: 2.0
-    push_vel_range: 2.0
-    
-    enable_physics_randomization: False
-    events:
-      reset_base:
-        params:
-          pose_range:
-            x: [-0.5, 0.5]
-            y: [-0.5, 0.5]
-            yaw: [-3.14, 3.14]
-          velocity_range:
-            x: [-0.1, 0.1]
-            y: [-0.1, 0.1]
-            z: [-0.1, 0.1]
-            roll: [-0.1, 0.1]
-            pitch: [-0.1, 0.1]
-            yaw: [-0.1, 0.1]
-      reset_robot_joints:
-        params:
-          position_range: [-0.3, 0.3]
-          velocity_range: [-0.3, 0.3]
-      push_robot:
-        interval_range_s: [2.0, 4.0]
-        params:
-          velocity_range:
-            x: [-0.1, 0.1]
-            y: [-0.1, 0.1]
-      randomize_mass:
-        params:
-          mass_distribution_params: [-0.2, 0.2]
-          operation: "add"
-      randomize_friction:
-        params:
-          static_friction_range: [0.5, 1.5]
-          dynamic_friction_range: [0.5, 1.5]
-          restitution_range: [0.0, 0.0]
-          num_buckets: 64
+          lin_vel_x: [-0.2, 0.3]
+          lin_vel_y: [-0.2, 0.2]
+          ang_vel_z: [-0.1, 0.1]
+          heading: [-3.14159, 3.14159]
 
     # Noise
     observation_noise_model:
@@ -112,7 +75,8 @@ model:
     # nhead: 4
     # num_layers: 2
     # dim_feedforward: 256
-    hidden_sizes: [512,256,128]
+    # hidden_sizes: [512,256,128]
+    hidden_sizes: [256, 128,128]
     
   critic_config:
     network_type: mlp # Options: mlp, cnn, lstm, transformer
@@ -120,14 +84,15 @@ model:
     # nhead: 4
     # num_layers: 2
     # dim_feedforward: 256
-    hidden_sizes: [512,256,128]
-    
+    # hidden_sizes: [512,256,128]
+    hidden_sizes: [256, 128,128]
+
   # Training params
   target_coeff: 0.005
-  actor_lr: 1e-4
-  critic_lr: 1e-4
+  actor_lr: 1e-3
+  critic_lr: 1e-3
   lr_scheduler:
-    scheduler_type: "plateau" # Options: cosine, plateau, none
+    scheduler_type: "none" # Options: cosine, plateau, none
     # Cosine args
     T_max: 5e5
     eta_min: 1.0e-5
@@ -140,7 +105,13 @@ model:
     cooldown: 0
     min_lr: 1e-6
     eps: 1e-8
-    start_step: 30000000
+    start_step: 15000000
+
+exploration:
+  scale: 0.3
+  min_scale: 0.03
+  decay_rate: 5.0e-8
+  start_steps: 4096 # Should match buffer.steps_before_batches if possible
 
 buffer:
   size: 1000000

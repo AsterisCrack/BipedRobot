@@ -203,6 +203,8 @@ def play():
     
     if hasattr(config.train, "history_size"):
         env_cfg.history_size = config.train.history_size
+    if hasattr(config.train, "use_history"):
+        env_cfg.use_history = config.train.use_history
         
     # Apply env_config from yaml
     if hasattr(config.train, "env_config"):
