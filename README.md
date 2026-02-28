@@ -20,15 +20,15 @@ The project aims to **democratize humanoid robotics** by making it feasible to t
 
 ```bash
 .
-├── models/             # PyTorch models: actor critic networks, DDPG, D4PG, SAC, MPO
-├── env/                # MuJoCo simulation environments
+├── algorithms/         # Reinforcement Learning algorithms (SAC, DDPG, D4PG, MPO)
+├── envs/               # Modular MuJoCo environments
+│   ├── mujoco_env.py   # Unified environment class
+│   ├── rewards/        # Modular reward functions (Walk, Target, etc.)
+│   └── utils/          # Environment utilities (Randomizer)
 ├── src/                # Training & evaluation scripts
-├── config/             # YAML configs per experiment
-├── video/              # Example walking videos
-├── data/               # Data and graphs from training runs
-├── utils/              # Miscellaneous utilities
-├── checkpoints_final/  # Trained models
-├── requirements.txt    # required python libraries
+├── config/             # YAML configurations
+├── media/              # Visuals and demos
+├── requirements.txt    # Project dependencies
 └── README.md
 ```
 
@@ -45,49 +45,29 @@ source venv/bin/activate  # or venv\Scripts\activate on Windows
 
 # Install dependencies
 pip install -r requirements.txt
-
 ```
 
 ### 2. **Train an agent**
+Training is fully configuration-driven. You can specify the model, environment objective, and randomization settings in a YAML file.
 ```bash
-# Create a new .yaml config file in the config/ folder
-# or use an existing one, e.g., config\final\train_config_sac.yaml
-# Modify train.py to use your config file (TODO: add it as a command line argument)
-# Example command to train using SAC on the flat environment
-python src/train.py
+python src/train.py --config config/final/train_config_sac.yaml
 ```
-
-### 3. **Evaluate a trained model**
-```bash
-# After training, you can test the model
-# Modify src/test_model.py to use your trained model (TODO: add it as a command line argument)
-python src/test_model.py
-```
-
-### 4. **Visualize results**
-Training data is saved to the folder you choose in the config file automatically. To visualize the results, you can use TensorBoard to plot the training curves.
 
 ---
 
-## 📊 Results
-### Training Curves
-<p align="center">
-  <img src="media/ep_score.png" width="45%" alt="Episode Score Graph"/>
-  <img src="media/ep_length.png" width="45%" alt="Episode Length Graph"/>
-</p>
-<p align="center">
-  <img src="media/mean_rew.png" width="45%" alt="Mean Reward Graph"/>
-  <img src="media/steps_second.png" width="45%" alt="Steps per Second Graph"/>
-</p>
+## 🔧 Configuration Options
 
+The system uses Pydantic for robust configuration. Key options include:
 
----
+### **Environment Config (`env_config`)**
+- `objective`: `walk`, `target`, or `balance`.
+- `enable_mirroring`: Boolean toggle for observation mirroring.
+- `reward_weights`: Dictionary to customize reward term importance.
 
-## 🎥 Walking Demo
-
-<p align="center">
-  <img src="media\WalkingVideo.gif" width="60%" alt="Robot Walking"/>
-</p>
+### **Randomization Config (`randomization`)**
+- `randomize_dynamics`: Toggles physics parameter randomization (friction, mass, etc.).
+- `randomize_sensors`: Toggles IMU and velocity noise.
+- `friction`, `mass`, `joint_damping`: Ranges for randomization.
 
 ---
 
@@ -120,4 +100,3 @@ MIT License. Feel free to fork, modify, and contribute!
 
 Project by **Pablo Gómez Martínez**  
 Contact: [pablodiegogomez@gmail.com](mailto:)
-

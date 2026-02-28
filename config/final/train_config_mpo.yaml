@@ -6,8 +6,9 @@ train:
   workers_per_group: 16
   sim_frequency: 100
   use_history: False
-  short_history_size: 0
-  long_history_size: 0
+  history_size: 0
+  actor_obs: normal
+  critic_obs: privileged
   log_dir: runs_final
   checkpoint_path: checkpoints_final/
   model_name: mpo

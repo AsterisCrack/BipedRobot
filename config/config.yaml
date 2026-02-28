@@ -1,0 +1,125 @@
+train:
+  seed: 42
+  steps: 500000
+  worker_groups: 1
+  workers_per_group: 1
+  use_history: False
+  history_size: 0
+  normalize_obs: False
+  symmetry_augmentation: False
+  actor_obs: "normal"
+  critic_obs: "normal"
+  use_rough_terrain: false
+  log_dir: "runs"
+  checkpoint_path: "checkpoints/"
+  # model_name: "complete_model"
+  overwrite_model: true
+  model: "d4pg" # Options: sac, ddpg, d4pg, mpo
+  
+  test_environment: False
+  epoch_steps: 1000
+  save_steps: 3000
+  test_episodes: 2
+  show_progress: true
+  replace_checkpoint: true
+
+  env_config:
+    reward_scale: 1.0
+    # Rewards
+    reward_weights:
+      track_lin_vel_xy_exp: 2.0
+      track_ang_vel_z_exp: 1.0
+      termination_penalty: -10.0
+      lin_vel_z_l2: -0.05
+      ang_vel_xy_l2: -0.05
+      flat_orientation_l2: -2.0
+      action_rate_l2: -0.0002
+      dof_torques_l2: -0.0002
+      dof_acc_l2: -0.000001
+      dof_pos_limits: -1.0
+      feet_air_time: 1.0
+      feet_slide: -0.5
+      undesired_contacts: -1.0
+      joint_deviation_hip: -0.2
+      joint_deviation_ankle_roll: -0.2
+      step_length: 10.0
+      # swing_foot_height: 1.0
+      torso_centering: 0.1
+      knee_bend_touchdown: 10.0
+      
+    # Commands
+    commands:
+      base_velocity:
+        resampling_time_range: [10.0, 10.0]
+        heading_control_stiffness: 0.3
+        rel_standing_envs: 0.02
+        rel_heading_envs: 1.0
+        ranges:
+          lin_vel_x: [-0.4, 0.5]
+          lin_vel_y: [-0.4, 0.4]
+          ang_vel_z: [-0.3, 0.3]
+          heading: [-3.14159, 3.14159]
+
+    # Noise
+    observation_noise_model:
+      mean: 0.0
+      std: 0.01
+    action_noise_model:
+      mean: 0.0
+      std: 0.00
+
+model:
+  # Network configuration
+  actor_config:
+    network_type: mlp # Options: mlp, cnn, lstm, transformer
+    # d_model: 128
+    # nhead: 4
+    # num_layers: 2
+    # dim_feedforward: 256
+    # hidden_sizes: [512,256,128]
+    hidden_sizes: [256, 128,128]
+    
+  critic_config:
+    network_type: mlp # Options: mlp, cnn, lstm, transformer
+    # d_model: 128
+    # nhead: 4
+    # num_layers: 2
+    # dim_feedforward: 256
+    # hidden_sizes: [512,256,128]
+    hidden_sizes: [256, 128,128]
+
+  # Training params
+  target_coeff: 0.005
+  actor_lr: 1e-3
+  critic_lr: 1e-3
+  lr_scheduler:
+    scheduler_type: "none" # Options: cosine, plateau, none
+    # Cosine args
+    T_max: 5e5
+    eta_min: 1.0e-5
+    # Plateau args
+    mode: "min"
+    factor: 0.5
+    patience: 2000
+    threshold: 1e-4
+    threshold_mode: "rel"
+    cooldown: 0
+    min_lr: 1e-6
+    eps: 1e-8
+    start_step: 15000000
+
+exploration:
+  scale: 0.3
+  min_scale: 0.03
+  decay_rate: 5.0e-8
+  start_steps: 4096 # Should match buffer.steps_before_batches if possible
+
+buffer:
+  size: 1000000
+  return_steps: 3
+  batch_iterations: 10 # Match replay ratio of ~0.4 (100 updates / 256 transitions)
+  batch_size: 2048
+  discount_factor: 0.99
+  steps_before_batches: 4096 # Start training after 1 step
+  steps_between_batches: 4 # Update every step
+  seed: 42

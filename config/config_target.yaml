@@ -1,0 +1,146 @@
+train:
+  seed: 42
+  steps: 500000
+  max_episode_steps: 2000
+  worker_groups: 1
+  workers_per_group: 1
+  sim_frequency: 100
+  use_history: True
+  history_size: 10
+  actor_obs: "normal"
+  critic_obs: "privileged"
+  log_dir: "runs"
+  checkpoint_path: "checkpoints/"
+  # model_name: "complete_model"
+  overwrite_model: true
+  model: "d4pg" # Options: sac, ddpg, d4pg, mpo
+  
+  test_environment: true
+  epoch_steps: 1000
+  save_steps: 5000
+  test_episodes: 2
+  show_progress: true
+  replace_checkpoint: true
+
+  env_config:
+    objective: "target" # Options: walk, target, balance
+    enable_mirroring: False
+    mirror_joint_indices: [6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5]
+    
+    # Rewards
+    reward_weights:
+      survived: 0.001
+      # Walk Reward Weights
+      velocity: 0.0
+      step: 0.001
+      height: 0.0
+      torque: 0.01
+      action_diff: 0.01
+      acceleration: 0.05
+      yaw: 0.02
+      pitch_roll: 0.04
+      feet_orient: 0.3
+      torso_centering: 0.1
+      contact: 1.5
+      termination: -0.05
+      
+      # Unused (set to 0.0)
+      vel_tracking: 0.15
+      base_height_threshold_penalty: -1.0
+      feet_contact: 0.0
+      no_motion_penalty: -5.0
+      orientation: 0.0 # Replaced by pitch_roll
+      contact_step: 0.0 # Replaced by contact
+    
+    # Commands
+    commands:
+      base_velocity:
+        ranges:
+          lin_vel_x: [-0.5, 0.5]
+          lin_vel_y: [-0.3, 0.3]
+          ang_vel_z: [-0.2, 0.2]
+
+    # Randomization & Events
+    enable_perturbations: False
+    push_interval_s: 15.0
+    push_vel_range: 1.0
+    
+    enable_physics_randomization: False
+    events:
+      reset_base:
+        params:
+          pose_range:
+            x: [-0.5, 0.5]
+            y: [-0.5, 0.5]
+            yaw: [-3.14, 3.14]
+          velocity_range:
+            x: [-0.1, 0.1]
+            y: [-0.1, 0.1]
+            z: [-0.1, 0.1]
+            roll: [-0.1, 0.1]
+            pitch: [-0.1, 0.1]
+            yaw: [-0.1, 0.1]
+      reset_robot_joints:
+        params:
+          position_range: [-0.1, 0.1]
+          velocity_range: [0.0, 0.0]
+      push_robot:
+        interval_range_s: [10.0, 15.0]
+        params:
+          velocity_range:
+            x: [-0.5, 0.5]
+            y: [-0.5, 0.5]
+      randomize_mass:
+        params:
+          mass_distribution_params: [-1.0, 1.0]
+          operation: "add"
+      randomize_friction:
+        params:
+          static_friction_range: [0.5, 1.5]
+          dynamic_friction_range: [0.5, 1.5]
+          restitution_range: [0.0, 0.0]
+          num_buckets: 64
+
+    # Noise
+    observation_noise_model:
+      mean: 0.0
+      std: 0.00
+    action_noise_model:
+      mean: 0.0
+      std: 0.00
+
+model:
+  # Network configuration
+  actor_config:
+    network_type: transformer # Options: mlp, cnn, lstm, transformer
+    d_model: 128
+    nhead: 4
+    num_layers: 2
+    dim_feedforward: 256
+    # hidden_sizes: [256, 256]
+    
+  critic_config:
+    network_type: mlp # Options: mlp, cnn, lstm, transformer
+    # d_model: 128
+    # nhead: 4
+    # num_layers: 2
+    # dim_feedforward: 256
+    hidden_sizes: [512,512]
+    
+  # Training params
+  target_coeff: 0.005
+  actor_lr: 1e-3
+  critic_lr: 1e-4
+  lr_scheduler:
+    T_max: 5e5
+    eta_min: 1.0e-5
+
+buffer:
+  size: 1000000
+  return_steps: 3
+  batch_iterations: 10 # Match replay ratio of ~0.4 (100 updates / 256 transitions)
+  batch_size: 1024
+  discount_factor: 0.99
+  steps_before_batches: 4000 # Start training after 1 step
+  steps_between_batches: 1 # Update every step
+  seed: 42

@@ -1,0 +1,131 @@
+train:
+  seed: 42
+  steps: 50000000  # Increased since FastSAC processes steps much faster
+  max_episode_steps: 2000
+  worker_groups: 1
+  workers_per_group: 1
+  sim_frequency: 100
+  use_history: False
+  history_size: 0
+  actor_obs: "normal"
+  critic_obs: "normal"
+  log_dir: "runs"
+  checkpoint_path: "checkpoints/"
+  model_name: "fast_sac_model"
+  overwrite_model: true
+  model: "fast_sac" # Options: sac, fast_sac, ddpg, d4pg, mpo
+  
+  test_environment: false
+  epoch_steps: 10000
+  save_steps: 200000
+  test_episodes: 2
+  show_progress: true
+  replace_checkpoint: true
+
+  env_config:
+    objective: "target" # Options: walk, target, balance
+    enable_mirroring: False
+    mirror_joint_indices: [6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5]
+    
+    # Rewards
+    reward_weights:
+      survived: 0.002
+      velocity: 0.6
+      ang_vel_tracking: 0.1
+      height_vel_tracking: 0.00
+      height: 0.0
+      stall: 1.0
+      torque: 0.00
+      action_diff: 0.00
+      acceleration: 0.00
+      flat_orientation: 0.01
+      feet_flat: 0.00
+      base_stability: 0.02
+      feet_airtime: 1.0
+      torso_centering: 0.0
+      termination: -1.0
+      
+    # Commands
+    commands:
+      base_velocity:
+        ranges:
+          lin_vel_x: [0.3, 0.3]
+          lin_vel_y: [0.0, 0.0]
+          ang_vel_z: [0.0, 0.0]
+
+    # Randomization & Events
+    enable_perturbations: False
+    push_interval_s: 15.0
+    push_vel_range: 1.0
+    
+    enable_physics_randomization: False
+    events:
+      reset_base:
+        params:
+          pose_range:
+            x: [-0.5, 0.5]
+            y: [-0.5, 0.5]
+            yaw: [-3.14, 3.14]
+          velocity_range:
+            x: [-0.1, 0.1]
+            y: [-0.1, 0.1]
+            z: [-0.1, 0.1]
+            roll: [-0.1, 0.1]
+            pitch: [-0.1, 0.1]
+            yaw: [-0.1, 0.1]
+      reset_robot_joints:
+        params:
+          position_range: [-0.1, 0.1]
+          velocity_range: [0.0, 0.0]
+      push_robot:
+        interval_range_s: [10.0, 15.0]
+        params:
+          velocity_range:
+            x: [-0.5, 0.5]
+            y: [-0.5, 0.5]
+      randomize_mass:
+        params:
+          mass_distribution_params: [-1.0, 1.0]
+          operation: "add"
+      randomize_friction:
+        params:
+          static_friction_range: [0.5, 1.5]
+          dynamic_friction_range: [0.5, 1.5]
+          restitution_range: [0.0, 0.0]
+          num_buckets: 64
+
+    # Noise
+    observation_noise_model:
+      mean: 0.0
+      std: 0.00
+    action_noise_model:
+      mean: 0.0
+      std: 0.00
+
+model:
+  # Network configuration
+  actor_config:
+    network_type: mlp # Options: mlp, cnn, lstm, transformer
+    hidden_sizes: [1024, 512, 256]
+    
+  critic_config:
+    network_type: mlp # Options: mlp, cnn, lstm, transformer
+    hidden_sizes: [1024, 512, 256]
+    
+  # Training params
+  target_coeff: 0.005
+  actor_lr: 3e-4         # Lower LR for FastSAC
+  critic_lr: 3e-4        # Lower LR for FastSAC
+  lr_scheduler:
+    T_max: 5e7           # Adjusted for longer training
+    eta_min: 1.0e-5
+
+buffer:
+  size: 2000000          # Larger buffer for FastSAC
+  return_steps: 1        # Standard off-policy N-step
+  batch_iterations: 1    # FastSAC: Single update per step
+  batch_size: 65536      # FastSAC: Huge batches
+  discount_factor: 0.99
+  steps_before_batches: 16384 # Fill buffer slightly before starting
+  steps_between_batches: 64   # Decouple updates from env steps
+  seed: 42

@@ -11,3 +11,4 @@ pandas==2.2.3
 gymnasium==1.0.0
 scipy==1.15.1
 seaborn==0.13.2
+pydantic==2.10.3

@@ -1,102 +1,81 @@
 import numpy as np
 from utils import Config, NoConfig
-from models.mpo.model import MPO
-from models.ddpg.model import DDPG
-from models.sac.model import SAC
-from models.d4pg.model import D4PG
+from algorithms.mpo.model import MPO
+from algorithms.ddpg.model import DDPG
+from algorithms.sac.model import SAC
+from algorithms.d4pg.model import D4PG
 from envs.distributed import distribute
-from envs.basic_env import BasicEnv
-from envs.advanced_env import AdvancedEnv
+from envs.mujoco_env import MujocoEnv
 import os
+import shutil
 import torch
 import argparse
 
 
 class EnvBuilder:
-    """Top-level picklable environment builder.
-
-    Multiprocessing (spawn) requires that callables passed to child processes
-    be importable/picklable. Defining a small top-level callable object that
-    stores the environment parameters avoids using a local lambda.
-    """
-    def __init__(self, sim_frequency, short_history_size, long_history_size,
-                 randomize_dynamics, randomize_sensors, randomize_perturbations,
-                 random_config, seed):
-        self.sim_frequency = sim_frequency
-        self.short_history_size = short_history_size
-        self.long_history_size = long_history_size
-        self.randomize_dynamics = randomize_dynamics
-        self.randomize_sensors = randomize_sensors
-        self.randomize_perturbations = randomize_perturbations
-        self.random_config = random_config
+    """Top-level picklable environment builder."""
+    def __init__(self, config, seed):
+        self.config = config
         self.seed = seed
 
     def __call__(self):
-        return BasicEnv(
-            sim_frequency=self.sim_frequency,
-            short_history_size=self.short_history_size,
-            long_history_size=self.long_history_size,
-            randomize_dynamics=self.randomize_dynamics,
-            randomize_sensors=self.randomize_sensors,
-            randomize_perturbations=self.randomize_perturbations,
-            random_config=self.random_config,
-            seed=self.seed)
+        train_cfg = self.config.train
+        return MujocoEnv(
+            history_size=train_cfg.history_size,
+            sim_frequency=train_cfg.sim_frequency,
+            random_config=self.config.randomization,
+            seed=self.seed,
+            actor_obs=train_cfg.actor_obs,
+            critic_obs=train_cfg.critic_obs,
+            env_config=train_cfg.env_config)
 
 def train(config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # device = torch.device("cpu")
     print(f"Using device: {device}")
-    # Set random seed for reproducibility
-    seed = 42 or config["train"]["seed"]
+    seed = config.train.seed
     np.random.seed(seed)
     torch.manual_seed(seed)
     
     # Initialize environment
-    worker_groups = config["train"]["worker_groups"] or 4
-    workers_per_group = config["train"]["workers_per_group"] or 8
-    max_episode_steps = config["train"]["max_episode_steps"] or 2000
-    use_history = config["train"]["use_history"] or False
-    short_history_size = config["train"]["short_history_size"] or 0
-    long_history_size = config["train"]["long_history_size"] or 0
-    sim_frequency = config["train"]["sim_frequency"] or 100
+    worker_groups = config.train.worker_groups
+    workers_per_group = config.train.workers_per_group
+    max_episode_steps = config.train.max_episode_steps
     
-    random_config = config["randomization"] or NoConfig()
-    randomize_dynamics = random_config["randomize_dynamics"] or False
-    randomize_sensors = random_config["randomize_sensors"] or False
-    randomize_perturbations = random_config["randomize_perturbations"] or False
-    
-    env_builder = EnvBuilder(
-        sim_frequency=sim_frequency,
-        short_history_size=short_history_size,
-        long_history_size=long_history_size,
-        randomize_dynamics=randomize_dynamics,
-        randomize_sensors=randomize_sensors,
-        randomize_perturbations=randomize_perturbations,
-        random_config=random_config,
-        seed=seed)
+    env_builder = EnvBuilder(config=config, seed=seed)
     
     env = distribute(env_builder, worker_groups, workers_per_group, max_episode_steps=max_episode_steps)
-    log_dir = config["train"]["log_dir"] or "runs"
-    checkpoint_path = config["train"]["checkpoint_path"] or "checkpoints/" 
-    model_name = config["train"]["model_name"] or "model"
+    log_dir = config.train.log_dir
+    checkpoint_path = config.train.checkpoint_path
+    model_name = config.train.model_name
     
-    if not config["train"]["overwrite_model"]:
-        i=1
-        orig_model_name = model_name
-        if not os.path.exists(checkpoint_path):
-            os.makedirs(checkpoint_path)
-        while model_name in os.listdir(checkpoint_path):
-            model_name = orig_model_name + str(i)
-            i += 1
-            
     print(f"Model name: {model_name}")
     
+    # Ensure unique log and checkpoint directory
+    if not config.train.overwrite_model:
+        i = 1
+        original_model_name = model_name
+        # Check both checkpoint path and log path to be safe
+        while os.path.exists(os.path.join(checkpoint_path, model_name)) or os.path.exists(os.path.join(log_dir, model_name)):
+            model_name = f"{original_model_name}_{i}"
+            i += 1
+        if model_name != original_model_name:
+            print(f"Model name adjusted to avoid collision: {model_name}")
+    else:
+        # If overwrite is true, delete existing folders
+        checkpoint_dir = os.path.join(checkpoint_path, model_name)
+        log_run_dir = os.path.join(log_dir, model_name)
+        if os.path.exists(checkpoint_dir):
+            print(f"Overwriting checkpoint directory: {checkpoint_dir}")
+            shutil.rmtree(checkpoint_dir)
+        if os.path.exists(log_run_dir):
+            print(f"Overwriting log directory: {log_run_dir}")
+            shutil.rmtree(log_run_dir)
+    
     # Initialize model
-    actor_sizes = config["model"]["actor_sizes"] or [256, 256]
-    critic_sizes = config["model"]["critic_sizes"] or [256, 256]
-    model_sizes = [actor_sizes, critic_sizes]
-    model_init = lambda model: model(env=env, device=device, model_sizes=model_sizes, config=config, use_history=use_history, long_history_size=long_history_size, short_history_size=short_history_size)
-    match config["train"]["model"].lower():
+    use_history = config.train.use_history
+    history_size = config.train.history_size
+    model_init = lambda model: model(env=env, device=device, config=config, use_history=use_history, history_size=history_size)
+    match config.train.model.lower():
         case "mpo":
             model = model_init(MPO)
         case "ddpg":
@@ -105,16 +84,15 @@ def train(config):
             model = model_init(SAC)
         case "d4pg":
             model = model_init(D4PG)
-        case None:
-            print("No model specified, using D4PG")
-            model = model_init(D4PG)
         case _:
-            raise ValueError("Model not recognized. Please use one of the following: mpo, ddpg, sac, d4pg")
+            raise ValueError("Model not recognized.")
     
-    steps = config["train"]["steps"] or 2000000
-    test_environment = config["train"]["test_environment"] or False
-    if test_environment:
-        test_environment = AdvancedEnv()
+    steps = config.train.steps
+    test_environment = None
+    if config.train.test_environment:
+        test_env_builder = EnvBuilder(config=config, seed=seed + 1000)
+        test_environment = distribute(test_env_builder, worker_groups=1, workers_per_group=1, 
+                                      max_episode_steps=max_episode_steps)
 
     model.train(
         log_dir=log_dir,
@@ -136,5 +114,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
     config = Config(args.config)
     train(config)
-
-
