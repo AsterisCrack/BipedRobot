@@ -17,18 +17,18 @@ USD_PATH = os.path.join(CURRENT_DIR, "robot.usd")
 
 # Joint limits in degrees [min, max]
 _JOINT_LIMITS_DEG = [
-    [-90, 45],  # r_hip_z
-    [-45, 90],  # r_hip_x
-    [-45, 45],  # r_hip_y
-    [-45, 45],  # r_knee
-    [-90, 90],  # r_ankle_y
-    [-90, 90],  # r_ankle_x
-    [0, 110],  # l_hip_z
-    [0, 110],  # l_hip_x
-    [-90, 90],  # l_hip_y
-    [-90, 90],  # l_knee
-    [-90, 30],  # l_ankle_y
-    [-30, 90],  # l_ankle_x
+    [-90, 45], # r_hip_z
+    [-45, 90], # l_hip_z
+    [-45, 45], # r_hip_x
+    [-45, 45], # l_hip_x
+    [-90, 90], # r_hip_y
+    [-90, 90], # l_hip_y
+    [0, 135],  # r_knee
+    [0, 135],  # l_knee
+    [-90, 90], # r_ankle_y
+    [-90, 90], # l_ankle_y
+    [-90, 30], # r_ankle_x
+    [-30, 90], # l_ankle_x
 ]
 
 # Convert to radians

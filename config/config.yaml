@@ -6,7 +6,7 @@ train:
   use_history: False
   history_size: 0
   normalize_obs: False
-  symmetry_augmentation: True
+  symmetry_augmentation: False
   actor_obs: "normal"
   critic_obs: "normal"
   use_rough_terrain: false
@@ -30,7 +30,7 @@ train:
       track_lin_vel_xy_exp: 2.0
       track_ang_vel_z_exp: 1.0
       termination_penalty: -10.0
-      lin_vel_z_l2: -0.1
+      lin_vel_z_l2: -0.05
       ang_vel_xy_l2: -0.05
       flat_orientation_l2: -2.0
       action_rate_l2: -0.0002
@@ -45,6 +45,7 @@ train:
       step_length: 10.0
       # swing_foot_height: 1.0
       torso_centering: 0.1
+      knee_bend_touchdown: 10.0
       
     # Commands
     commands:
@@ -54,9 +55,9 @@ train:
         rel_standing_envs: 0.02
         rel_heading_envs: 1.0
         ranges:
-          lin_vel_x: [-0.2, 0.3]
-          lin_vel_y: [-0.2, 0.2]
-          ang_vel_z: [-0.1, 0.1]
+          lin_vel_x: [-0.4, 0.5]
+          lin_vel_y: [-0.4, 0.4]
+          ang_vel_z: [-0.3, 0.3]
           heading: [-3.14159, 3.14159]
 
     # Noise

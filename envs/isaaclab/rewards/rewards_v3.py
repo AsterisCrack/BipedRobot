@@ -206,3 +206,20 @@ def step_length(touchdown: torch.Tensor, stride_length: torch.Tensor, commands: 
     reward = torch.sum(torch.square(stride_length) * touchdown.float(), dim=1)
     
     return reward * mask
+
+@torch.jit.script
+def knee_bend_on_touchdown(
+    touchdown: torch.Tensor,
+    max_knee_bend: torch.Tensor,
+    min_bend: float = 0.1,
+    max_bend: float = 1.0,
+):
+    """
+    Reward knee bend during swing when the foot touches down.
+
+    touchdown: (num_envs, num_feet) bool
+    max_knee_bend: (num_envs, num_feet) float, max |knee_pos - default| during swing
+    """
+    bend = torch.clamp(max_knee_bend - min_bend, min=0.0)
+    bend = torch.clamp(bend, max=max_bend - min_bend)
+    return torch.sum(bend * touchdown.float(), dim=1)

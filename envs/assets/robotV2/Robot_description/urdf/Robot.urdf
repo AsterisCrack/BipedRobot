@@ -1,0 +1,376 @@
+<?xml version="1.0" ?>
+<robot name="Robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find Robot_description)/urdf/materials.xacro" />
+<xacro:include filename="$(find Robot_description)/urdf/Robot.trans" />
+<xacro:include filename="$(find Robot_description)/urdf/Robot.gazebo" />
+<link name="base_link">
+  <inertial>
+    <origin xyz="0.000983567856159647 0.0031162279794711817 -0.02886876928458239" rpy="0 0 0"/>
+    <mass value="0.685004957374252"/>
+    <inertia ixx="0.001989" iyy="0.001602" izz="0.000503" ixy="-9e-06" iyz="-8.5e-05" ixz="1e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="left_foot_link_1">
+  <inertial>
+    <origin xyz="0.011592496245124706 -0.01854632543002714 -0.0040761399140996635" rpy="0 0 0"/>
+    <mass value="0.10476336294196884"/>
+    <inertia ixx="1.8e-05" iyy="2.8e-05" izz="2.9e-05" ixy="0.0" iyz="0.0" ixz="1e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.004521 -0.08713 0.472622" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_foot_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.004521 -0.08713 0.472622" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_foot_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="right_foot_link_1">
+  <inertial>
+    <origin xyz="0.011592498192928059 0.01854634590454575 -0.004076128131973111" rpy="0 0 0"/>
+    <mass value="0.10476326176276732"/>
+    <inertia ixx="1.8e-05" iyy="2.8e-05" izz="2.9e-05" ixy="-0.0" iyz="-0.0" ixz="1e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.004521 0.08713 0.472622" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_foot_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.004521 0.08713 0.472622" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_foot_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="right_hip_pitch_link_1">
+  <inertial>
+    <origin xyz="-0.02106989915918304 -0.014381026816124562 -0.01367957805964612" rpy="0 0 0"/>
+    <mass value="0.1968848303215498"/>
+    <inertia ixx="7.3e-05" iyy="7.4e-05" izz="5.3e-05" ixy="-1e-06" iyz="-3e-06" ixz="-6e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.020635 0.055894 0.119474" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_hip_pitch_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.020635 0.055894 0.119474" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_hip_pitch_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="left_hip_pitch_link_1">
+  <inertial>
+    <origin xyz="-0.021069900513784767 0.014381030759204036 -0.013679579456911062" rpy="0 0 0"/>
+    <mass value="0.19688481612377404"/>
+    <inertia ixx="7.3e-05" iyy="7.4e-05" izz="5.3e-05" ixy="1e-06" iyz="3e-06" ixz="-6e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.020635 -0.055894 0.119474" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_hip_pitch_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.020635 -0.055894 0.119474" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_hip_pitch_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="right_hip_yaw_link_1">
+  <inertial>
+    <origin xyz="0.00022371263308286222 -0.013886954243937502 0.009034713436275377" rpy="0 0 0"/>
+    <mass value="0.01637194145055233"/>
+    <inertia ixx="9e-06" iyy="1.3e-05" izz="6e-06" ixy="0.0" iyz="-0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.002014 0.041572 0.096556" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_hip_yaw_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.002014 0.041572 0.096556" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_hip_yaw_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="left_hip_yaw_link_1">
+  <inertial>
+    <origin xyz="0.00022371263310264847 0.013886956589780883 0.009034713436277153" rpy="0 0 0"/>
+    <mass value="0.01637194145055182"/>
+    <inertia ixx="9e-06" iyy="1.3e-05" izz="6e-06" ixy="-0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.002014 -0.041572 0.096556" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_hip_yaw_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.002014 -0.041572 0.096556" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_hip_yaw_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="right_thigh_link_1">
+  <inertial>
+    <origin xyz="0.00015767205077676406 -0.017972022752780648 -0.12084457709945368" rpy="0 0 0"/>
+    <mass value="0.11535555609511457"/>
+    <inertia ixx="0.000142" iyy="0.000133" izz="2.1e-05" ixy="0.0" iyz="4e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.010184 0.052672 0.146663" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_thigh_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.010184 0.052672 0.146663" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_thigh_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="left_thigh_link_1">
+  <inertial>
+    <origin xyz="0.00015767187923618718 0.01797202811381292 -0.12084457568190243" rpy="0 0 0"/>
+    <mass value="0.11535555048498583"/>
+    <inertia ixx="0.000142" iyy="0.000133" izz="2.1e-05" ixy="-0.0" iyz="-4e-06" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.010184 -0.052672 0.146663" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_thigh_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.010184 -0.052672 0.146663" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_thigh_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="right_calf_link_1">
+  <inertial>
+    <origin xyz="-0.00780739646608266 -0.017613336181874786 -0.12273075430968666" rpy="0 0 0"/>
+    <mass value="0.11723995888992277"/>
+    <inertia ixx="0.000136" iyy="0.000136" izz="2.1e-05" ixy="0.0" iyz="1e-06" ixz="-7e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.010168 0.051402 0.292157" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_calf_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.010168 0.051402 0.292157" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_calf_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="left_calf_link_1">
+  <inertial>
+    <origin xyz="-0.007807397680223927 0.017613340841546463 -0.1227307526092758" rpy="0 0 0"/>
+    <mass value="0.11723995108924996"/>
+    <inertia ixx="0.000136" iyy="0.000136" izz="2.1e-05" ixy="-0.0" iyz="-1e-06" ixz="-7e-06"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.010168 -0.051402 0.292157" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_calf_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.010168 -0.051402 0.292157" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_calf_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="right_ankle_link_1">
+  <inertial>
+    <origin xyz="-0.017390374692855873 0.0001728549568631721 -0.01619654294596312" rpy="0 0 0"/>
+    <mass value="0.009161990357432327"/>
+    <inertia ixx="2e-06" iyy="3e-06" izz="3e-06" ixy="-0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.020458 0.068646 0.440062" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_ankle_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.020458 0.068646 0.440062" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/right_ankle_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="left_ankle_link_1">
+  <inertial>
+    <origin xyz="-0.017390374671956955 -0.00017285026524525848 -0.016196542966436855" rpy="0 0 0"/>
+    <mass value="0.009161990357432327"/>
+    <inertia ixx="2e-06" iyy="3e-06" izz="3e-06" ixy="0.0" iyz="-0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.020458 -0.068646 0.440062" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_ankle_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.020458 -0.068646 0.440062" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://Robot_description/meshes/left_ankle_link_1.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="left_ankle_pitch" type="revolute">
+  <origin xyz="-0.015937 0.018484 -0.03256" rpy="0 0 0"/>
+  <parent link="left_ankle_link_1"/>
+  <child link="left_foot_link_1"/>
+  <axis xyz="-0.008908 -0.999922 0.008727"/>
+  <limit upper="0.279253" lower="-1.308997" effort="100" velocity="100"/>
+</joint>
+
+<joint name="right_ankle_pitch" type="revolute">
+  <origin xyz="-0.015937 -0.018484 -0.03256" rpy="0 0 0"/>
+  <parent link="right_ankle_link_1"/>
+  <child link="right_foot_link_1"/>
+  <axis xyz="0.008908 -0.999922 -0.008727"/>
+  <limit upper="0.296706" lower="-1.308997" effort="100" velocity="100"/>
+</joint>
+
+<joint name="right_hip_roll" type="revolute">
+  <origin xyz="0.018621 -0.014322 -0.022918" rpy="0 0 0"/>
+  <parent link="right_hip_yaw_link_1"/>
+  <child link="right_hip_pitch_link_1"/>
+  <axis xyz="1.0 0.0 -9.1e-05"/>
+  <limit upper="1.570796" lower="-0.523599" effort="100" velocity="100"/>
+</joint>
+
+<joint name="left_hip_roll" type="revolute">
+  <origin xyz="0.018621 0.014322 -0.022918" rpy="0 0 0"/>
+  <parent link="left_hip_yaw_link_1"/>
+  <child link="left_hip_pitch_link_1"/>
+  <axis xyz="-1.0 0.0 9.1e-05"/>
+  <limit upper="1.570796" lower="-0.523599" effort="100" velocity="100"/>
+</joint>
+
+<joint name="right_hip_yaw" type="revolute">
+  <origin xyz="0.002014 -0.041572 -0.096556" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="right_hip_yaw_link_1"/>
+  <axis xyz="-0.0 0.0 -1.0"/>
+  <limit upper="0.610865" lower="-0.610865" effort="100" velocity="100"/>
+</joint>
+
+<joint name="left_hip_yaw" type="revolute">
+  <origin xyz="0.002014 0.041572 -0.096556" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="left_hip_yaw_link_1"/>
+  <axis xyz="0.0 0.0 1.0"/>
+  <limit upper="0.610865" lower="-0.610865" effort="100" velocity="100"/>
+</joint>
+
+<joint name="right_hip_pitch" type="revolute">
+  <origin xyz="-0.010451 0.003222 -0.027189" rpy="0 0 0"/>
+  <parent link="right_hip_pitch_link_1"/>
+  <child link="right_thigh_link_1"/>
+  <axis xyz="-0.008726 0.999924 0.008727"/>
+  <limit upper="1.745329" lower="-1.989675" effort="100" velocity="100"/>
+</joint>
+
+<joint name="left_hip_pitch" type="revolute">
+  <origin xyz="-0.010451 -0.003222 -0.027189" rpy="0 0 0"/>
+  <parent link="left_hip_pitch_link_1"/>
+  <child link="left_thigh_link_1"/>
+  <axis xyz="0.008726 0.999924 -0.008727"/>
+  <limit upper="1.745329" lower="-1.989675" effort="100" velocity="100"/>
+</joint>
+
+<joint name="right_knee" type="revolute">
+  <origin xyz="-1.6e-05 0.00127 -0.145494" rpy="0 0 0"/>
+  <parent link="right_thigh_link_1"/>
+  <child link="right_calf_link_1"/>
+  <axis xyz="-0.008817 0.999923 0.008727"/>
+  <limit upper="2.007129" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+<joint name="left_knee" type="revolute">
+  <origin xyz="-1.6e-05 -0.00127 -0.145494" rpy="0 0 0"/>
+  <parent link="left_thigh_link_1"/>
+  <child link="left_calf_link_1"/>
+  <axis xyz="0.008817 0.999923 -0.008727"/>
+  <limit upper="2.007129" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+<joint name="right_ankle_roll" type="revolute">
+  <origin xyz="0.01029 -0.017244 -0.147905" rpy="0 0 0"/>
+  <parent link="right_calf_link_1"/>
+  <child link="right_ankle_link_1"/>
+  <axis xyz="0.99996 0.008909 -3.3e-05"/>
+  <limit upper="1.570796" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+<joint name="left_ankle_roll" type="revolute">
+  <origin xyz="0.01029 0.017244 -0.147905" rpy="0 0 0"/>
+  <parent link="left_calf_link_1"/>
+  <child link="left_ankle_link_1"/>
+  <axis xyz="-0.99996 0.008909 3.3e-05"/>
+  <limit upper="1.570796" lower="-1.570796" effort="100" velocity="100"/>
+</joint>
+
+</robot>

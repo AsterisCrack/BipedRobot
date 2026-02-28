@@ -130,6 +130,14 @@ else:
     agent_cfg_entry_point = args_cli.agent
     algorithm = agent_cfg_entry_point.split("_cfg")[0].split("skrl_")[-1].lower()
 
+# Map friendly task names to gym ids
+task_id_map = {
+    "BipedRobot": "Isaac-BipedRobot-Direct-v0",
+    "BipedRobotV2": "Isaac-BipedRobotV2-Direct-v0",
+}
+if args_cli.task in task_id_map:
+    args_cli.task = task_id_map[args_cli.task]
+
 
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):

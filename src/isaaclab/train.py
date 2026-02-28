@@ -17,7 +17,7 @@ parser.add_argument("--video", action="store_true", default=False, help="Record 
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
-parser.add_argument("--task", type=str, default="Biped", help="Name of the task.")
+parser.add_argument("--task", type=str, default="BipedRobot", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
 parser.add_argument("--config_path", type=str, default="config/train_config.yaml", help="Path to training config")
@@ -44,12 +44,14 @@ from algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
 from algorithms.utils import RunningMeanStd
-if args_cli.task == "BipedV2":
-    from envs.isaaclab.biped_env_cfg_v2 import BipedEnvCfg
-    from envs.isaaclab.biped_env_v2 import BipedEnv
-elif args_cli.task == "Biped":
-    from envs.isaaclab.biped_env_cfg import BipedEnvCfg
-    from envs.isaaclab.biped_env import BipedEnv
+from envs.isaaclab.biped_env import BipedEnv
+from envs.isaaclab.biped_env_cfg import BipedEnvCfg as BipedRobotEnvCfg
+from envs.isaaclab.biped_env_cfg import BipedRobotV2EnvCfg
+
+if args_cli.task == "BipedRobot":
+    BipedEnvCfg = BipedRobotEnvCfg
+elif args_cli.task == "BipedRobotV2":
+    BipedEnvCfg = BipedRobotV2EnvCfg
 else:
     raise ValueError(f"Unknown task: {args_cli.task}")
 

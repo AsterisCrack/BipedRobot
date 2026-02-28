@@ -17,8 +17,7 @@ class UniformVelocityCommand:
         self.heading_target = torch.zeros(num_envs, device=device)
         self.in_heading_mode = torch.zeros(num_envs, dtype=torch.bool, device=device)
         
-        # Parsing Configuration 
-        # (Assuming the structure matches the one in biped_env_v2 or defaults)
+        # Parsing Configuration
         self.resampling_time_range = (10.0, 10.0)
         self.heading_control_stiffness = 0.5
         self.rel_standing_envs = 0.02

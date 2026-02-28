@@ -14,10 +14,9 @@ from isaaclab.envs.mdp import randomize_rigid_body_mass, randomize_rigid_body_ma
 from isaaclab.terrains import TerrainImporter
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from .biped_env_cfg_v2 import BipedEnvCfg
+from .biped_env_cfg import BipedEnvCfg
 from .rewards import rewards_v3 as rewards
 from .mdp.commands import UniformVelocityCommand
-from envs.assets.robot.biped_robot import JOINT_LIMITS
 
 
 class BipedEnv(DirectRLEnv):
@@ -58,13 +57,15 @@ class BipedEnv(DirectRLEnv):
         
         super().__init__(cfg, render_mode, **kwargs)
 
-        # Find feet indices
-        self.feet_indices, _ = self.robot.find_bodies(".*_foot")
+        # Find feet indices (right then left)
+        self.feet_indices, _ = self.robot.find_bodies(
+            [self.cfg.right_foot_body_name, self.cfg.left_foot_body_name]
+        )
         self.right_foot_idx = self.feet_indices[0]
         self.left_foot_idx = self.feet_indices[1]
 
-        # Specific joints for penalty (user specified 2, 3 for abduction/sumo pose)
-        self.abduction_joint_indices = torch.tensor([2, 3], device=self.device, dtype=torch.long)
+        # Specific joints for penalty (optional; keep empty if unused)
+        self.abduction_joint_indices = torch.tensor([], device=self.device, dtype=torch.long)
 
         # Joint limits
 
@@ -119,6 +120,7 @@ class BipedEnv(DirectRLEnv):
         # Step length buffers
         self.feet_pos_liftoff = torch.zeros(self.num_envs, 2, 3, device=self.device) # 2 feet
         self.feet_in_contact_prev = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
+        self.knee_bend_max = torch.zeros(self.num_envs, 2, device=self.device)
 
         # Randomization
         self.push_interval_steps = int(self.cfg.push_interval_s / self.step_dt)
@@ -131,18 +133,22 @@ class BipedEnv(DirectRLEnv):
             )
 
         # Get specific body indices
-        self._base_id, _ = self.contact_sensor.find_bodies("torso_link")
-        self._feet_ids, _ = self.contact_sensor.find_bodies(".*foot")
+        self._base_id, _ = self.contact_sensor.find_bodies(self.cfg.base_body_name)
+        self._feet_ids, _ = self.contact_sensor.find_bodies(
+            [self.cfg.right_foot_body_name, self.cfg.left_foot_body_name]
+        )
         # Undesired contact bodies are all but feet
         self._undesired_contact_body_ids = [i for i in range(self.robot.num_bodies) if i not in self._feet_ids]
         
         # Specific joint indices for rewards
-        self.hip_indices, _ = self.robot.find_joints([".*_hip_z", ".*_hip_x"])
-        self.ankle_roll_indices, _ = self.robot.find_joints([".*_ankle_x"])
+        self.hip_indices, _ = self.robot.find_joints(self.cfg.hip_joint_names)
+        self.ankle_roll_indices, _ = self.robot.find_joints(self.cfg.ankle_roll_joint_names)
+        knee_indices, _ = self.robot.find_joints(self.cfg.knee_joint_names)
+        self.knee_indices = torch.tensor(knee_indices, device=self.device, dtype=torch.long)
 
         # Custom joint limit scaling
-        self.joint_limits_min = torch.tensor([x[0] for x in JOINT_LIMITS], device=self.device)
-        self.joint_limits_max = torch.tensor([x[1] for x in JOINT_LIMITS], device=self.device)
+        self.joint_limits_min = torch.tensor([x[0] for x in self.cfg.joint_limits], device=self.device)
+        self.joint_limits_max = torch.tensor([x[1] for x in self.cfg.joint_limits], device=self.device)
         self.joint_range = self.joint_limits_max - self.joint_limits_min
         
     def _setup_scene(self):
@@ -205,8 +211,10 @@ class BipedEnv(DirectRLEnv):
         self.command_generator.compute(self.base_quat)
 
         
-        self.targets = self.actions * self.cfg.action_scale + self.default_joint_pos
-        self.targets = torch.clamp(self.targets, self.joint_limits_min, self.joint_limits_max)
+        # Map actions in [-1, 1] to joint limits (same as v1)
+        self.actions = torch.clamp(self.actions, -1.0, 1.0)
+        normalized_action_01 = (self.actions + 1.0) * 0.5
+        self.targets = self.joint_limits_min + normalized_action_01 * self.joint_range
 
     def _apply_action(self):
         self.robot.set_joint_position_target(self.targets)
@@ -323,6 +331,7 @@ class BipedEnv(DirectRLEnv):
         # Detect Liftoff: Contact -> Air
         liftoff = self.feet_in_contact_prev & ~feet_in_contact
         self.feet_pos_liftoff[liftoff] = feet_pos[liftoff]
+        self.knee_bend_max[liftoff] = 0.0
         
         # Detect Touchdown: Air -> Contact
         touchdown = ~self.feet_in_contact_prev & feet_in_contact
@@ -339,6 +348,13 @@ class BipedEnv(DirectRLEnv):
         
         # Update prev contact
         self.feet_in_contact_prev[:] = feet_in_contact
+
+        # Track max knee bend during swing (per foot)
+        knee_pos = self.joint_pos[:, self.knee_indices]
+        knee_default = self.default_joint_pos[self.knee_indices]
+        knee_bend = torch.abs(knee_pos - knee_default)
+        knee_airborne = ~feet_in_contact
+        self.knee_bend_max = torch.where(knee_airborne, torch.maximum(self.knee_bend_max, knee_bend), self.knee_bend_max)
 
         # 1. track_lin_vel_xy_exp (w=2.0)
         r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp(self.commands, self.base_lin_vel_b, std=0.25)
@@ -417,6 +433,10 @@ class BipedEnv(DirectRLEnv):
         
         # 18: Torso centering
         r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
+
+        # 19: Knee bend during swing on touchdown
+        r_knee_bend_touchdown = rewards.knee_bend_on_touchdown(touchdown, self.knee_bend_max, min_bend=0.2, max_bend=1.0)
+        self.knee_bend_max[touchdown] = 0.0
         
         # Term dict
         reward_terms = {
@@ -438,6 +458,7 @@ class BipedEnv(DirectRLEnv):
             "step_length": r_step_length * self.cfg.rewards.get("step_length", 0.0),
             "swing_foot_height": r_swing_foot_height * self.cfg.rewards.get("swing_foot_height", 0.0),
             "torso_centering": r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0),
+            "knee_bend_touchdown": r_knee_bend_touchdown * self.cfg.rewards.get("knee_bend_touchdown", 0.0),
         }
         
         # Weighted sum
@@ -519,6 +540,7 @@ class BipedEnv(DirectRLEnv):
             self.policy_history_buf[env_ids] = 0.0
         if self.critic_history_buf is not None:
             self.critic_history_buf[env_ids] = 0.0
+        self.knee_bend_max[env_ids] = 0.0
         
         # Reset feet contact history to True.
         self.feet_in_contact_prev[env_ids] = True
