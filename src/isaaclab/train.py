@@ -283,6 +283,24 @@ def train():
         # Reward Scale
         if hasattr(env_conf, "reward_scale"):
             env_cfg.reward_scale = env_conf.reward_scale
+
+        # Animation (imitation)
+        if hasattr(env_conf, "animation") and env_conf.animation:
+            anim = env_conf.animation
+            if hasattr(anim, "model_dump"):
+                anim = anim.model_dump()
+            if "npz_path" in anim:
+                env_cfg.animation_npz_path = anim["npz_path"]
+            if "loop" in anim:
+                env_cfg.animation_loop = anim["loop"]
+            if "random_start" in anim:
+                env_cfg.animation_random_start = anim["random_start"]
+            if "speed" in anim:
+                env_cfg.animation_speed = anim["speed"]
+            if "pos_std" in anim:
+                env_cfg.animation_pos_std = anim["pos_std"]
+            if "vel_std" in anim:
+                env_cfg.animation_vel_std = anim["vel_std"]
             
         # Commands (Target velocities)
         # Check if commands are defined in env_config (as dict) or as fields

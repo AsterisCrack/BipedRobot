@@ -45,7 +45,18 @@ train:
       step_length: 10.0
       # swing_foot_height: 1.0
       torso_centering: 0.1
-      knee_bend_touchdown: 10.0
+      knee_bend_touchdown: 0
+      track_joint_pos_exp: 1.0
+      track_joint_vel_exp: 0.5
+
+    # Animation (imitation)
+    animation:
+      npz_path: "animation_utils/processed/StandardWalk.npz"
+      loop: true
+      random_start: true
+      speed: 1.0
+      pos_std: 0.5
+      vel_std: 1.0
       
     # Commands
     commands:
@@ -55,8 +66,8 @@ train:
         rel_standing_envs: 0.02
         rel_heading_envs: 1.0
         ranges:
-          lin_vel_x: [-0.4, 0.5]
-          lin_vel_y: [-0.4, 0.4]
+          lin_vel_x: [0.3, 0.5]
+          lin_vel_y: [0.0, 0.0]
           ang_vel_z: [-0.3, 0.3]
           heading: [-3.14159, 3.14159]
 

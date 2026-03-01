@@ -223,3 +223,19 @@ def knee_bend_on_touchdown(
     bend = torch.clamp(max_knee_bend - min_bend, min=0.0)
     bend = torch.clamp(bend, max=max_bend - min_bend)
     return torch.sum(bend * touchdown.float(), dim=1)
+
+@torch.jit.script
+def track_joint_pos_exp(joint_pos: torch.Tensor, ref_joint_pos: torch.Tensor, std: float = 0.5):
+    """
+    Reward for tracking reference joint positions using exponential kernel.
+    """
+    error = torch.sum(torch.square(joint_pos - ref_joint_pos), dim=1)
+    return torch.exp(-error / (std**2))
+
+@torch.jit.script
+def track_joint_vel_exp(joint_vel: torch.Tensor, ref_joint_vel: torch.Tensor, std: float = 1.0):
+    """
+    Reward for tracking reference joint velocities using exponential kernel.
+    """
+    error = torch.sum(torch.square(joint_vel - ref_joint_vel), dim=1)
+    return torch.exp(-error / (std**2))

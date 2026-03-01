@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import torch
 import math
 
@@ -17,6 +18,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from .biped_env_cfg import BipedEnvCfg
 from .rewards import rewards_v3 as rewards
 from .mdp.commands import UniformVelocityCommand
+from utils.motion_reference import MotionReference, MotionReferenceConfig
 
 
 class BipedEnv(DirectRLEnv):
@@ -150,6 +152,22 @@ class BipedEnv(DirectRLEnv):
         self.joint_limits_min = torch.tensor([x[0] for x in self.cfg.joint_limits], device=self.device)
         self.joint_limits_max = torch.tensor([x[1] for x in self.cfg.joint_limits], device=self.device)
         self.joint_range = self.joint_limits_max - self.joint_limits_min
+
+        # Motion reference (imitation)
+        self.motion_ref = None
+        self.motion_time = None
+        if self.cfg.animation_npz_path:
+            motion_cfg = MotionReferenceConfig(
+                npz_path=self.cfg.animation_npz_path,
+                loop=self.cfg.animation_loop,
+                speed=self.cfg.animation_speed,
+                root_dir=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
+            )
+            self.motion_ref = MotionReference(motion_cfg, self.device)
+            self.motion_ref.bind_to_robot(self.robot.joint_names)
+            self.motion_time = torch.zeros(self.num_envs, device=self.device)
+            if self.cfg.animation_random_start:
+                self._randomize_motion_time(torch.arange(self.num_envs, device=self.device))
         
     def _setup_scene(self):
         self.robot = self.scene.articulations["robot"]
@@ -437,6 +455,17 @@ class BipedEnv(DirectRLEnv):
         # 19: Knee bend during swing on touchdown
         r_knee_bend_touchdown = rewards.knee_bend_on_touchdown(touchdown, self.knee_bend_max, min_bend=0.2, max_bend=1.0)
         self.knee_bend_max[touchdown] = 0.0
+
+        # 20: Animation tracking (optional)
+        if self.motion_ref is not None:
+            ref_pos, ref_vel = self.motion_ref.sample(self.motion_time)
+            joint_pos_ref = self.joint_pos[:, self.motion_ref.robot_joint_indices]
+            joint_vel_ref = self.joint_vel[:, self.motion_ref.robot_joint_indices]
+            r_track_joint_pos = rewards.track_joint_pos_exp(joint_pos_ref, ref_pos, std=self.cfg.animation_pos_std)
+            r_track_joint_vel = rewards.track_joint_vel_exp(joint_vel_ref, ref_vel, std=self.cfg.animation_vel_std)
+        else:
+            r_track_joint_pos = torch.zeros(self.num_envs, device=self.device)
+            r_track_joint_vel = torch.zeros(self.num_envs, device=self.device)
         
         # Term dict
         reward_terms = {
@@ -459,6 +488,8 @@ class BipedEnv(DirectRLEnv):
             "swing_foot_height": r_swing_foot_height * self.cfg.rewards.get("swing_foot_height", 0.0),
             "torso_centering": r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0),
             "knee_bend_touchdown": r_knee_bend_touchdown * self.cfg.rewards.get("knee_bend_touchdown", 0.0),
+            "track_joint_pos_exp": r_track_joint_pos * self.cfg.rewards.get("track_joint_pos_exp", 0.0),
+            "track_joint_vel_exp": r_track_joint_vel * self.cfg.rewards.get("track_joint_vel_exp", 0.0),
         }
         
         # Weighted sum
@@ -472,8 +503,16 @@ class BipedEnv(DirectRLEnv):
         for key, value in reward_terms.items():
             if key in self.episode_sums:
                 self.episode_sums[key] += value
+
+        if self.motion_time is not None:
+            self.motion_time += self.step_dt
         
         return total_reward
+
+    def _randomize_motion_time(self, env_ids: torch.Tensor) -> None:
+        if self.motion_ref is None or self.motion_time is None:
+            return
+        self.motion_time[env_ids] = torch.rand(len(env_ids), device=self.device) * self.motion_ref.duration
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
@@ -518,6 +557,12 @@ class BipedEnv(DirectRLEnv):
         for key in self.episode_sums.keys():
             episodic_sum_avg = torch.mean(self.episode_sums[key][env_ids])
             extras["Reward_Terms/" + key] = episodic_sum_avg / (self.max_episode_length * self.step_dt)
+
+        if self.motion_time is not None:
+            if self.cfg.animation_random_start:
+                self._randomize_motion_time(env_ids)
+            else:
+                self.motion_time[env_ids] = 0.0
             self.episode_sums[key][env_ids] = 0.0
         self.extras["log"] = dict()
         self.extras["log"].update(extras)

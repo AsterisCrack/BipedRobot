@@ -130,6 +130,14 @@ class BipedEnvCfg(DirectRLEnvCfg):
     use_history = False # Whether to use history in observations
     logging_level = "INFO" # Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
     reward_scale = 1.0 # Scale all rewards by this factor
+
+    # Animation (imitation)
+    animation_npz_path: str | None = None
+    animation_loop: bool = True
+    animation_random_start: bool = True
+    animation_speed: float = 1.0
+    animation_pos_std: float = 0.5
+    animation_vel_std: float = 1.0
     
     # Observations
     observation_type = "normal" # Options: "normal", "basic"
