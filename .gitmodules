@@ -1,0 +1,3 @@
+[submodule "robot-motion-reference"]
+	path = robot-motion-reference
+	url = git@github-personal:AsterisCrack/robot-motion-reference.git
