@@ -34,7 +34,7 @@ def test_env():
             action = sinusoidal_action_pattern(step, frequency=0.05, amplitude=0.5, action_dim=action_dim)
             # action = no_action_pattern(step, action_dim=action_dim)
             action[:action_dim // 2] = mirror_action(action, n_joints=action_dim)[:action_dim // 2]  # Mirror the first half of the action
-            obs, reward, terminated, info = env.step(action, render_ref_point=True)
+            obs, reward, terminated, info = env.step(action)
             #print("Observation:", obs)
             
             env.render()

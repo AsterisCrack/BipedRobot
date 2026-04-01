@@ -1,0 +1,7 @@
+[submodule "robot-motion-reference"]
+	path = robot-motion-reference
+	url = git@github-personal:AsterisCrack/robot-motion-reference.git
+
+[submodule "torch-rl-algorithms"]
+	path = torch-rl-algorithms
+	url = git@github.com:AsterisCrack/torch-rl-algorithms.git

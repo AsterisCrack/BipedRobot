@@ -1,129 +1,172 @@
 import torch
-from typing import Tuple
-from isaaclab.managers import SceneEntityCfg
-from isaaclab.sensors import ContactSensor
 
 @torch.jit.script
-def velocity_tracking_reward(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, sigma: float = 5.0):
+def swing_foot_height(
+    feet_pos_w: torch.Tensor,
+    feet_contact: torch.Tensor,
+    min_height: float = 0.01,
+    max_height: float = 0.05,
+) -> torch.Tensor:
+    # feet_pos_w: (N, F, 3)
+    foot_height = feet_pos_w[:, :, 2]
+
+    # only reward when foot is NOT in contact
+    swing = (~feet_contact).float()
+
+    # clamp reward window
+    height_error = torch.clamp(foot_height - min_height, min=0.0)
+    height_reward = torch.clamp(height_error, max=max_height - min_height)
+
+    return torch.sum(height_reward * swing, dim=1)
+
+@torch.jit.script
+def track_lin_vel_xy_exp(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, std: float = 0.25):
     """
-    Reward for tracking the target velocity (Negative MSE).
-    Matches MuJoCo TargetReward implementation.
+    Tracking of linear velocity commands (xy axes) using exponential kernel.
     """
-    # Linear velocity error (x, y)
+    # Compute error
     lin_vel_error = torch.sum(torch.square(commands[:, :2] - base_lin_vel_b[:, :2]), dim=1)
-    return torch.exp(-sigma * lin_vel_error)
+    return torch.exp(-lin_vel_error / std**2)
 
 @torch.jit.script
-def angular_velocity_tracking_reward(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, sigma: float = 5.0):
+def track_ang_vel_z_exp(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, std: float = 0.25):
     """
-    Reward for tracking the target angular velocity (Negative MSE).
+    Tracking of angular velocity commands (yaw) using exponential kernel.
     """
-    # Angular velocity error (yaw rate)
+    # Compute error
     ang_vel_error = torch.square(commands[:, 2] - base_ang_vel_b[:, 2])
-    return torch.exp(-sigma * ang_vel_error)
+    return torch.exp(-ang_vel_error / std**2)
 
 @torch.jit.script
-def height_velocity_tracking_reward(base_lin_vel_b: torch.Tensor, target_height_vel: float = 0.0, sigma: float = 10.0):
+def lin_vel_z_l2(base_lin_vel_b: torch.Tensor):
     """
-    Reward for maintaining a specific height velocity.
+    Penalty for vertical linear velocity (L2 norm).
     """
-    height_vel = base_lin_vel_b[:, 2]
-    error = torch.square(target_height_vel - height_vel)
-    return torch.exp(-sigma * error)
+    return torch.square(base_lin_vel_b[:, 2])
 
 @torch.jit.script
-def base_height_reward(base_pos: torch.Tensor, target_height: float = 0.23, sigma: float = 20.0):
+def ang_vel_xy_l2(base_ang_vel_b: torch.Tensor):
     """
-    Reward for maintaining a specific base height.
+    Penalty for angular velocity on xy axes (roll and pitch).
     """
-    base_height = base_pos[:, 2]
-    error = torch.square(target_height - base_height)
-    return torch.exp(-sigma * error)
+    return torch.sum(torch.square(base_ang_vel_b[:, :2]), dim=1)
 
 @torch.jit.script
-def base_height_threshold_penalty(base_pos: torch.Tensor, min_height: float = 0.1):
+def joint_torques_l2(joint_efforts: torch.Tensor):
     """
-    Penalty for maintaining a base height below a threshold.
-    Returns 1.0 if height <= min_height
+    Penalty for joint torques (L2 norm).
     """
-    base_height = base_pos[:, 2]
-    return torch.where(base_height <= min_height, 1.0, 0.0)
+    return torch.sum(torch.square(joint_efforts), dim=1)
 
 @torch.jit.script
-def feet_contact_reward(contact_forces: torch.Tensor, threshold: float = 1.0):
+def action_rate_l2(actions: torch.Tensor, last_actions: torch.Tensor):
     """
-    Reward 1.0 if any foot is in contact.
+    Penalty for rate of change of actions (L2 norm).
     """
-    forces_norm = torch.norm(contact_forces, dim=-1)
-    in_contact = (forces_norm > threshold).float()
-    return 1.0 * torch.any(in_contact, dim=1).float()
+    return torch.sum(torch.square(actions - last_actions), dim=1)
 
 @torch.jit.script
-def no_motion_penalty(base_lin_vel_b: torch.Tensor, epsilon: float = 0.01):
+def feet_air_time_positive_biped(current_air_time: torch.Tensor, current_contact_time: torch.Tensor, commands: torch.Tensor, threshold: float = 0.4, min_speed_command_threshold: float = 0.1):
     """
-    Penalty for not moving.
-    Returns 1.0 if velocity is below epsilon.
+    Reward long steps taken by the feet for bipeds.
+    Rewards the agent for taking steps up to a specified threshold and also keeping one foot at a time in the air.
     """
-    vel_norm = torch.norm(base_lin_vel_b, dim=1)
-    return torch.where(vel_norm < epsilon, 1.0, 0.0)
-
-@torch.jit.script
-def torque_reward(joint_efforts: torch.Tensor, joint_effort_limits: torch.Tensor, sigma: float = 0.02):
-    """
-    Reward for minimizing torque (Gaussian).
-    Matches MuJoCo BaseReward._torque_penalty implementation (which is actually a reward).
-    """
-    # Normalized torque sum
-    # MuJoCo: np.sum(np.abs(torques) / max_torques) / len(torques)
-    normalized_torques = torch.abs(joint_efforts) / joint_effort_limits
-    mean_normalized_torque = torch.mean(normalized_torques, dim=-1)
-    return torch.exp(-sigma * mean_normalized_torque)
-
-@torch.jit.script
-def action_diff_reward(actions: torch.Tensor, previous_actions: torch.Tensor, sigma: float = 0.02):
-    """
-    Reward for smooth actions (Gaussian).
-    Matches MuJoCo BaseReward._action_diff_penalty implementation.
-    """
-    diff = torch.sum(torch.abs(actions - previous_actions), dim=-1)
-    return torch.exp(-sigma * diff)
-
-@torch.jit.script
-def acceleration_reward(joint_acc: torch.Tensor, sigma: float = 0.01):
-    """
-    Reward for minimizing acceleration (Gaussian).
-    Matches MuJoCo BaseReward._acceleration_penalty implementation.
-    """
-    acc_sum = torch.sum(torch.abs(joint_acc), dim=-1)
-    return torch.exp(-sigma * acc_sum)
-
-@torch.jit.script
-def orientation_penalty(projected_gravity_b: torch.Tensor, sigma: float = 5.0):
-    """
-    Penalty for non-flat base orientation (pitch/roll).
-    """
-    return torch.exp(-sigma * torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1))
-
-@torch.jit.script
-def feet_orientation_penalty(feet_orientations: torch.Tensor, sigma: float = 30.0):
-    """
-    Penalty for feet not being flat and facing forward (identity orientation).
-    feet_orientations: (num_envs, num_feet, 4) (w, x, y, z)
-    """
-    # We want q to be close to (1, 0, 0, 0) or (-1, 0, 0, 0).
-    # Error = 1 - q_w^2 = q_x^2 + q_y^2 + q_z^2
-    # This is approximately theta^2/4 for small angles.
+    # Check if commands are above threshold (speed > min_speed)
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    mask = (cmd_norm > min_speed_command_threshold)
     
-    # Extract x, y, z components
-    q_vec = feet_orientations[..., 1:] # (num_envs, num_feet, 3)
-    error = torch.sum(torch.square(q_vec), dim=-1) # (num_envs, num_feet)
+    in_contact = current_contact_time > 0.0
+    in_mode_time = torch.where(in_contact, current_contact_time, current_air_time)
     
-    # Sum over feet
-    total_error = torch.sum(error, dim=1)
-    return torch.exp(-sigma * total_error)
+    # Check for single stance (exactly one foot in contact)
+    single_stance = torch.sum(in_contact.int(), dim=1) == 1
+    reward = torch.min(torch.where(single_stance.unsqueeze(-1), in_mode_time, torch.zeros_like(in_mode_time)), dim=1)[0]
+    
+    # Clamp to threshold
+    reward = torch.clamp(reward, max=threshold)
+    
+    return reward * mask
 
 @torch.jit.script
-def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma: float = 20.0):
+def feet_air_time(first_contact: torch.Tensor, last_air_time: torch.Tensor, commands: torch.Tensor, min_airtime_threshold: float = 0.5, min_speed_command_threshold: float = 0.05):
+    """
+    Reward for airtime. Directly proportional to airtime when foot makes contact. But only if airtime more than a threshold.
+    Only active if speed command is above a threshold because low speed walking may not require as much foot lift.
+    
+    first_contact: (num_envs, num_feet) bool tensor indicating if foot just contacted
+    last_air_time: (num_envs, num_feet) float tensor with last air time duration
+    """
+    # Check if commands are above threshold (speed > min_speed)
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    mask = (cmd_norm > min_speed_command_threshold)
+    
+    # Calculate reward for each foot that just contacted
+    # Reward is (air_time - threshold)
+    reward = torch.sum((last_air_time - min_airtime_threshold) * first_contact, dim=1)
+    
+    # Apply mask
+    return reward * mask
+
+@torch.jit.script
+def feet_slide(net_forces_w_history: torch.Tensor, body_lin_vel_w: torch.Tensor):
+    """
+    Penalize feet sliding.
+
+    net_forces_w_history: (num_envs, history_len, num_feet, 3)
+    body_lin_vel_w: (num_envs, num_feet, 3)
+    """
+    # Calculate contacts from history
+    # norm(dim=-1) -> [N, T, F]
+    # max(dim=1)[0] -> [N, F]
+    contacts = torch.max(torch.max(torch.norm(net_forces_w_history, dim=-1), dim=1)[0], dim=-1)[0] > 1.0
+    
+    # Calculate velocity norm (xy plane)
+    feet_vel_xy = torch.norm(body_lin_vel_w[:, :, :2], dim=-1)
+    
+    # Sum of velocity * contact
+    return torch.sum(feet_vel_xy * contacts, dim=1)
+
+@torch.jit.script
+def feet_slide_with_vel(feet_contact: torch.Tensor, feet_vel_xy_norm: torch.Tensor):
+    """
+    Penalty for feet sliding (velocity when in contact).
+    feet_contact: (num_envs, num_feet) bool/float
+    feet_vel_xy_norm: (num_envs, num_feet) float of planar velocity norm
+    """
+    return torch.sum(feet_contact * feet_vel_xy_norm, dim=1)
+
+@torch.jit.script
+def undesired_contacts(net_contact_forces: torch.Tensor, threshold: float = 1.0):
+    """
+    Penalty for contacts on undesired bodies (hips, thighs, etc).
+    net_contact_forces: (num_envs, num_bodies) magnitude 
+                        OR (num_envs, num_bodies, 3) vector
+    """
+    # If input is vector (num_envs, num_bodies, 3), take norm
+    if net_contact_forces.dim() == 3:
+        forces = torch.norm(net_contact_forces, dim=-1)
+    else:
+        forces = net_contact_forces
+        
+    # Check if any force exceeds threshold
+    return torch.any(forces > threshold, dim=-1).float()
+
+@torch.jit.script
+def joint_deviation_l1(joint_pos: torch.Tensor, default_joint_pos: torch.Tensor):
+    """
+    Penalty for deviation from default joint positions (L1 norm).
+    """
+    return torch.sum(torch.abs(joint_pos - default_joint_pos), dim=1)
+
+@torch.jit.script
+def flat_orientation_l2(projected_gravity_b: torch.Tensor):
+    """
+    Penalty for non-flat orientation (L2 norm of projected gravity xy).
+    """
+    return torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
+
+@torch.jit.script
+def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma: float = 1.0):
     """
     Reward for keeping torso centered between feet.
     base_pos: (num_envs, 3)
@@ -133,72 +176,65 @@ def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma
     feet_midpoint = torch.mean(feet_pos, dim=1) # (num_envs, 3)
     
     # Compute horizontal distance
-    dist = torch.norm(base_pos[:, :2] - feet_midpoint[:, :2], dim=1)
+    dist_sq = torch.sum(torch.square(base_pos[:, :2] - feet_midpoint[:, :2]), dim=1)
     
-    return torch.exp(-sigma * dist)
+    return torch.exp(-sigma * dist_sq)
 
 @torch.jit.script
-def step_contact_reward(
-    contact_forces: torch.Tensor,
-    feet_pos: torch.Tensor,
-    prev_feet_contact: torch.Tensor,
-    last_step_time: torch.Tensor,
-    current_time: torch.Tensor,
-    contact_threshold: float = 1.0
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def joint_pos_limits(joint_pos: torch.Tensor, limits_min: torch.Tensor, limits_max: torch.Tensor):
     """
-    Computes the step contact reward and updates step timing.
-    Returns:
-        reward: The computed reward.
-        new_last_step_time: Updated last step time tensor.
-        new_prev_feet_contact: Updated previous contact state tensor.
+    Penalize joint positions if they cross the soft limits.
     """
-    # contact_forces: (num_envs, 2, 3)
-    contact_forces_norm = torch.norm(contact_forces, dim=-1)
-    current_contact = contact_forces_norm > contact_threshold
-    
-    # Detect new contacts
-    just_touched = current_contact & ~prev_feet_contact
-    
-    # Check forward condition (assuming index 0 is Right, 1 is Left)
-    # Right foot (0) forward of Left foot (1)
-    right_forward = feet_pos[:, 0, 0] > feet_pos[:, 1, 0]
-    left_forward = feet_pos[:, 1, 0] > feet_pos[:, 0, 0]
-    
-    reward = torch.zeros_like(last_step_time)
-    new_last_step_time = last_step_time.clone()
-    
-    # Right foot step
-    valid_right_step = just_touched[:, 0] & right_forward
-    if torch.any(valid_right_step):
-        reward[valid_right_step] = current_time[valid_right_step] - last_step_time[valid_right_step]
-        new_last_step_time[valid_right_step] = current_time[valid_right_step]
-        
-    # Left foot step
-    valid_left_step = just_touched[:, 1] & left_forward
-    if torch.any(valid_left_step):
-        reward[valid_left_step] = current_time[valid_left_step] - last_step_time[valid_left_step]
-        new_last_step_time[valid_left_step] = current_time[valid_left_step]
-        
-    return reward, new_last_step_time, current_contact
+    # compute out of limits constraints
+    out_of_limits = -(joint_pos - limits_min).clip(max=0.0)
+    out_of_limits += (joint_pos - limits_max).clip(min=0.0)
+    return torch.sum(out_of_limits, dim=1)
 
 @torch.jit.script
-def yaw_orientation_penalty(base_quat: torch.Tensor, sigma: float = 5.0):
+def step_length(touchdown: torch.Tensor, stride_length: torch.Tensor, commands: torch.Tensor, min_speed_command_threshold: float = 0.05):
     """
-    Penalty for non-zero yaw orientation.
+    Reward for step length on touchdown.
+    touchdown: (num_envs, num_feet) bool
+    stride_length: (num_envs, num_feet) float
     """
-    # Extract yaw from quaternion
-    # q = [w, x, y, z]
-    w, x, y, z = base_quat.unbind(-1)
-    # yaw = atan2(2(wz + xy), 1 - 2(y^2 + z^2))
-    yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
-    return torch.exp(-sigma * torch.square(yaw))
+    # Mask by command speed
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    mask = (cmd_norm > min_speed_command_threshold)
+    
+    # Reward stride length at the moment of touchdown
+    reward = torch.sum(torch.square(stride_length) * touchdown.float(), dim=1)
+    
+    return reward * mask
 
 @torch.jit.script
-def termination_penalty(terminated: torch.Tensor):
+def knee_bend_on_touchdown(
+    touchdown: torch.Tensor,
+    max_knee_bend: torch.Tensor,
+    min_bend: float = 0.1,
+    max_bend: float = 1.0,
+):
     """
-    Penalty for termination (e.g. falling).
-    Returns 1.0 if terminated.
-    """
-    return terminated.float()
+    Reward knee bend during swing when the foot touches down.
 
+    touchdown: (num_envs, num_feet) bool
+    max_knee_bend: (num_envs, num_feet) float, max |knee_pos - default| during swing
+    """
+    bend = torch.clamp(max_knee_bend - min_bend, min=0.0)
+    bend = torch.clamp(bend, max=max_bend - min_bend)
+    return torch.sum(bend * touchdown.float(), dim=1)
+
+@torch.jit.script
+def track_joint_pos_exp(joint_pos: torch.Tensor, ref_joint_pos: torch.Tensor, std: float = 0.5):
+    """
+    Reward for tracking reference joint positions using exponential kernel.
+    """
+    error = torch.sum(torch.square(joint_pos - ref_joint_pos), dim=1)
+    return torch.exp(-error / (std**2))
+
+@torch.jit.script
+def track_joint_vel_exp(joint_vel: torch.Tensor, ref_joint_vel: torch.Tensor, std: float = 1.0):
+    """
+    Reward for tracking reference joint velocities using exponential kernel.
+    """
+    error = torch.sum(torch.square(joint_vel - ref_joint_vel), dim=1)
+    return torch.exp(-error / (std**2))
