@@ -16,7 +16,7 @@ from isaaclab.terrains import TerrainImporter
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from .biped_env_cfg import BipedEnvCfg
-from .rewards import rewards_v3 as rewards
+from . import rewards
 from .mdp.commands import UniformVelocityCommand
 from utils.motion_reference import MotionReference, MotionReferenceConfig
 
