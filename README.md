@@ -316,6 +316,44 @@ checkpoints/
 
 ---
 
+## Hardware & Custom PCB
+
+The latest version of the robot introduces a fully redesigned hardware stack:
+- New smart servos with position + velocity feedback 
+- Fully 3D-printed structure  
+- Custom power distribution PCB for stable and modular wiring
+
+<p align="center">
+  <img src="media/robot_v2.jpg" alt="BipedRobot V2 hardware" height="360"/>
+  &nbsp;&nbsp;&nbsp;
+  <img src="media/pcb.jpg" alt="Custom power distribution PCB" height="260"/>
+</p>
+
+<p align="center">
+  <em>Left: new robot hardware (V2). Right: custom power distribution PCB.</em>
+</p>
+
+The PCB was fabricated and assembled with support from <a href="https://www.pcbway.com/">PCB Way</a>.
+
+Their service made it possible to go from design to assembled board quickly, which significantly accelerated hardware iteration for this project.  
+They provide PCB prototyping, assembly, and component sourcing.
+
+🔗 https://www.pcbway.com/
+
+---
+
+## Acknowledgements
+
+<p align="center">
+  <img src="media/pcbway.png" alt="PCBWay logo" height="40"/>
+</p>
+
+Hardware development for this project was partially supported by <a href="https://www.pcbway.com/">PCB Way</a> (PCB fabrication and assembly).
+
+All design decisions and evaluations remain fully independent.
+
+---
+
 ## License
 
 [MIT](LICENSE.txt)
