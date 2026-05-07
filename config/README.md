@@ -10,7 +10,7 @@ Core training settings.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `model` | string | `"sac"` | Algorithm: `sac` `fast_sac` `ddpg` `d4pg` `mpo` `ppo` |
+| `model` | string | `"sac"` | Algorithm: `sac` `ddpg` `d4pg` `mpo` `ppo` |
 | `seed` | int | `42` | Global random seed |
 | `steps` | float | `3e7` | Total environment steps |
 | `max_episode_steps` | int | `1000` | Episode length before forced reset |

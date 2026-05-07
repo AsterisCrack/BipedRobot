@@ -1,9 +1,9 @@
 import numpy as np
 from utils import Config, NoConfig
-from algorithms.mpo.model import MPO
-from algorithms.ddpg.model import DDPG
-from algorithms.sac.model import SAC
-from algorithms.d4pg.model import D4PG
+from torch_rl_algorithms.algorithms.mpo.model import MPO
+from torch_rl_algorithms.algorithms.ddpg.model import DDPG
+from torch_rl_algorithms.algorithms.sac.model import SAC
+from torch_rl_algorithms.algorithms.d4pg.model import D4PG
 from envs.distributed import distribute
 from envs.mujoco_env import MujocoEnv
 import os
