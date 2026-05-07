@@ -22,7 +22,7 @@ Everything was written from scratch: the RL algorithms, the neural network backb
 
 | | |
 |--|--|
-| **RL algorithms** | PPO, SAC, FastSAC, DDPG, D4PG, MPO |
+| **RL algorithms** | PPO, SAC, DDPG, D4PG, MPO |
 | **Architectures** | MLP, CNN, LSTM, Causal Transformer - swappable via config |
 | **Simulation** | Isaac Lab (primary) + MuJoCo (secondary, identical interface) |
 | **Observations** | 48-dim proprioceptive, asymmetric actor-critic with privileged critic obs |

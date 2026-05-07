@@ -14,3 +14,4 @@ mujoco-3.2.2-windows-x86_64
 MUJOCO_LOG.TXT
 tutorials
 logs/
+*README.pdf

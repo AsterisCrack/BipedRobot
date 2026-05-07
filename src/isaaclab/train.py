@@ -240,8 +240,6 @@ def train():
     model_type = config.train.model
     if model_type == ModelType.SAC:
         ModelClass = SAC
-    elif model_type == ModelType.FastSAC:
-        ModelClass = FastSAC
     elif model_type == ModelType.DDPG:
         ModelClass = DDPG
     elif model_type == ModelType.D4PG:
