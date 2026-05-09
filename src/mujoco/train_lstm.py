@@ -2,7 +2,7 @@ import argparse
 import numpy as np
 import torch
 from utils import Config
-from algorithms.mpo.model import MPO
+from torch_rl_algorithms.algorithms.mpo.model import MPO
 from config.schema import NetworkConfig, NetworkType
 from envs.distributed import distribute
 from src.mujoco.train import EnvBuilder

@@ -34,11 +34,11 @@ if args_cli.video:
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-from algorithms.sac.model import SAC
-from algorithms.ddpg.model import DDPG
-from algorithms.d4pg.model import D4PG
-from algorithms.mpo.model import MPO
-from algorithms.ppo.model import PPO
+from torch_rl_algorithms.algorithms.sac.model import SAC
+from torch_rl_algorithms.algorithms.ddpg.model import DDPG
+from torch_rl_algorithms.algorithms.d4pg.model import D4PG
+from torch_rl_algorithms.algorithms.mpo.model import MPO
+from torch_rl_algorithms.algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
 from src.isaaclab.common import BaseIsaacLabWrapper
