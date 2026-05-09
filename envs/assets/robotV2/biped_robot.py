@@ -56,20 +56,20 @@ BIPED_ROBOT_CFG = ArticulationCfg(
         )
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.5957), # Offset due to root offset in URDF
+        pos=(0.0, 0.0, 0.29), # Offset due to root offset in URDF
         joint_pos={
-            "left_hip_yaw": 0.0,
-            "right_hip_yaw": 0.0,
-            "left_hip_roll": 0.0,
-            "right_hip_roll": 0.0,
-            "left_hip_pitch": 0.0,
-            "right_hip_pitch": 0.0,
-            "left_knee": 0.0,
-            "right_knee": 0.0,
-            "left_ankle_roll": 0.0,
-            "right_ankle_roll": 0.0,
-            "left_ankle_pitch": 0.0,
-            "right_ankle_pitch": 0.0,
+            "l_hip_yaw.*": 0.0,
+            "r_hip_yaw.*": 0.0,
+            "l_hip_roll.*": 0.0,
+            "r_hip_roll.*": 0.0,
+            "l_hip_pitch.*": 0.0,
+            "r_hip_pitch.*": 0.0,
+            "l_knee.*": 0.0,
+            "r_knee.*": 0.0,
+            "l_ankle_roll.*": 0.0,
+            "r_ankle_roll.*": 0.0,
+            "l_ankle_pitch.*": 0.0,
+            "r_ankle_pitch.*": 0.0,
         },
         joint_vel={".*": 0.0},
     ),
@@ -77,12 +77,12 @@ BIPED_ROBOT_CFG = ArticulationCfg(
     actuators={
         "legs": ImplicitActuatorCfg(
             joint_names_expr=[".*"],
-            stiffness=35,
-            damping=3,
+            stiffness=80,
+            damping=8,
             armature=0.04,
             friction=0.2,
-            effort_limit=2.8,
-            velocity_limit=4.7,
+            effort_limit=3.0,
+            velocity_limit=5.0,
         ),
-    },
+    }
 )

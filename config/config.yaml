@@ -50,13 +50,13 @@ train:
       track_joint_vel_exp: 0.5
 
     # Animation (imitation)
-    animation:
-      npz_path: "animation_utils/processed/StandardWalk.npz"
-      loop: true
-      random_start: true
-      speed: 1.0
-      pos_std: 0.5
-      vel_std: 1.0
+    # animation:
+    #   npz_path: "animation_utils/processed/StandardWalk.npz"
+    #   loop: true
+    #   random_start: true
+    #   speed: 1.0
+    #   pos_std: 0.5
+    #   vel_std: 1.0
       
     # Commands
     commands:

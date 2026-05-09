@@ -332,10 +332,24 @@ class BipedRobotV2EnvCfg(BipedEnvCfg):
 
     # robot-specific mappings
     joint_limits = JOINT_LIMITS_V2
-    right_foot_body_name = "right_foot_link_1"
-    left_foot_body_name = "left_foot_link_1"
-    base_body_name = "base_link"
-    hip_joint_names = ["left_hip_roll", "right_hip_roll", "left_hip_pitch", "right_hip_pitch"]
-    ankle_roll_joint_names = ["left_ankle_roll", "right_ankle_roll"]
-    knee_joint_names = ["left_knee", "right_knee"]
+    right_foot_body_name = "(r|right)_foot_link(_\d+)?"
+    left_foot_body_name  = "(l|left)_foot_link(_\d+)?"
+    base_body_name       = "base_link"
+
+    hip_joint_names = [
+        "(l|left)_hip_roll.*",
+        "(r|right)_hip_roll.*",
+        "(l|left)_hip_pitch.*",
+        "(r|right)_hip_pitch.*",
+    ]
+
+    ankle_roll_joint_names = [
+        "(l|left)_ankle_roll.*",
+        "(r|right)_ankle_roll.*",
+    ]
+
+    knee_joint_names = [
+        "(l|left)_knee.*",
+        "(r|right)_knee.*",
+    ]
 
