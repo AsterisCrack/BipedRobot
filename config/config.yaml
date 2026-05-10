@@ -5,17 +5,17 @@ train:
   workers_per_group: 1
   use_history: False
   history_size: 0
-  normalize_obs: False
+  normalize_obs: True
   symmetry_augmentation: False
   actor_obs: "normal"
-  critic_obs: "normal"
+  critic_obs: "privileged"
   use_rough_terrain: false
   log_dir: "runs"
   checkpoint_path: "checkpoints/"
-  # model_name: "complete_model"
+  model_name: "BipedV2_SAC"
   overwrite_model: true
-  model: "d4pg" # Options: sac, ddpg, d4pg, mpo
-  
+  model: "sac"
+
   test_environment: False
   epoch_steps: 1000
   save_steps: 3000
@@ -25,53 +25,52 @@ train:
 
   env_config:
     reward_scale: 1.0
-    # Rewards
     reward_weights:
+      # Primary locomotion
       track_lin_vel_xy_exp: 2.0
-      track_ang_vel_z_exp: 1.0
-      termination_penalty: -10.0
-      lin_vel_z_l2: -0.05
-      ang_vel_xy_l2: -0.05
-      flat_orientation_l2: -2.0
-      action_rate_l2: -0.0002
-      dof_torques_l2: -0.0002
-      dof_acc_l2: -0.000001
-      dof_pos_limits: -1.0
-      feet_air_time: 1.0
-      feet_slide: -0.5
-      undesired_contacts: -1.0
-      joint_deviation_hip: -0.2
-      joint_deviation_ankle_roll: -0.2
-      step_length: 10.0
-      # swing_foot_height: 1.0
-      torso_centering: 0.1
-      knee_bend_touchdown: 0
-      track_joint_pos_exp: 1.0
-      track_joint_vel_exp: 0.5
+      track_ang_vel_z_exp: 0.5
 
-    # Animation (imitation)
-    # animation:
-    #   npz_path: "animation_utils/processed/StandardWalk.npz"
-    #   loop: true
-    #   random_start: true
-    #   speed: 1.0
-    #   pos_std: 0.5
-    #   vel_std: 1.0
-      
-    # Commands
+      # Stability
+      termination_penalty: -5.0
+      flat_orientation_l2: -1.5        # Stronger: penalize excessive forward lean
+      lin_vel_z_l2: -0.1
+      ang_vel_xy_l2: -0.15             # Stronger: dampen pitch/roll oscillations
+
+      # Smoothness — restored to mild values (was too strong at -0.005)
+      action_rate_l2: -0.001           # Mild: don't penalize exploratory motion
+      dof_torques_l2: -0.0001
+
+      dof_pos_limits: -1.0
+
+      # Gait shaping
+      feet_air_time: 2.0               # Primary stepping signal
+      swing_foot_height: 0.15          # Reduced: discourage exaggerated high steps
+      feet_slide: -0.3
+      step_length: 0.15                # Reduced: prevent reward-hacked long strides
+      knee_bend_touchdown: 0.2
+
+      # Contact
+      undesired_contacts: -0.5
+      joint_deviation_hip: 0.0         # Disabled: hip_pitch is in this group for V2 and is REQUIRED for walking
+      joint_deviation_ankle_roll: -0.05
+      torso_centering: 0.05
+
+      # Reference tracking (no motion reference loaded)
+      track_joint_pos_exp: 0.0
+      track_joint_vel_exp: 0.0
+
     commands:
       base_velocity:
-        resampling_time_range: [10.0, 10.0]
-        heading_control_stiffness: 0.3
+        resampling_time_range: [8.0, 12.0]
+        heading_control_stiffness: 0.5
         rel_standing_envs: 0.02
         rel_heading_envs: 1.0
         ranges:
-          lin_vel_x: [0.3, 0.5]
-          lin_vel_y: [0.0, 0.0]
+          lin_vel_x: [-0.3, 0.5]       # Include backward motion
+          lin_vel_y: [-0.3, 0.3]       # Full lateral range
           ang_vel_z: [-0.3, 0.3]
           heading: [-3.14159, 3.14159]
 
-    # Noise
     observation_noise_model:
       mean: 0.0
       std: 0.01
@@ -80,57 +79,31 @@ train:
       std: 0.00
 
 model:
-  # Network configuration
   actor_config:
-    network_type: mlp # Options: mlp, cnn, lstm, transformer
-    # d_model: 128
-    # nhead: 4
-    # num_layers: 2
-    # dim_feedforward: 256
-    # hidden_sizes: [512,256,128]
-    hidden_sizes: [256, 128,128]
-    
+    network_type: mlp
+    hidden_sizes: [512, 256, 128]
   critic_config:
-    network_type: mlp # Options: mlp, cnn, lstm, transformer
-    # d_model: 128
-    # nhead: 4
-    # num_layers: 2
-    # dim_feedforward: 256
-    # hidden_sizes: [512,256,128]
-    hidden_sizes: [256, 128,128]
+    network_type: mlp
+    hidden_sizes: [512, 256, 128]
 
-  # Training params
   target_coeff: 0.005
-  actor_lr: 1e-3
-  critic_lr: 1e-3
+  actor_lr: 3.0e-4
+  critic_lr: 3.0e-4
   lr_scheduler:
-    scheduler_type: "none" # Options: cosine, plateau, none
-    # Cosine args
-    T_max: 5e5
-    eta_min: 1.0e-5
-    # Plateau args
-    mode: "min"
-    factor: 0.5
-    patience: 2000
-    threshold: 1e-4
-    threshold_mode: "rel"
-    cooldown: 0
-    min_lr: 1e-6
-    eps: 1e-8
-    start_step: 15000000
+    scheduler_type: "none"
 
 exploration:
   scale: 0.3
-  min_scale: 0.03
-  decay_rate: 5.0e-8
-  start_steps: 4096 # Should match buffer.steps_before_batches if possible
+  min_scale: 0.05
+  decay_rate: 1.0e-7
+  start_steps: 4096
 
 buffer:
   size: 1000000
-  return_steps: 3
-  batch_iterations: 10 # Match replay ratio of ~0.4 (100 updates / 256 transitions)
+  return_steps: 5
+  batch_iterations: 10
   batch_size: 2048
   discount_factor: 0.99
-  steps_before_batches: 4096 # Start training after 1 step
-  steps_between_batches: 4 # Update every step
+  steps_before_batches: 4096
+  steps_between_batches: 4
   seed: 42

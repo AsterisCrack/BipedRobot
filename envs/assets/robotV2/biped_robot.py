@@ -16,19 +16,22 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 USD_PATH = os.path.join(CURRENT_DIR, "robot.usd")
 
 # Joint limits in degrees [min, max]
+# Tuned for ~30cm biped: maps the full [-1,1] action range to physically useful positions.
+# Using tight limits ensures the dof_pos_limits penalty is effective and the policy
+# does not waste capacity on unreachable regions outside the physical URDF limits.
 _JOINT_LIMITS_DEG = [
-    [-180, 180],  # left_hip_yaw
-    [-180, 180],  # right_hip_yaw
-    [-180, 180],  # left_hip_roll
-    [-180, 180],  # right_hip_roll
-    [-180, 180],  # left_hip_pitch
-    [-180, 180],  # right_hip_pitch
-    [-180, 180],  # left_knee
-    [-180, 180],  # right_knee
-    [-180, 180],  # left_ankle_roll
-    [-180, 180],  # right_ankle_roll
-    [-180, 180],  # left_ankle_pitch
-    [-180, 180],  # right_ankle_pitch
+    [-45, 45],  # left_hip_yaw   - rotation about vertical axis (turning)
+    [-45, 45],  # right_hip_yaw
+    [-25, 45],  # left_hip_roll  - lateral lean / frontal-plane balance
+    [-25, 45],  # right_hip_roll
+    [-90, 30],  # left_hip_pitch - forward/backward leg swing
+    [-90, 30],  # right_hip_pitch
+    [-120, 5],  # left_knee      - bends in one direction only (0 = straight)
+    [-120, 5],  # right_knee
+    [-60, 60],  # left_ankle_roll  - lateral foot tilt
+    [-60, 60],  # right_ankle_roll
+    [-35, 50],  # left_ankle_pitch - dorsi/plantarflexion
+    [-35, 50],  # right_ankle_pitch
 ]
 
 # Convert to radians

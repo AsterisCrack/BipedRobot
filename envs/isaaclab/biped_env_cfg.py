@@ -232,8 +232,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
             func="isaaclab.envs.mdp:reset_joints_by_scale",
             mode="reset",
             params={
-                "position_range": (-0.01, 0.01),
-                "velocity_range": (-0.01, 0.01),
+                "position_range": (-0.1, 0.1),  # wider init range (was ±0.01) for recovery curriculum
+                "velocity_range": (-0.1, 0.1),
             },
         ),
         # Random perturbations (push)
@@ -241,7 +241,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
             interval_range_s=(10.0, 15.0),
-            params={"velocity_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05)}},
+            params={"velocity_range": {"x": (-0.3, 0.3), "y": (-0.2, 0.2)}},  # stronger push (was ±0.05)
         ),
         # Physics Randomization
         "randomize_mass": EventTerm(
@@ -337,10 +337,11 @@ class BipedRobotV2EnvCfg(BipedEnvCfg):
     base_body_name       = "base_link"
 
     hip_joint_names = [
+        "(l|left)_hip_yaw.*",
+        "(r|right)_hip_yaw.*",
         "(l|left)_hip_roll.*",
         "(r|right)_hip_roll.*",
-        "(l|left)_hip_pitch.*",
-        "(r|right)_hip_pitch.*",
+        # hip_pitch deliberately excluded: it swings the leg forward/backward and is required for walking
     ]
 
     ankle_roll_joint_names = [

@@ -283,27 +283,25 @@ class BipedEnv(DirectRLEnv):
             self.previous_actions,
         ], dim=-1)
         
-        # Privileged observations (Standard Critic)
-        feet_contact_forces = self.contact_sensor.data.force_matrix_w_history[:, :, self._feet_ids]
-        
-        # feet_contact_forces shape: [N, History, Feet, SensorDat, 3]
-        # We process this to a single scalar [N] representing max contact force intensity
-        
-        # 1. Norm of the 3D force vector -> [N, H, F, S]
-        contact_norm = torch.norm(feet_contact_forces, dim=-1)
-        
-        # 2. Max over sensor points (S) -> [N, H, F]
-        max_over_sensors = torch.max(contact_norm, dim=-1)[0]
-        
-        # 3. Max over feet (F) -> [N, H]
-        max_over_feet = torch.max(max_over_sensors, dim=-1)[0]
-        
-        # 4. Max over history (H) -> [N]
-        forces = torch.max(max_over_feet, dim=-1)[0]
-        
+        # Privileged observations (Standard Critic) — 10 dims total
+        # These are unavailable on a real robot but help the value function learn faster.
+        # [base_lin_vel_b (3)] [height (1)] [feet_contact_forces_flat (6)]
+
+        # Ground-truth body-frame linear velocity — not in policy obs (which uses IMU accel)
+        priv_lin_vel = self.base_lin_vel_b  # [N, 3]
+
+        # Height above ground
+        priv_height = self.robot.data.root_pos_w[:, 2:3]  # [N, 1]
+
+        # Net contact force at each foot, flattened — [N, 2, 3] → [N, 6]
+        feet_net_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]  # [N, 2, 3]
+        priv_feet_forces = feet_net_forces.reshape(self.num_envs, -1)  # [N, 6]
+
         obs_priv = torch.cat([
-            forces.unsqueeze(-1),
-        ], dim=-1)
+            priv_lin_vel,
+            priv_height,
+            priv_feet_forces,
+        ], dim=-1)  # [N, 10]
 
         # Construct Policy Observations
         if self.cfg.policy_has_privileged_info:
@@ -362,7 +360,7 @@ class BipedEnv(DirectRLEnv):
         
         # Calculate stride length: distance from liftoff to current (touchdown) pos
         # We calculate it for all (vectorized), but only use it where touchdown is True
-        stride_dist = torch.norm(feet_pos - self.feet_pos_liftoff, dim=-1)
+        stride_dist = torch.clamp(torch.norm(feet_pos - self.feet_pos_liftoff, dim=-1), max=0.15)
         
         # Update prev contact
         self.feet_in_contact_prev[:] = feet_in_contact
@@ -375,10 +373,10 @@ class BipedEnv(DirectRLEnv):
         self.knee_bend_max = torch.where(knee_airborne, torch.maximum(self.knee_bend_max, knee_bend), self.knee_bend_max)
 
         # 1. track_lin_vel_xy_exp (w=2.0)
-        r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp(self.commands, self.base_lin_vel_b, std=0.25)
+        r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp(self.commands, self.base_lin_vel_b, std=0.15)
         
         # 2. track_ang_vel_z_exp (w=1.0)
-        r_track_ang_vel_z = rewards.track_ang_vel_z_exp(self.commands, self.base_ang_vel_b, std=0.25)
+        r_track_ang_vel_z = rewards.track_ang_vel_z_exp(self.commands, self.base_ang_vel_b, std=0.15)
         
         # 3. termination_penalty (w=-10.0)
         limit_angle = 0.78 # From TerminationsCfg
@@ -447,7 +445,7 @@ class BipedEnv(DirectRLEnv):
         r_step_length = rewards.step_length(touchdown, stride_dist, self.commands, min_speed_command_threshold=0.1)
 
         # 17. swing_foot_height (w=0.0 default)
-        r_swing_foot_height = rewards.swing_foot_height(feet_pos, feet_in_contact, min_height=0.05, max_height=0.15)
+        r_swing_foot_height = rewards.swing_foot_height(feet_pos, feet_in_contact, min_height=0.02, max_height=0.06)
         
         # 18: Torso centering
         r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
@@ -558,12 +556,15 @@ class BipedEnv(DirectRLEnv):
             episodic_sum_avg = torch.mean(self.episode_sums[key][env_ids])
             extras["Reward_Terms/" + key] = episodic_sum_avg / (self.max_episode_length * self.step_dt)
 
+        # Reset episode sums for all reset environments
+        for key in self.episode_sums.keys():
+            self.episode_sums[key][env_ids] = 0.0
+
         if self.motion_time is not None:
             if self.cfg.animation_random_start:
                 self._randomize_motion_time(env_ids)
             else:
                 self.motion_time[env_ids] = 0.0
-            self.episode_sums[key][env_ids] = 0.0
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
         extras_term = dict()
