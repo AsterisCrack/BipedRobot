@@ -36,7 +36,7 @@ simulation_app = app_launcher.app
 from envs.isaaclab.biped_env import BipedEnv
 from envs.isaaclab.biped_env_cfg import BipedEnvCfg as BipedRobotEnvCfg
 from envs.isaaclab.biped_env_cfg import BipedRobotV2EnvCfg
-from envs.isaaclab.mdp.symmetry import compute_symmetric_states, _switch_biped_joints_left_right, _transform_actions_left_right
+from envs.isaaclab.mdp.symmetry import compute_symmetric_states
 import isaaclab.utils.math as math_utils
 
 if args_cli.task == "BipedRobot":
@@ -58,7 +58,7 @@ class SymmetryTestEnv(BipedEnv):
             
             # Compute Symmetric actions for Robot 1 (Symmetry(act_0))
             # returns batch of same size as input
-            act_1_sym = _transform_actions_left_right(act_0)
+            act_1_sym = self.mirror_action(act_0)
             
             # Set actions for env 1
             actions[1] = act_1_sym[0]
@@ -239,11 +239,10 @@ def main():
         obs_1 = obs_policy[1].cpu()
 
         # 2. Compute Symmetric of Robot 0
-        # We wrap in dict as expected by compute_symmetric_states
-        obs_dict_0 = {"policy": obs_policy[0:1]} 
-        # Returns [Original(0), Symmetric(0)]
+        obs_dict_0 = {"policy": obs_policy[0:1]}
+        # Returns mirrored obs with same batch size as input
         obs_aug_dict, _ = compute_symmetric_states(env, obs=obs_dict_0)
-        obs_0_sym = obs_aug_dict["policy"][1].cpu()
+        obs_0_sym = obs_aug_dict["policy"][0].cpu()
 
         # 3. Calculate Differences
         diff = torch.abs(obs_0_sym - obs_1)

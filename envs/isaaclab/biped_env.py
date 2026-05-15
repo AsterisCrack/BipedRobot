@@ -9,8 +9,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors import ContactSensor, Imu
-from isaaclab.sim import SimulationContext
-from isaaclab.utils.math import quat_apply_inverse, wrap_to_pi, quat_apply, quat_from_euler_xyz
 from isaaclab.envs.mdp import randomize_rigid_body_mass, randomize_rigid_body_material, push_by_setting_velocity, reset_joints_by_offset, reset_root_state_uniform
 from isaaclab.terrains import TerrainImporter
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -30,8 +28,9 @@ class BipedEnv(DirectRLEnv):
             logging.getLogger().setLevel(getattr(logging, cfg.logging_level.upper()))
 
         # Calculate Observation Dimensions
-        # Proprio: 3+3+3+3+12+12+12 = 48
-        self.obs_proprio_dim = 48
+        # Proprio: 3+3+3+3+12+12+12+2 = 50
+        # (+2 gait phase clock)
+        self.obs_proprio_dim = 50
         # Privileged: 3 (lin_vel_w) + 1 (height) + 6 (contacts: 2 feet * 3 forces) = 10
         self.obs_priv_dim = 10
         
@@ -43,10 +42,10 @@ class BipedEnv(DirectRLEnv):
         if cfg.critic_has_privileged_info:
             self.num_obs_critic += self.obs_priv_dim
             
-        # Apply history
+        # History stacking for policy only (critic has privileged ground-truth, no history needed)
         if cfg.history_size > 0 and cfg.use_history:
             self.num_obs_policy *= cfg.history_size
-            self.num_obs_critic *= cfg.history_size
+            # num_obs_critic stays at proprio+priv dim — no multiplication
             
         # Update config dimensions
         cfg.observation_space_dim["policy"] = self.num_obs_policy
@@ -88,6 +87,20 @@ class BipedEnv(DirectRLEnv):
         self.previous_previous_actions = torch.zeros(self.num_envs, self.num_actions, device=self.device)
         self.joint_efforts = torch.zeros(self.num_envs, self.num_joints, device=self.device)
         self.targets = torch.zeros(self.num_envs, self.num_joints, device=self.device)
+
+        # Gait phase clock: scalar phase per env, advanced proportional to commanded speed
+        self.gait_phase = torch.zeros(self.num_envs, device=self.device)
+        self.gait_clock_freq = getattr(cfg, 'gait_clock_base_freq', 1.5)
+
+        # Action smoothing filter (EMA): target = α*raw + (1-α)*prev
+        self.filtered_targets = torch.zeros(self.num_envs, self.num_joints, device=self.device)
+        self.action_filter_alpha = getattr(cfg, 'action_filter_alpha', 1.0)
+
+        # Actuator delay buffer: stores last max_delay+1 raw targets per env
+        delay_range = getattr(cfg, 'action_delay_steps_range', [0, 0])
+        self.max_action_delay = int(delay_range[1])
+        self.action_delay_buffer = torch.zeros(self.num_envs, self.max_action_delay + 1, self.num_joints, device=self.device)
+        self.action_delay = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
         
         # Commands
         self.command_generator = UniformVelocityCommand(self.cfg, self.num_envs, self.device, self.step_dt)
@@ -112,8 +125,8 @@ class BipedEnv(DirectRLEnv):
         
         # History
         self.history_size = self.cfg.history_size if self.cfg.use_history else 0
-        self.policy_history_buf = torch.zeros(self.num_envs, self.history_size, self.num_obs_policy // self.history_size, device=self.device) if self.history_size > 0 else None
-        self.critic_history_buf = torch.zeros(self.num_envs, self.history_size, self.num_obs_critic // self.history_size, device=self.device) if self.history_size > 0 else None
+        single_step_dim = self.num_obs_policy // self.history_size if self.history_size > 0 else self.num_obs_policy
+        self.policy_history_buf = torch.zeros(self.num_envs, self.history_size, single_step_dim, device=self.device) if self.history_size > 0 else None
         
         # Track last foot contact for alternating gait reward
         # 0: Right, 1: Left. Initialize to 1 so Right foot (0) can start.
@@ -123,6 +136,15 @@ class BipedEnv(DirectRLEnv):
         self.feet_pos_liftoff = torch.zeros(self.num_envs, 2, 3, device=self.device) # 2 feet
         self.feet_in_contact_prev = torch.zeros(self.num_envs, 2, dtype=torch.bool, device=self.device)
         self.knee_bend_max = torch.zeros(self.num_envs, 2, device=self.device)
+
+        # Pre-compute mirror transform tensors for symmetry augmentation
+        self._build_mirror_transform()
+
+        # Terrain curriculum notification: rolling window of episode lengths (in seconds).
+        # Fires a one-time log message when mean exceeds the configured threshold.
+        self._ep_len_window: list[float] = []
+        self._ep_len_window_size = 500        # ~500 episodes across all envs
+        self._curriculum_notified = False
 
         # Randomization
         self.push_interval_steps = int(self.cfg.push_interval_s / self.step_dt)
@@ -223,19 +245,32 @@ class BipedEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.actions = actions.clone()
-        
+
         # --- Command Updates ---
-        # Delegate to Command Generator
         self.command_generator.compute(self.base_quat)
 
-        
-        # Map actions in [-1, 1] to joint limits (same as v1)
+        # Map actions in [-1, 1] to joint position targets
         self.actions = torch.clamp(self.actions, -1.0, 1.0)
         normalized_action_01 = (self.actions + 1.0) * 0.5
-        self.targets = self.joint_limits_min + normalized_action_01 * self.joint_range
+        raw_targets = self.joint_limits_min + normalized_action_01 * self.joint_range
+
+        # Actuator delay simulation: push new target into buffer, read delayed target
+        if self.max_action_delay > 0:
+            self.action_delay_buffer = torch.roll(self.action_delay_buffer, shifts=1, dims=1)
+            self.action_delay_buffer[:, 0] = raw_targets
+            self.targets = self.action_delay_buffer[
+                torch.arange(self.num_envs, device=self.device), self.action_delay
+            ]
+        else:
+            self.targets = raw_targets
 
     def _apply_action(self):
-        self.robot.set_joint_position_target(self.targets)
+        # Action smoothing filter: EMA on PD position targets
+        self.filtered_targets = (
+            self.action_filter_alpha * self.targets
+            + (1.0 - self.action_filter_alpha) * self.filtered_targets
+        )
+        self.robot.set_joint_position_target(self.filtered_targets)
 
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         obs, rew, terminated, truncated, info = super().step(actions)
@@ -270,9 +305,14 @@ class BipedEnv(DirectRLEnv):
         self.joint_vel = self.robot.data.joint_vel
         self.joint_efforts = self.robot.data.applied_torque
         
-        # Proprioceptive observations (Standard Policy)
-        # 3 (lin acc) + 3 (ang vel) + 3 (gravity) + 3 (commands) + 12 (joint pos) + 12 (joint vel) + 12 (prev_action) = 48
-        # Removed scaling to match MuJoCo
+        # Gait phase clock: advance proportional to commanded XY speed
+        v_cmd_norm = torch.norm(self.commands[:, :2], dim=1)
+        self.gait_phase = (
+            self.gait_phase + self.step_dt * 2.0 * math.pi * self.gait_clock_freq * v_cmd_norm
+        ) % (2.0 * math.pi)
+        phase_obs = torch.stack([torch.sin(self.gait_phase), torch.cos(self.gait_phase)], dim=-1)
+
+        # Proprioceptive observations (48 base + 2 phase = 50)
         obs_proprio = torch.cat([
             self.imu_lin_acc_b,
             self.imu_ang_vel_b,
@@ -281,6 +321,7 @@ class BipedEnv(DirectRLEnv):
             (self.joint_pos - self.default_joint_pos),
             self.joint_vel,
             self.previous_actions,
+            phase_obs,
         ], dim=-1)
         
         # Privileged observations (Standard Critic) — 10 dims total
@@ -325,11 +366,6 @@ class BipedEnv(DirectRLEnv):
             self.policy_history_buf[:, -1] = obs_policy
             obs_policy = self.policy_history_buf.view(self.num_envs, -1)
             
-            # Critic History
-            self.critic_history_buf = torch.roll(self.critic_history_buf, shifts=-1, dims=1)
-            self.critic_history_buf[:, -1] = obs_critic
-            obs_critic = self.critic_history_buf.view(self.num_envs, -1)
-
         return {"policy": obs_policy, "critic": obs_critic}
 
     def _get_rewards(self) -> torch.Tensor:
@@ -584,9 +620,21 @@ class BipedEnv(DirectRLEnv):
         self.commands[env_ids] = 0.0
         if self.policy_history_buf is not None:
             self.policy_history_buf[env_ids] = 0.0
-        if self.critic_history_buf is not None:
-            self.critic_history_buf[env_ids] = 0.0
         self.knee_bend_max[env_ids] = 0.0
+
+        # Reset gait phase to random uniform [0, 2π]
+        self.gait_phase[env_ids] = torch.rand(len(env_ids), device=self.device) * 2.0 * math.pi
+
+        # Reset action filter to current joint positions to avoid a large transient
+        self.filtered_targets[env_ids] = self.robot.data.joint_pos[env_ids]
+
+        # Reset delay buffer and sample new per-env delay
+        self.action_delay_buffer[env_ids] = 0.0
+        if self.max_action_delay > 0:
+            delay_range = getattr(self.cfg, 'action_delay_steps_range', [0, 0])
+            self.action_delay[env_ids] = torch.randint(
+                delay_range[0], delay_range[1] + 1, (len(env_ids),), device=self.device
+            )
         
         # Reset feet contact history to True.
         self.feet_in_contact_prev[env_ids] = True
@@ -594,8 +642,102 @@ class BipedEnv(DirectRLEnv):
         # Reset last feet indices to 1 (Left) so Right foot (0) is valid first
         self.last_feet_indices[env_ids] = 1
 
+        # Track rolling mean episode length for curriculum notification.
+        if not self._curriculum_notified:
+            ep_lens_s = (self.episode_length_buf[env_ids].float() * self.step_dt).tolist()
+            self._ep_len_window.extend(ep_lens_s)
+            if len(self._ep_len_window) > self._ep_len_window_size:
+                self._ep_len_window = self._ep_len_window[-self._ep_len_window_size:]
+            if (len(self._ep_len_window) >= self._ep_len_window_size
+                    and not self.cfg.use_rough_terrain):
+                mean_ep_len = sum(self._ep_len_window) / len(self._ep_len_window)
+                threshold = getattr(self.cfg, 'curriculum_episode_len_threshold', 15.0)
+                if mean_ep_len >= threshold:
+                    logging.warning(
+                        f"[Curriculum] Mean episode length {mean_ep_len:.1f}s >= {threshold:.1f}s threshold. "
+                        "Robot is ready for rough terrain. Set use_rough_terrain=True and "
+                        "use_terrain_curriculum=True in your config to advance to the next stage."
+                    )
+                    self._curriculum_notified = True
+
+        # Terrain curriculum: advance per-env difficulty based on episode outcome.
+        # Only active when rough terrain generator is used AND curriculum is enabled.
+        if (getattr(self.cfg, 'use_terrain_curriculum', False)
+                and self.cfg.use_rough_terrain
+                and hasattr(self.scene, 'terrain')
+                and hasattr(self.scene.terrain, 'update_env_origins')):
+            succeeded = self.reset_time_outs[env_ids]   # timeout = episode completed
+            failed    = self.reset_terminated[env_ids]  # early termination = fell
+            self.scene.terrain.update_env_origins(env_ids, move_up=succeeded, move_down=failed)
+
         # Resample commands
         self._resample_commands(env_ids)
+
+    def _build_mirror_transform(self):
+        """Pre-compute permutation/sign tensors for left-right bilateral symmetry.
+        Joint perm and signs are read from cfg.mirror_joint_perm / cfg.mirror_joint_signs
+        so each robot class can define its own layout without touching this method.
+        """
+        d = self.device
+        j_perm  = torch.tensor(self.cfg.mirror_joint_perm,  device=d, dtype=torch.long)
+        j_signs = torch.tensor(self.cfg.mirror_joint_signs, device=d)
+
+        # --- 50-dim actor obs mirror ---
+        p = torch.arange(50, device=d, dtype=torch.long)
+        s = torch.ones(50, device=d)
+        s[1]  = -1.               # imu_lin_acc y
+        s[3]  = -1.; s[5] = -1.  # imu_ang_vel x, z
+        s[7]  = -1.               # gravity y
+        s[10] = -1.; s[11] = -1. # commands: lin_vel_y, ang_vel_z
+        p[12:24] = 12 + j_perm;  s[12:24] = j_signs  # joint_pos
+        p[24:36] = 24 + j_perm;  s[24:36] = j_signs  # joint_vel
+        p[36:48] = 36 + j_perm;  s[36:48] = j_signs  # prev_actions
+        # phase_clock [48:50]: symmetric — no change
+        self._mirror_obs_perm  = p
+        self._mirror_obs_signs = s
+
+        # --- 12-dim action mirror ---
+        self._mirror_action_perm  = j_perm
+        self._mirror_action_signs = j_signs
+
+        # --- 60-dim critic obs mirror (50 actor + 10 privileged) ---
+        # Privileged layout: [50:53]=lin_vel_b, [53]=height, [54:60]=feet_forces
+        cp = torch.arange(60, device=d, dtype=torch.long)
+        cs = torch.ones(60, device=d)
+        cp[:50] = p;  cs[:50] = s
+        cs[51]  = -1.  # lin_vel_b y  (offset 50 + 1)
+        # feet_forces [54:60] = [r_fx, r_fy, r_fz, l_fx, l_fy, l_fz]
+        # mirror   → [l_fx, -l_fy, l_fz, r_fx, -r_fy, r_fz]
+        cp[54:60] = torch.tensor([57, 58, 59, 54, 55, 56], device=d, dtype=torch.long)
+        cs[54:60] = torch.tensor([ 1., -1.,  1.,  1., -1.,  1.], device=d)
+        self._mirror_critic_obs_perm  = cp
+        self._mirror_critic_obs_signs = cs
+
+    def mirror_obs(self, obs_dict: dict) -> dict:
+        """Return a left-right mirrored copy of an observation dict.
+
+        Accepts both ``"actor"``/``"critic"`` (replay-buffer convention) and
+        ``"policy"``/``"critic"`` (env step convention) key names.
+        Output keys mirror the input keys exactly.
+        """
+        result = {}
+        for key in ("actor", "policy"):
+            if key in obs_dict:
+                a = obs_dict[key]
+                if a.shape[-1] > self.obs_proprio_dim:
+                    n, total = a.shape
+                    chunks = a.view(n, total // self.obs_proprio_dim, self.obs_proprio_dim)
+                    result[key] = (chunks[:, :, self._mirror_obs_perm] * self._mirror_obs_signs).view(n, total)
+                else:
+                    result[key] = a[:, self._mirror_obs_perm] * self._mirror_obs_signs
+        if "critic" in obs_dict:
+            c = obs_dict["critic"]
+            result["critic"] = c[:, self._mirror_critic_obs_perm] * self._mirror_critic_obs_signs
+        return result
+
+    def mirror_action(self, actions: torch.Tensor) -> torch.Tensor:
+        """Return a left-right mirrored copy of actions."""
+        return actions[:, self._mirror_action_perm] * self._mirror_action_signs
 
     def _resample_commands(self, env_ids: torch.Tensor):
         self.command_generator.reset(env_ids)

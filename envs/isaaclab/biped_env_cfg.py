@@ -103,6 +103,12 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # Switches
     use_rough_terrain: bool = False
 
+    # Terrain curriculum: per-env difficulty progression when rough terrain is active.
+    # Each env moves to a harder sub-terrain on timeout (success) and easier on termination (failure).
+    use_terrain_curriculum: bool = False
+    # Rolling-mean episode-length threshold for notifying that rough terrain is ready to enable.
+    curriculum_episode_len_threshold: float = 15.0
+
     # scene
     scene: BipedRobotSceneCfg = BipedRobotSceneCfg(
         num_envs=4096,
@@ -117,6 +123,16 @@ class BipedEnvCfg(DirectRLEnvCfg):
     hip_joint_names = ["r_hip_z", "l_hip_z", "r_hip_x", "l_hip_x"]
     ankle_roll_joint_names = ["r_ankle_x", "l_ankle_x"]
     knee_joint_names = ["r_knee", "l_knee"]
+
+    # Left-right symmetry transform for joints.
+    # V1 joint order (R,L interleaved): r_hip_z=0, l_hip_z=1, r_hip_x=2, l_hip_x=3,
+    #   r_hip_y=4, l_hip_y=5, r_knee=6, l_knee=7, r_ankle_y=8, l_ankle_y=9,
+    #   r_ankle_x=10, l_ankle_x=11
+    # perm: which joint index maps to each position after L↔R swap
+    mirror_joint_perm: list = [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10]
+    # signs: -1 for joints whose direction inverts under L↔R reflection
+    # yaw (0,1), roll (2,3), ankle_roll (10,11) flip; pitch and knee do not
+    mirror_joint_signs: list = [-1., -1., -1., -1., 1., 1., 1., 1., 1., 1., -1., -1.]
     
     # env
     episode_length_s = 20.0
@@ -144,11 +160,21 @@ class BipedEnvCfg(DirectRLEnvCfg):
     policy_has_privileged_info = False
     critic_has_privileged_info = True
 
+    # Gait clock
+    gait_clock_base_freq: float = 1.5  # Hz, advances proportional to commanded speed
+
+    # Action smoothing filter (EMA): target = alpha*raw + (1-alpha)*prev
+    action_filter_alpha: float = 0.4
+
+    # Actuator delay simulation: per-env delay sampled from [min, max] steps at reset
+    action_delay_steps_range: list = [0, 0]
+    # TODO: Changes made: action max delay 2 -> 0, commented new randomizations, removed history, lowered mlp size, removed symmetry
+
     # Randomization
     enable_perturbations = True
     push_interval_s = 15.0
     push_vel_range = 1.0
-    
+
     # Physics Randomization
     enable_physics_randomization = True
     
@@ -276,6 +302,25 @@ class BipedEnvCfg(DirectRLEnvCfg):
                 "num_buckets": 64,
             },
         ),
+        # COM offset randomization: ±1cm per axis on base_link
+        "randomize_com": EventTerm(
+            func="isaaclab.envs.mdp:randomize_rigid_body_com",
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+                "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
+            },
+        ),
+        # Payload: add 0–150g to base_link (camera, battery variance, sensors)
+        "randomize_payload": EventTerm(
+            func="isaaclab.envs.mdp:randomize_rigid_body_mass",
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+                "mass_distribution_params": (0.0, 0.15),
+                "operation": "add",
+            },
+        ),
     }
 
     # observation groups
@@ -354,3 +399,10 @@ class BipedRobotV2EnvCfg(BipedEnvCfg):
         "(r|right)_knee.*",
     ]
 
+    # Left-right symmetry transform for V2 joints.
+    # V2 joint order (L,R interleaved): l_hip_yaw=0, r_hip_yaw=1, l_hip_roll=2, r_hip_roll=3,
+    #   l_hip_pitch=4, r_hip_pitch=5, l_knee=6, r_knee=7,
+    #   l_ankle_roll=8, r_ankle_roll=9, l_ankle_pitch=10, r_ankle_pitch=11
+    # yaw (0,1), roll (2,3), ankle_roll (8,9) flip; pitch and knee do not
+    mirror_joint_perm: list = [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10]
+    mirror_joint_signs: list = [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]
