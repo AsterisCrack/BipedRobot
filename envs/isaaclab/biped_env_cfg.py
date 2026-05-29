@@ -9,7 +9,7 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg, ImuCfg, RayCasterCfg, patterns
+from isaaclab.sensors import ContactSensorCfg, ImuCfg, RayCasterCfg, TiledCameraCfg, patterns
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -122,6 +122,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     base_body_name = "torso_link"
     hip_joint_names = ["r_hip_z", "l_hip_z", "r_hip_x", "l_hip_x"]
     ankle_roll_joint_names = ["r_ankle_x", "l_ankle_x"]
+    ankle_pitch_joint_names: list = []  # override in subclass if robot has ankle pitch joints
     knee_joint_names = ["r_knee", "l_knee"]
 
     # Left-right symmetry transform for joints.
@@ -177,6 +178,33 @@ class BipedEnvCfg(DirectRLEnvCfg):
 
     # Physics Randomization
     enable_physics_randomization = True
+
+    # Video recording — set to True (via train.py) when --video is passed
+    enable_video_camera: bool = False
+
+    # Curriculum learning — all DR and command ranges scale from 0→full over training
+    curriculum_enabled: bool = False
+    curriculum_dr_start_steps: int = 3_000_000   # env steps with zero DR (robot learns basic walking)
+    curriculum_dr_full_steps: int  = 20_000_000  # env steps when DR reaches 100%
+    curriculum_cmd_ramp_steps: int = 5_000_000   # env steps to reach full command velocity range
+    curriculum_init_ramp_steps: int = 5_000_000  # env steps to reach full joint init range
+    # Which DR events are curriculum-scaled. Empty list = scale ALL events (backward compat).
+    curriculum_dr_events: list = []
+
+    # Target (full-curriculum) DR values — curriculum scales toward these
+    curriculum_dr_max_push_x: float = 0.3
+    curriculum_dr_max_push_y: float = 0.2
+    curriculum_dr_mass_range: tuple = (-0.2, 0.4)
+    curriculum_dr_gains_range: tuple = (0.8, 1.2)
+    curriculum_dr_friction_range: tuple = (0.8, 1.1)
+    curriculum_dr_com_range: float = 0.01
+    curriculum_dr_payload_max: float = 0.15
+    # Command range limits
+    curriculum_cmd_start_lin_vel_x: tuple = (0.0, 0.2)   # slow forward-only at start
+    curriculum_cmd_full_lin_vel_x: tuple  = (-0.3, 0.5)  # full range at end
+    # Joint init range limits
+    curriculum_init_range_min: float = 0.01
+    curriculum_init_range_max: float = 0.10
     
     # Noise
     # Action noise
@@ -302,25 +330,25 @@ class BipedEnvCfg(DirectRLEnvCfg):
                 "num_buckets": 64,
             },
         ),
-        # COM offset randomization: ±1cm per axis on base_link
-        "randomize_com": EventTerm(
-            func="isaaclab.envs.mdp:randomize_rigid_body_com",
-            mode="reset",
-            params={
-                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-                "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
-            },
-        ),
-        # Payload: add 0–150g to base_link (camera, battery variance, sensors)
-        "randomize_payload": EventTerm(
-            func="isaaclab.envs.mdp:randomize_rigid_body_mass",
-            mode="reset",
-            params={
-                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-                "mass_distribution_params": (0.0, 0.15),
-                "operation": "add",
-            },
-        ),
+        # # COM offset randomization: curriculum-scaled via curriculum_dr_events
+        # "randomize_com": EventTerm(
+        #     func="isaaclab.envs.mdp:randomize_rigid_body_com",
+        #     mode="reset",
+        #     params={
+        #         "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+        #         "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
+        #     },
+        # ),
+        # # Payload: curriculum-scaled via curriculum_dr_events
+        # "randomize_payload": EventTerm(
+        #     func="isaaclab.envs.mdp:randomize_rigid_body_mass",
+        #     mode="reset",
+        #     params={
+        #         "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+        #         "mass_distribution_params": (0.0, 0.15),
+        #         "operation": "add",
+        #     },
+        # ),
     }
 
     # observation groups
@@ -352,7 +380,14 @@ class BipedEnvCfg(DirectRLEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        
+
+        # if not self.enable_perturbations:
+        #     self.events.pop("push_robot", None)
+        # if not self.enable_physics_randomization:
+        #     for key in ["randomize_mass", "randomize_actuator_gains",
+        #                 "randomize_friction", "randomize_com", "randomize_payload"]:
+        #         self.events.pop(key, None)
+
         if self.use_rough_terrain:
             # Update Terrain
             self.terrain.terrain_type = "generator"
@@ -392,6 +427,11 @@ class BipedRobotV2EnvCfg(BipedEnvCfg):
     ankle_roll_joint_names = [
         "(l|left)_ankle_roll.*",
         "(r|right)_ankle_roll.*",
+    ]
+
+    ankle_pitch_joint_names = [
+        "(l|left)_ankle_pitch.*",
+        "(r|right)_ankle_pitch.*",
     ]
 
     knee_joint_names = [

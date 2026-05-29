@@ -9,24 +9,27 @@ import envs.isaaclab
 class BaseIsaacLabWrapper:
     def __init__(self, env, config=None):
         self.env = env
-        self.device = env.device
-        self.num_envs = env.num_envs
+        # gymnasium wrappers (e.g. RecordVideo) don't forward Isaac Lab specific
+        # attributes, so read them from the innermost unwrapped env.
+        base_env = env.unwrapped if hasattr(env, "unwrapped") else env
+        self.device = base_env.device
+        self.num_envs = base_env.num_envs
         self.config = config
         self.normalize_obs = False
-        
+
         if config and hasattr(config.train, "normalize_obs"):
              self.normalize_obs = config.train.normalize_obs
 
         # Handle batched spaces from Isaac Lab
         # We need to expose single-env spaces to the algorithms
         import gymnasium.spaces as spaces
-        
+
         # Observation space
-        if hasattr(env, "cfg") and hasattr(env.cfg, "observation_space_dim") and len(env.cfg.observation_space_dim) > 1:
+        if hasattr(base_env, "cfg") and hasattr(base_env.cfg, "observation_space_dim") and len(base_env.cfg.observation_space_dim) > 1:
              # Asymmetric observations
              self.observation_space = spaces.Dict({
-                 "actor": spaces.Box(-np.inf, np.inf, shape=(env.cfg.observation_space_dim["policy"],), dtype=np.float32),
-                 "critic": spaces.Box(-np.inf, np.inf, shape=(env.cfg.observation_space_dim["critic"],), dtype=np.float32)
+                 "actor": spaces.Box(-np.inf, np.inf, shape=(base_env.cfg.observation_space_dim["policy"],), dtype=np.float32),
+                 "critic": spaces.Box(-np.inf, np.inf, shape=(base_env.cfg.observation_space_dim["critic"],), dtype=np.float32)
              })
         elif hasattr(env.observation_space, "shape") and len(env.observation_space.shape) == 2:
              self.observation_space = spaces.Box(
@@ -221,6 +224,12 @@ def make_env(args_cli, config):
         if hasattr(env_conf, "mirror_joint_indices") and env_conf.mirror_joint_indices:
             env_cfg.mirror_joint_indices = env_conf.mirror_joint_indices
             env_cfg.mirror_action_indices = env_conf.mirror_joint_indices
+
+        # Curriculum
+        for _field in ("curriculum_enabled", "curriculum_dr_start_steps", "curriculum_dr_full_steps",
+                       "curriculum_cmd_ramp_steps", "curriculum_init_ramp_steps", "curriculum_dr_events"):
+            if hasattr(env_conf, _field):
+                setattr(env_cfg, _field, getattr(env_conf, _field))
 
         # Randomization & Events
         if hasattr(env_conf, "enable_perturbations"):

@@ -32,6 +32,12 @@ class UniformVelocityCommand:
             self.rel_heading_envs = base_vel_cfg.get("rel_heading_envs", self.rel_heading_envs)
             self.ranges = base_vel_cfg.get("ranges", {})
         
+    def update_ranges(self, ranges: dict) -> None:
+        """Update velocity sampling ranges in-place (used by curriculum)."""
+        for key in ("lin_vel_x", "lin_vel_y", "ang_vel_z", "heading"):
+            if key in ranges:
+                self.ranges[key] = ranges[key]
+
     def reset(self, env_ids):
         """Reset commands for specific environments."""
         self.resample(env_ids)

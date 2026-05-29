@@ -54,6 +54,7 @@ train:
       joint_deviation_hip: 0.0         # Disabled: hip_pitch is in this group for V2 and is REQUIRED for walking
       joint_deviation_ankle_roll: -0.05
       torso_centering: 0.05
+      ankle_torques_l2: -0.0015        # penalise ankle pitch torque → discourages toe-only stance
 
       # Reference tracking (no motion reference loaded)
       track_joint_pos_exp: 0.0
@@ -77,6 +78,14 @@ train:
     action_noise_model:
       mean: 0.0
       std: 0.00
+
+    # Curriculum — only randomize_com and randomize_payload are scaled; all other DR runs at full strength
+    curriculum_enabled: false
+    curriculum_dr_start_steps: 20000    # 2M steps of clean training before COM/payload DR begins
+    curriculum_dr_full_steps:  40000   # COM/payload DR reaches 100% at 10M steps
+    curriculum_cmd_ramp_steps:  0         # full command range from the start
+    curriculum_init_ramp_steps: 0         # full init range from the start
+    curriculum_dr_events: ["randomize_com", "randomize_payload"]
 
 model:
   actor_config:

@@ -176,6 +176,12 @@ def train():
             env_cfg.mirror_joint_indices = env_conf.mirror_joint_indices
             env_cfg.mirror_action_indices = env_conf.mirror_joint_indices
 
+        # Curriculum
+        for _field in ("curriculum_enabled", "curriculum_dr_start_steps", "curriculum_dr_full_steps",
+                       "curriculum_cmd_ramp_steps", "curriculum_init_ramp_steps", "curriculum_dr_events"):
+            if hasattr(env_conf, _field):
+                setattr(env_cfg, _field, getattr(env_conf, _field))
+
         # Randomization & Events
         if hasattr(env_conf, "enable_perturbations"):
             env_cfg.enable_perturbations = env_conf.enable_perturbations
@@ -230,16 +236,65 @@ def train():
     # Pass seed to config for environment
     env_cfg.seed = seed
 
+    # Generate timestamp now so it's available for the video directory
+    log_dir = config.train.log_dir
+    model_name = config.train.model_name
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    model_name = f"{model_name}_{timestamp}"
+    if config.train.checkpoint_path:
+        config.train.checkpoint_path = os.path.join(config.train.checkpoint_path, model_name)
+
+    # Inject camera into scene when --video is requested (camera adds GPU overhead, so opt-in only)
+    if args_cli.video:
+        from isaaclab.sensors import TiledCameraCfg as _TiledCameraCfg
+        from isaaclab.sim import PinholeCameraCfg as _PinholeCameraCfg
+        env_cfg.enable_video_camera = True
+        # Attach a small follow-camera to the robot's base_link for training video.
+        # pos: 0.5m in front of the robot, 0.4m above; looking back toward the robot.
+        # Adjust pos/rot to change the viewing angle.
+        env_cfg.scene.camera = _TiledCameraCfg(
+            prim_path="/World/envs/env_0/Robot/Robot/base_link/Camera",
+            offset=_TiledCameraCfg.OffsetCfg(
+                pos=(0.5, 0.0, 0.4),
+                rot=(0.5, -0.5, 0.5, -0.5),  # looking back (-X) and slightly down; ROS convention
+                convention="ros",
+            ),
+            data_types=["rgb"],
+            spawn=_PinholeCameraCfg(
+                focal_length=24.0,
+                focus_distance=0.6,
+                horizontal_aperture=20.955,
+                clipping_range=(0.01, 5.0),
+            ),
+            width=128,
+            height=72,
+            update_period=0.04,  # 25 Hz — reduces rendering overhead during training
+        )
+
     # Create environment
-    env = BipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video or args_cli.headless else None)
-    
+    env = BipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    # Wrap with video recorder before the RL wrapper so frames are captured at env.step() level
+    if args_cli.video:
+        import gymnasium as gym
+        video_dir = os.path.join(log_dir, model_name, "videos")
+        os.makedirs(video_dir, exist_ok=True)
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_folder=video_dir,
+            step_trigger=lambda step: step % args_cli.video_interval == 0,
+            video_length=args_cli.video_length,
+            disable_logger=True,
+        )
+        print(f"[Video] Recording to {video_dir} every {args_cli.video_interval} steps, {args_cli.video_length} frames each.")
+
     # Wrap environment
     wrapped_env = IsaacLabWrapper(env, config)
-    
+
     # Initialize Model (SAC)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
+
     use_history = config.train.use_history
     history_size = config.train.history_size
     
@@ -278,19 +333,6 @@ def train():
         history_size=history_size,
         model_path=args_cli.checkpoint # Resume if checkpoint provided
     )
-    
-    # Setup logging
-    log_dir = config.train.log_dir
-    model_name = config.train.model_name
-    
-    # Add datetime to model name and checkpoint path to avoid overwriting
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    model_name = f"{model_name}_{timestamp}"
-    
-    # Update checkpoint path in config to include the model name (with timestamp)
-    # This ensures checkpoints are saved in a unique subfolder
-    if config.train.checkpoint_path:
-        config.train.checkpoint_path = os.path.join(config.train.checkpoint_path, model_name)
     
     # Train
     model.train(

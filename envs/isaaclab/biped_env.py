@@ -4,11 +4,12 @@ import logging
 import os
 import torch
 import math
+import numpy as np
 
 import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
-from isaaclab.sensors import ContactSensor, Imu
+from isaaclab.sensors import ContactSensor, Imu, TiledCamera
 from isaaclab.envs.mdp import randomize_rigid_body_mass, randomize_rigid_body_material, push_by_setting_velocity, reset_joints_by_offset, reset_root_state_uniform
 from isaaclab.terrains import TerrainImporter
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
@@ -146,6 +147,11 @@ class BipedEnv(DirectRLEnv):
         self._ep_len_window_size = 500        # ~500 episodes across all envs
         self._curriculum_notified = False
 
+        # DR curriculum: track last applied scale to avoid redundant event-param mutations
+        self._curriculum_last_dr_scale: float = -1.0
+        self._curriculum_last_cmd_scale: float = -1.0
+        self._curriculum_last_init_scale: float = -1.0
+
         # Randomization
         self.push_interval_steps = int(self.cfg.push_interval_s / self.step_dt)
         
@@ -167,6 +173,9 @@ class BipedEnv(DirectRLEnv):
         # Specific joint indices for rewards
         self.hip_indices, _ = self.robot.find_joints(self.cfg.hip_joint_names)
         self.ankle_roll_indices, _ = self.robot.find_joints(self.cfg.ankle_roll_joint_names)
+        _pitch_names = getattr(self.cfg, "ankle_pitch_joint_names", [])
+        _pitch_idx, _ = self.robot.find_joints(_pitch_names) if _pitch_names else ([], [])
+        self.ankle_pitch_indices = torch.tensor(_pitch_idx, device=self.device, dtype=torch.long)
         knee_indices, _ = self.robot.find_joints(self.cfg.knee_joint_names)
         self.knee_indices = torch.tensor(knee_indices, device=self.device, dtype=torch.long)
 
@@ -199,6 +208,11 @@ class BipedEnv(DirectRLEnv):
 
         self.imu_sensor = Imu(self.scene.sensors["imu"].cfg)
         self.scene.sensors["imu_sensor"] = self.imu_sensor
+
+        # Video camera — InteractiveScene already instantiated it; just keep a reference.
+        self.video_camera: TiledCamera | None = None
+        if getattr(self.cfg, "enable_video_camera", False) and "camera" in self.scene.sensors:
+            self.video_camera = self.scene.sensors["camera"]
         
         # add ground plane
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
@@ -271,6 +285,21 @@ class BipedEnv(DirectRLEnv):
             + (1.0 - self.action_filter_alpha) * self.filtered_targets
         )
         self.robot.set_joint_position_target(self.filtered_targets)
+
+    def render(self) -> np.ndarray | None:
+        if self.render_mode != "rgb_array" or self.video_camera is None:
+            return super().render()
+        # sim.render() must be called to populate TiledCamera annotator buffers.
+        # RecordVideo calls render() immediately after reset() before any step has run,
+        # so the camera is uninitialised unless we trigger the GPU render explicitly.
+        self.sim.render()
+        try:
+            # TiledCamera output shape: [N, H, W, C]; return env-0 frame as [H, W, 3] RGB
+            rgb = self.video_camera.data.output["rgb"]
+            return rgb[0].cpu().numpy().astype(np.uint8)
+        except Exception:
+            cfg = self.cfg.scene.camera
+            return np.zeros((cfg.height, cfg.width, 3), dtype=np.uint8)
 
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
         obs, rew, terminated, truncated, info = super().step(actions)
@@ -490,7 +519,13 @@ class BipedEnv(DirectRLEnv):
         r_knee_bend_touchdown = rewards.knee_bend_on_touchdown(touchdown, self.knee_bend_max, min_bend=0.2, max_bend=1.0)
         self.knee_bend_max[touchdown] = 0.0
 
-        # 20: Animation tracking (optional)
+        # 20: Ankle pitch torque penalty — discourages toe-only stance (plantarflexion bias)
+        if len(self.ankle_pitch_indices) > 0:
+            r_ankle_torques = rewards.joint_torques_l2(self.joint_efforts[:, self.ankle_pitch_indices])
+        else:
+            r_ankle_torques = torch.zeros(self.num_envs, device=self.device)
+
+        # 21: Animation tracking (optional)
         if self.motion_ref is not None:
             ref_pos, ref_vel = self.motion_ref.sample(self.motion_time)
             joint_pos_ref = self.joint_pos[:, self.motion_ref.robot_joint_indices]
@@ -524,6 +559,7 @@ class BipedEnv(DirectRLEnv):
             "knee_bend_touchdown": r_knee_bend_touchdown * self.cfg.rewards.get("knee_bend_touchdown", 0.0),
             "track_joint_pos_exp": r_track_joint_pos * self.cfg.rewards.get("track_joint_pos_exp", 0.0),
             "track_joint_vel_exp": r_track_joint_vel * self.cfg.rewards.get("track_joint_vel_exp", 0.0),
+            "ankle_torques_l2": r_ankle_torques * self.cfg.rewards.get("ankle_torques_l2", 0.0),
         }
         
         # Weighted sum
@@ -563,6 +599,7 @@ class BipedEnv(DirectRLEnv):
         return died, time_out
         
     def _reset_idx(self, env_ids: torch.Tensor):
+        self._apply_curriculum()
         super()._reset_idx(env_ids)
         
         # Reset robot state
@@ -672,6 +709,100 @@ class BipedEnv(DirectRLEnv):
 
         # Resample commands
         self._resample_commands(env_ids)
+
+    def _get_curriculum_scales(self) -> dict[str, float]:
+        step = float(self.common_step_counter)
+        dr_start = float(self.cfg.curriculum_dr_start_steps)
+        dr_full  = float(self.cfg.curriculum_dr_full_steps)
+        dr_scale = max(0.0, min(1.0, (step - dr_start) / max(1.0, dr_full - dr_start)))
+        cmd_scale  = min(1.0, step / max(1.0, float(self.cfg.curriculum_cmd_ramp_steps)))
+        init_scale = min(1.0, step / max(1.0, float(self.cfg.curriculum_init_ramp_steps)))
+        return {"dr": dr_scale, "cmd": cmd_scale, "init": init_scale}
+
+    def _apply_curriculum(self) -> None:
+        if not getattr(self.cfg, "curriculum_enabled", False):
+            return
+        scales = self._get_curriculum_scales()
+        dr   = scales["dr"]
+        cmd  = scales["cmd"]
+        init = scales["init"]
+
+        # curriculum_dr_events: if non-empty, only those event names are scaled;
+        # empty list (default) means scale ALL DR events (backward compat).
+        _cur_ev = getattr(self.cfg, "curriculum_dr_events", [])
+        def _dr_applies(name: str) -> bool:
+            return not _cur_ev or name in _cur_ev
+
+        # Only rewrite event params when scale actually changed (saves dict allocations)
+        if dr != self._curriculum_last_dr_scale:
+            self._curriculum_last_dr_scale = dr
+
+            if "push_robot" in self.cfg.events and _dr_applies("push_robot"):
+                px = self.cfg.curriculum_dr_max_push_x * dr
+                py = self.cfg.curriculum_dr_max_push_y * dr
+                self.cfg.events["push_robot"].params["velocity_range"] = {
+                    "x": (-px, px), "y": (-py, py)
+                }
+
+            if "randomize_mass" in self.cfg.events and _dr_applies("randomize_mass"):
+                lo, hi = self.cfg.curriculum_dr_mass_range
+                self.cfg.events["randomize_mass"].params["mass_distribution_params"] = (lo * dr, hi * dr)
+
+            if "randomize_actuator_gains" in self.cfg.events and _dr_applies("randomize_actuator_gains"):
+                lo, hi = self.cfg.curriculum_dr_gains_range
+                scaled_lo = 1.0 - (1.0 - lo) * dr
+                scaled_hi = 1.0 + (hi - 1.0) * dr
+                self.cfg.events["randomize_actuator_gains"].params["stiffness_distribution_params"] = (scaled_lo, scaled_hi)
+                self.cfg.events["randomize_actuator_gains"].params["damping_distribution_params"]   = (scaled_lo, scaled_hi)
+
+            if "randomize_friction" in self.cfg.events and _dr_applies("randomize_friction"):
+                lo, hi = self.cfg.curriculum_dr_friction_range
+                scaled_lo = 1.0 - (1.0 - lo) * dr
+                scaled_hi = 1.0 + (hi - 1.0) * dr
+                self.cfg.events["randomize_friction"].params["static_friction_range"]  = (scaled_lo, scaled_hi)
+                self.cfg.events["randomize_friction"].params["dynamic_friction_range"] = (scaled_lo, scaled_hi)
+
+            if "randomize_com" in self.cfg.events and _dr_applies("randomize_com"):
+                c = self.cfg.curriculum_dr_com_range * dr
+                self.cfg.events["randomize_com"].params["com_range"] = {
+                    "x": (-c, c), "y": (-c, c), "z": (-c, c)
+                }
+
+            if "randomize_payload" in self.cfg.events and _dr_applies("randomize_payload"):
+                self.cfg.events["randomize_payload"].params["mass_distribution_params"] = (
+                    0.0, self.cfg.curriculum_dr_payload_max * dr
+                )
+
+        if cmd != self._curriculum_last_cmd_scale:
+            self._curriculum_last_cmd_scale = cmd
+            start_lo, start_hi = self.cfg.curriculum_cmd_start_lin_vel_x
+            full_lo,  full_hi  = self.cfg.curriculum_cmd_full_lin_vel_x
+            new_vx = (
+                start_lo + (full_lo - start_lo) * cmd,
+                start_hi + (full_hi - start_hi) * cmd,
+            )
+            lat = 0.3 * cmd
+            yaw = 0.3 * cmd
+            self.command_generator.update_ranges({
+                "lin_vel_x": new_vx,
+                "lin_vel_y": (-lat, lat),
+                "ang_vel_z": (-yaw, yaw),
+            })
+
+        if init != self._curriculum_last_init_scale:
+            self._curriculum_last_init_scale = init
+            r_min = self.cfg.curriculum_init_range_min
+            r_max = self.cfg.curriculum_init_range_max
+            r = r_min + (r_max - r_min) * init
+            if "reset_robot_joints" in self.cfg.events:
+                self.cfg.events["reset_robot_joints"].params["position_range"] = (-r, r)
+                self.cfg.events["reset_robot_joints"].params["velocity_range"] = (-r, r)
+
+        if "log" not in self.extras:
+            self.extras["log"] = {}
+        self.extras["log"]["Curriculum/dr_scale"]   = dr
+        self.extras["log"]["Curriculum/cmd_scale"]  = cmd
+        self.extras["log"]["Curriculum/init_scale"] = init
 
     def _build_mirror_transform(self):
         """Pre-compute permutation/sign tensors for left-right bilateral symmetry.

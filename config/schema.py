@@ -109,6 +109,14 @@ class EnvConfig(BaseModel):
     # Noise
     observation_noise_model: Optional[Dict[str, float]] = None
     action_noise_model: Optional[Dict[str, float]] = None
+
+    # Curriculum
+    curriculum_enabled: bool = False
+    curriculum_dr_start_steps: int = 3_000_000
+    curriculum_dr_full_steps: int  = 20_000_000
+    curriculum_cmd_ramp_steps: int = 5_000_000
+    curriculum_init_ramp_steps: int = 5_000_000
+    curriculum_dr_events: List[str] = Field(default_factory=list)
     
     class Config:
         extra = "allow" # Allow extra fields to avoid validation errors for complex nested dicts
