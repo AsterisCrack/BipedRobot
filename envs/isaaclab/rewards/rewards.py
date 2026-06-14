@@ -181,6 +181,37 @@ def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma
     return torch.exp(-sigma * dist_sq)
 
 @torch.jit.script
+def com_support_centering_reward(
+    body_com_pose_w: torch.Tensor,
+    body_mass: torch.Tensor,
+    feet_pos: torch.Tensor,
+    feet_in_contact: torch.Tensor,
+    sigma: float = 1.0,
+) -> torch.Tensor:
+    """
+    Reward for keeping the true whole-body COM centered over the support polygon.
+    body_com_pose_w: (num_envs, num_bodies, 7) — world-frame COM pose per body
+    body_mass:       (num_envs, num_bodies)     — mass of each body
+    feet_pos:        (num_envs, 2, 3)
+    feet_in_contact: (num_envs, 2) bool
+    """
+    # True whole-body COM (mass-weighted centroid of all body COMs)
+    com_pos = body_com_pose_w[:, :, :3]
+    total_mass = body_mass.sum(dim=1, keepdim=True)
+    com = (com_pos * body_mass.unsqueeze(-1)).sum(dim=1) / total_mass  # (num_envs, 3)
+
+    # Support center: contact-weighted average of feet; fall back to midpoint when airborne
+    contact_f = feet_in_contact.float()
+    contact_sum = contact_f.sum(dim=1, keepdim=True)
+    no_contact = contact_sum.squeeze(1) < 0.5
+    midpoint = feet_pos[:, :, :2].mean(dim=1)
+    weighted = (feet_pos[:, :, :2] * contact_f.unsqueeze(-1)).sum(dim=1) / contact_sum.clamp(min=1.0)
+    support_center = torch.where(no_contact.unsqueeze(-1), midpoint, weighted)
+
+    dist_sq = torch.sum(torch.square(com[:, :2] - support_center), dim=1)
+    return torch.exp(-sigma * dist_sq)
+
+@torch.jit.script
 def joint_pos_limits(joint_pos: torch.Tensor, limits_min: torch.Tensor, limits_max: torch.Tensor):
     """
     Penalize joint positions if they cross the soft limits.
@@ -238,3 +269,53 @@ def track_joint_vel_exp(joint_vel: torch.Tensor, ref_joint_vel: torch.Tensor, st
     """
     error = torch.sum(torch.square(joint_vel - ref_joint_vel), dim=1)
     return torch.exp(-error / (std**2))
+
+@torch.jit.script
+def gait_phase_contact(
+    gait_phase: torch.Tensor,
+    feet_in_contact: torch.Tensor,
+    commands: torch.Tensor,
+    min_speed: float = 0.05,
+) -> torch.Tensor:
+    """Reward feet contacting in sync with the gait phase clock.
+
+    Convention: sin(phase) > 0 → right foot (index 0) in stance;
+                sin(phase) < 0 → left  foot (index 1) in stance.
+    Returns [0, 1] — 1 = perfect phase match, 0.5 = one foot wrong, 0 = both wrong.
+    Only active when commanded planar speed > min_speed.
+    """
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    speed_mask = (cmd_norm > min_speed).float()
+
+    sin_p = torch.sin(gait_phase)
+    desired_right = (sin_p + 1.0) * 0.5    # 1 when phase=π/2, 0 when phase=3π/2
+    desired_left  = (-sin_p + 1.0) * 0.5   # complementary
+
+    right_c = feet_in_contact[:, 0].float()
+    left_c  = feet_in_contact[:, 1].float()
+
+    reward = 1.0 - 0.5 * (torch.abs(desired_right - right_c) + torch.abs(desired_left - left_c))
+    return reward * speed_mask
+
+@torch.jit.script
+def action_l2(actions: torch.Tensor) -> torch.Tensor:
+    """Penalise large action magnitudes — pulls joints toward neutral action-space position."""
+    return torch.sum(torch.square(actions), dim=1)
+
+@torch.jit.script
+def foot_separation_penalty(
+    feet_pos_w: torch.Tensor,
+    min_sep: float = 0.07,
+) -> torch.Tensor:
+    """Penalise lateral (Y-axis) foot separation below min_sep metres.
+    V2 hip joints are only ±21.7 mm apart, giving 4.3 cm natural spacing at hip_roll=0;
+    min_sep=0.07 m requires ~0.15 rad hip abduction for a stable wider stance."""
+    sep = torch.abs(feet_pos_w[:, 0, 1] - feet_pos_w[:, 1, 1])
+    return torch.clamp(min_sep - sep, min=0.0)
+
+@torch.jit.script
+def dof_pos_l2(joint_pos: torch.Tensor, default_pos: torch.Tensor) -> torch.Tensor:
+    """Penalise all joint positions deviating from their defaults — uniform pose regulariser.
+    Unlike action_l2, this operates in joint-space so it correctly targets the neutral pose
+    regardless of whether joint limits are symmetric around zero."""
+    return torch.sum(torch.square(joint_pos - default_pos), dim=1)

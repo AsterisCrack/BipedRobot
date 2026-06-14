@@ -1,28 +1,34 @@
 import gymnasium as gym
 
-from .biped_env_cfg import BipedEnvCfg as BipedRobotEnvCfg
-from .biped_env_cfg import BipedRobotV2EnvCfg
-from . import agents
+# Avoid importing Isaac Lab on module import so MuJoCo-only tools can still run.
+try:
+    import isaaclab  # noqa: F401
+    import pxr  # noqa: F401
+    _HAS_ISAACLAB = True
+except ModuleNotFoundError:
+    _HAS_ISAACLAB = False
 
-##
-# Register Gym environments.
-##
+if _HAS_ISAACLAB:
+    from .biped_env_cfg import BipedEnvCfg as BipedRobotEnvCfg
+    from .biped_env_cfg import BipedRobotV2EnvCfg
+    from . import agents
 
-gym.register(
-    id="Isaac-BipedRobot-Direct-v0",
-    entry_point="envs.isaaclab.biped_env:BipedEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": BipedRobotEnvCfg,
-        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
-    },
-)
+    # Register Gym environments.
+    gym.register(
+        id="Isaac-BipedRobot-Direct-v0",
+        entry_point="envs.isaaclab.biped_env:BipedEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": BipedRobotEnvCfg,
+            "skrl_cfg_entry_point": f"{agents.__name__}:skrl_ppo_cfg.yaml",
+        },
+    )
 
-gym.register(
-    id="Isaac-BipedRobotV2-Direct-v0",
-    entry_point="envs.isaaclab.biped_env:BipedEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": BipedRobotV2EnvCfg,
-    },
-)
+    gym.register(
+        id="Isaac-BipedRobotV2-Direct-v0",
+        entry_point="envs.isaaclab.biped_env:BipedEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": BipedRobotV2EnvCfg,
+        },
+    )

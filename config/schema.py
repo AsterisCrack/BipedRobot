@@ -129,6 +129,7 @@ class TrainConfig(BaseModel):
     workers_per_group: int = 16
     sim_frequency: int = 100
     use_rough_terrain: bool = False
+    use_terrain_curriculum: bool = False
     use_history: bool = False
     history_size: int = 0
     normalize_obs: bool = False

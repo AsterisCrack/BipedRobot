@@ -16,6 +16,7 @@ class BaseIsaacLabWrapper:
         self.num_envs = base_env.num_envs
         self.config = config
         self.normalize_obs = False
+        self._eval_mode = False   # when True, scaler statistics are frozen (play/eval only)
 
         if config and hasattr(config.train, "normalize_obs"):
              self.normalize_obs = config.train.normalize_obs
@@ -84,11 +85,13 @@ class BaseIsaacLabWrapper:
             if isinstance(new_obs, dict):
                 for k, v in new_obs.items():
                     if k in self.obs_scalers:
-                        self.obs_scalers[k].update(v)
+                        if not self._eval_mode:   # freeze stats during play/eval
+                            self.obs_scalers[k].update(v)
                         new_obs[k] = self.obs_scalers[k].normalize(v)
             else:
                  if "default" in self.obs_scalers:
-                     self.obs_scalers["default"].update(new_obs)
+                     if not self._eval_mode:
+                         self.obs_scalers["default"].update(new_obs)
                      new_obs = self.obs_scalers["default"].normalize(new_obs)
             
         return new_obs
@@ -118,6 +121,10 @@ class BaseIsaacLabWrapper:
                 print(f"Loaded observation scalers from {load_path}")
             else:
                 print(f"Warning: Observation scalers not found at {load_path}")
+
+    def set_eval_mode(self) -> None:
+        """Freeze obs-scaler statistics — call after load() in play/eval to prevent drift."""
+        self._eval_mode = True
 
     def step(self, actions):
         # Actions are numpy from the agent, convert to torch for Isaac Lab

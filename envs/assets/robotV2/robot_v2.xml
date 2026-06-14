@@ -1,0 +1,106 @@
+<mujoco model="Robot">
+  <compiler angle="radian" />
+  <asset>
+    <mesh name="base_link" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_hip_lower_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_hip_lower_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_hip_lower_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_hip_lower_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_thigh_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_thigh_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_thigh_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_thigh_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_calf_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_calf_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_calf_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_calf_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_ankle_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_ankle_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_ankle_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_ankle_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_foot_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_foot_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_foot_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_foot_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_hip_upper_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_hip_upper_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_hip_upper_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_hip_upper_link_1.stl" scale="0.001 0.001 0.001" />
+  </asset>
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05" condim="3" friction="1 0 0" rgba="0.8 0.8 0.8 1" />
+    <body name="base_link" pos="0 0 0.3">
+      <freejoint name="root" />
+      <geom type="mesh" mesh="base_link" />
+      <body name="r_hip_upper_link_1" pos="-0.00159 -0.021672 -0.00015">
+        <inertial pos="0.000373 -0.028289 -0.025073" quat="0.991362 -0.075738 -0.044505 -0.0973831" mass="0.100649" diaginertia="3.41054e-05 3.32919e-05 2.06027e-05" />
+        <joint name="r_hip_yaw" pos="0 0 0" axis="0 0 -1" range="-0.785398 0.785398" actuatorfrcrange="-100 100" />
+        <geom pos="0.00159 0.021672 0.00015" type="mesh" mesh="r_hip_upper_link_1" />
+        <body name="r_hip_lower_link_1" pos="0.0191 -0.030829 -0.040776">
+          <inertial pos="-0.018233 0.000383 -0.01695" quat="0.5 0.5 -0.5 0.5" mass="0.021339" diaginertia="9e-06 8e-06 8e-06" />
+          <joint name="r_hip_roll_joint" pos="0 0 0" axis="-1 0 0" range="-0.436332 1.5708" actuatorfrcrange="-100 100" />
+          <geom pos="-0.01751 0.052501 0.040926" quat="1 0 0 0" type="mesh" mesh="r_hip_lower_link_1" />
+          <body name="r_thigh_link_1" pos="-0.018625 0.020625 -0.0339">
+            <inertial pos="7e-06 -0.020639 -0.036026" mass="0.168697" diaginertia="0.000136 0.000126 2.6e-05" />
+            <joint name="r_hip_pitch_joint" pos="0 0 0" axis="0 1 0" range="-1.5708 1.5708" actuatorfrcrange="-100 100" />
+            <geom pos="0.001115 0.031876 0.074826" type="mesh" mesh="r_thigh_link_1" />
+            <body name="r_calf_link_1" pos="0 -0.002 -0.072052">
+              <inertial pos="-5.4e-05 -0.018976 -0.052521" quat="0.999708 -0.0164918 -0.0157152 -0.00805952" mass="0.10503" diaginertia="5.40317e-05 5.20327e-05 2.19356e-05" />
+              <joint name="r_knee_joint" pos="0 0 0" axis="0 -1 0" range="-2.0944 2.0944" actuatorfrcrange="-100 100" />
+              <geom pos="0.001115 0.033876 0.146878" type="mesh" mesh="r_calf_link_1" />
+              <body name="r_ankle_link_1" pos="0.018625 -0.019101 -0.072184">
+                <inertial pos="-0.018233 0.000383 -0.01695" quat="0.5 0.5 -0.5 0.5" mass="0.021339" diaginertia="9e-06 8e-06 8e-06" />
+                <joint name="r_ankle_roll_joint" pos="0 0 0" axis="-1 0 0" range="-1.39626 1.39626" actuatorfrcrange="-100 100" />
+                <geom pos="-0.01751 0.052977 0.219062" quat="1 0 0 0" type="mesh" mesh="r_ankle_link_1" />
+                <body name="r_foot_link_1" pos="-0.018625 0.020625 -0.0339">
+                  <inertial pos="0.012165 -0.020745 -0.00995" quat="0.0695675 0.857469 0.0553671 0.506795" mass="0.096795" diaginertia="3.49021e-05 3.19752e-05 1.81228e-05" />
+                  <joint name="r_ankle_pitch_joint" pos="0 0 0" axis="0 1 0" range="-0.610865 1.48353" actuatorfrcrange="-100 100" />
+                  <geom pos="0.001115 0.032352 0.252962" quat="1 0 0 0" type="mesh" mesh="r_foot_link_1" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="l_hip_upper_link_1" pos="-0.00159 0.021672 -0.00015">
+        <inertial pos="0.000373 0.028289 -0.025073" quat="0.991362 0.075738 -0.044505 0.0973831" mass="0.100649" diaginertia="3.41054e-05 3.32919e-05 2.06027e-05" />
+        <joint name="l_hip_yaw" pos="0 0 0" axis="0 0 1" range="-0.785398 0.785398" actuatorfrcrange="-100 100" />
+        <geom pos="0.00159 -0.021672 0.00015" type="mesh" mesh="l_hip_upper_link_1" />
+        <body name="l_hip_lower_link_1" pos="0.0191 0.030829 -0.040776">
+          <inertial pos="-0.018233 -0.000383 -0.01695" quat="0.5 0.5 -0.5 0.5" mass="0.021339" diaginertia="9e-06 8e-06 8e-06" />
+          <joint name="l_hip_roll_joint" pos="0 0 0" axis="1 0 0" range="-0.436332 1.5708" actuatorfrcrange="-100 100" />
+          <geom pos="-0.01751 -0.052501 0.040926" quat="1 0 0 0" type="mesh" mesh="l_hip_lower_link_1" />
+          <body name="l_thigh_link_1" pos="-0.018625 -0.020625 -0.0339">
+            <inertial pos="7e-06 0.020639 -0.036026" mass="0.168697" diaginertia="0.000136 0.000126 2.6e-05" />
+            <joint name="l_hip_pitch_joint" pos="0 0 0" axis="0 1 0" range="-1.5708 1.5708" actuatorfrcrange="-100 100" />
+            <geom pos="0.001115 -0.031876 0.074826" type="mesh" mesh="l_thigh_link_1" />
+            <body name="l_calf_link_1" pos="0 0.002 -0.072052">
+              <inertial pos="-5.4e-05 0.018976 -0.052521" quat="0.999708 0.0164918 -0.0157152 0.00805952" mass="0.10503" diaginertia="5.40317e-05 5.20327e-05 2.19356e-05" />
+              <joint name="l_knee_joint" pos="0 0 0" axis="0 -1 0" range="-2.0944 2.0944" actuatorfrcrange="-100 100" />
+              <geom pos="0.001115 -0.033876 0.146878" type="mesh" mesh="l_calf_link_1" />
+              <body name="l_ankle_link_1" pos="0.018625 0.019101 -0.072184">
+                <inertial pos="-0.018233 -0.000383 -0.01695" quat="0.5 0.5 -0.5 0.5" mass="0.021339" diaginertia="9e-06 8e-06 8e-06" />
+                <joint name="l_ankle_roll_joint" pos="0 0 0" axis="1 0 0" range="-1.39626 1.39626" actuatorfrcrange="-100 100" />
+                <geom pos="-0.01751 -0.052977 0.219062" quat="1 0 0 0" type="mesh" mesh="l_ankle_link_1" />
+                <body name="l_foot_link_1" pos="-0.018625 -0.020625 -0.0339">
+                  <inertial pos="0.012165 0.020745 -0.00995" quat="-0.0695675 0.857469 -0.0553671 0.506795" mass="0.096795" diaginertia="3.49021e-05 3.19752e-05 1.81228e-05" />
+                  <joint name="l_ankle_pitch_joint" pos="0 0 0" axis="0 1 0" range="-0.610865 1.48353" actuatorfrcrange="-100 100" />
+                  <geom pos="0.001115 -0.032352 0.252962" quat="1 0 0 0" type="mesh" mesh="l_foot_link_1" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <light name="main_light" pos="0 -4 4" dir="0 1 -1" diffuse="0.8 0.8 0.8" />
+  </worldbody>
+  <option timestep="0.005" integrator="implicitfast" />
+  <default>
+    <!-- damping=0: passive joint damping removed; velocity damping is now in the Python PD -->
+    <joint damping="0" armature="0.04" frictionloss="0.2" />
+  </default>
+  <actuator>
+    <!-- motor (torque pass-through): Python step() computes tau = clip(kp*err - kd*vel, -3, 3) -->
+    <motor name="l_hip_yaw" joint="l_hip_yaw" ctrlrange="-3 3" />
+    <motor name="r_hip_yaw" joint="r_hip_yaw" ctrlrange="-3 3" />
+    <motor name="l_hip_roll_joint" joint="l_hip_roll_joint" ctrlrange="-3 3" />
+    <motor name="r_hip_roll_joint" joint="r_hip_roll_joint" ctrlrange="-3 3" />
+    <motor name="l_hip_pitch_joint" joint="l_hip_pitch_joint" ctrlrange="-3 3" />
+    <motor name="r_hip_pitch_joint" joint="r_hip_pitch_joint" ctrlrange="-3 3" />
+    <motor name="l_knee_joint" joint="l_knee_joint" ctrlrange="-3 3" />
+    <motor name="r_knee_joint" joint="r_knee_joint" ctrlrange="-3 3" />
+    <motor name="l_ankle_roll_joint" joint="l_ankle_roll_joint" ctrlrange="-3 3" />
+    <motor name="r_ankle_roll_joint" joint="r_ankle_roll_joint" ctrlrange="-3 3" />
+    <motor name="l_ankle_pitch_joint" joint="l_ankle_pitch_joint" ctrlrange="-3 3" />
+    <motor name="r_ankle_pitch_joint" joint="r_ankle_pitch_joint" ctrlrange="-3 3" />
+  </actuator>
+</mujoco>

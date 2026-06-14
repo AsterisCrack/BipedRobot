@@ -178,6 +178,9 @@ class BipedEnv(DirectRLEnv):
         self.ankle_pitch_indices = torch.tensor(_pitch_idx, device=self.device, dtype=torch.long)
         knee_indices, _ = self.robot.find_joints(self.cfg.knee_joint_names)
         self.knee_indices = torch.tensor(knee_indices, device=self.device, dtype=torch.long)
+        _hpitch_names = getattr(self.cfg, "hip_pitch_joint_names", [])
+        _hpitch_idx, _ = self.robot.find_joints(_hpitch_names) if _hpitch_names else ([], [])
+        self.hip_pitch_indices = torch.tensor(_hpitch_idx, device=self.device, dtype=torch.long)
 
         # Custom joint limit scaling
         self.joint_limits_min = torch.tensor([x[0] for x in self.cfg.joint_limits], device=self.device)
@@ -214,7 +217,8 @@ class BipedEnv(DirectRLEnv):
         if getattr(self.cfg, "enable_video_camera", False) and "camera" in self.scene.sensors:
             self.video_camera = self.scene.sensors["camera"]
         
-        # add ground plane
+        # add ground plane / rough terrain
+        print(f"[Terrain] type={self.cfg.terrain.terrain_type}  generator={self.cfg.terrain.terrain_generator is not None}")
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self.terrain = self.cfg.terrain.class_type(self.cfg.terrain)
@@ -472,26 +476,33 @@ class BipedEnv(DirectRLEnv):
         # 11. feet_air_time (w=1.0) ~ threshold 0.4
         current_air_time = self.contact_sensor.data.current_air_time[:, self._feet_ids]
         current_contact_time = self.contact_sensor.data.current_contact_time[:, self._feet_ids]
-        r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.5, min_speed_command_threshold=0.05)
-        
-        # Reward only when alternating feet
-        target_air_foot = (self.last_feet_indices + 1) % 2
-        feet_in_contact_target = torch.gather(feet_in_contact, 1, target_air_foot.unsqueeze(-1)).squeeze(-1)
-        r_feet_air_time *= (~feet_in_contact_target).float()
+        r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.2, min_speed_command_threshold=0.05)
 
-        # 12. feet_slide (w=-0.1)
-        # Pass raw history and velocity (sliced to feet) for internal computation
-        r_feet_slide = rewards.feet_slide(
-             self.contact_sensor.data.force_matrix_w_history[:, :, self._feet_ids, :], 
-             self.robot.data.body_lin_vel_w[:, self.feet_indices]
-        )
-        
-        # 13. undesired_contacts (w=-1.0) ~ threshold 1.0
-        # Contact forces for Undesired Contacts (hips, knees, base)
-        net_contact_forces_undesired = self.contact_sensor.data.force_matrix_w_history[:, :, self._undesired_contact_body_ids]
-        # Max over history -> [N, History, Bodies, 3] -> Norm -> [N, History, Bodies] -> Max History -> [N, Bodies]
-        undesired_forces_norm = torch.norm(net_contact_forces_undesired, dim=-1) # [N, T, B]
-        undesired_forces_max_per_body = torch.max(torch.max(undesired_forces_norm, dim=1)[0], dim=-1)[0]
+        # 12. feet_slide
+        # force_matrix_w_history is only populated when filter_prim_paths_expr is non-empty
+        # (flat terrain). With rough terrain the filter is cleared, so fall back to net_forces_w.
+        if self.contact_sensor.data.force_matrix_w_history is not None:
+            r_feet_slide = rewards.feet_slide(
+                self.contact_sensor.data.force_matrix_w_history[:, :, self._feet_ids, :],
+                self.robot.data.body_lin_vel_w[:, self.feet_indices]
+            )
+        else:
+            feet_contact = (torch.norm(self.contact_sensor.data.net_forces_w[:, self._feet_ids], dim=-1) > 1.0).float()
+            feet_vel_xy  = torch.norm(self.robot.data.body_lin_vel_w[:, self.feet_indices, :2], dim=-1)
+            r_feet_slide = rewards.feet_slide_with_vel(feet_contact, feet_vel_xy)
+
+        # 13. undesired_contacts
+        if self.contact_sensor.data.force_matrix_w_history is not None:
+            net_contact_forces_undesired = self.contact_sensor.data.force_matrix_w_history[:, :, self._undesired_contact_body_ids]
+            undesired_forces_norm = torch.norm(net_contact_forces_undesired, dim=-1)  # [N, T, B]
+            undesired_forces_max_per_body = torch.max(torch.max(undesired_forces_norm, dim=1)[0], dim=-1)[0]
+        else:
+            # Without filter history, use current net forces directly.
+            # Keep shape [N, num_undesired_bodies] so undesired_contacts() can apply
+            # torch.any(dim=-1) per-environment — do NOT collapse the body dim here.
+            undesired_forces_max_per_body = torch.norm(
+                self.contact_sensor.data.net_forces_w[:, self._undesired_contact_body_ids], dim=-1
+            )  # [N, num_undesired]
         r_undesired_contacts = rewards.undesired_contacts(undesired_forces_max_per_body, threshold=1.0)
         
         # 14. joint_deviation_hip (w=-0.2)
@@ -500,20 +511,48 @@ class BipedEnv(DirectRLEnv):
             self.default_joint_pos[self.hip_indices]
         )
         
-        # 15. joint_deviation_ankle_roll (w=-0.2)
+        # 15. joint_deviation_ankle_roll
         r_joint_deviation_ankle = rewards.joint_deviation_l1(
             self.joint_pos[:, self.ankle_roll_indices],
             self.default_joint_pos[self.ankle_roll_indices]
         )
-        
-        # 16. step_length (w=0.0 default, set in config)
+
+        # 15b. joint_deviation_ankle_pitch — penalise bent-ankle posture (toe-only stance)
+        if len(self.ankle_pitch_indices) > 0:
+            r_joint_deviation_ankle_pitch = rewards.joint_deviation_l1(
+                self.joint_pos[:, self.ankle_pitch_indices],
+                self.default_joint_pos[self.ankle_pitch_indices]
+            )
+        else:
+            r_joint_deviation_ankle_pitch = torch.zeros(self.num_envs, device=self.device)
+
+        # 16. knee deviation — penalise bent knees to encourage upright stance
+        r_joint_deviation_knee = rewards.joint_deviation_l1(
+            self.joint_pos[:, self.knee_indices],
+            self.default_joint_pos[self.knee_indices]
+        )
+
+        # 17. step_length (w=0.0 default, set in config)
         r_step_length = rewards.step_length(touchdown, stride_dist, self.commands, min_speed_command_threshold=0.1)
 
         # 17. swing_foot_height (w=0.0 default)
-        r_swing_foot_height = rewards.swing_foot_height(feet_pos, feet_in_contact, min_height=0.02, max_height=0.06)
+        r_swing_foot_height = rewards.swing_foot_height(feet_pos, feet_in_contact, min_height=0.02, max_height=0.04)
         
-        # 18: Torso centering
+        # 18: Gait phase contact — reward feet in sync with clock to enforce alternation
+        r_gait_phase_contact = rewards.gait_phase_contact(
+            self.gait_phase, feet_in_contact, self.commands, min_speed=0.05
+        )
+
+        # 19: Torso centering (base pos proxy — kept for backward compat, set weight to 0 to disable)
         r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
+
+        # 19b: COM support centering (true mass-weighted COM vs. contacting feet centroid)
+        r_com_support_centering = rewards.com_support_centering_reward(
+            self.robot.data.body_com_pose_w,
+            self.robot.data.default_mass.to(self.device),
+            feet_pos,
+            feet_in_contact,
+        )
 
         # 19: Knee bend during swing on touchdown
         r_knee_bend_touchdown = rewards.knee_bend_on_touchdown(touchdown, self.knee_bend_max, min_bend=0.2, max_bend=1.0)
@@ -524,6 +563,31 @@ class BipedEnv(DirectRLEnv):
             r_ankle_torques = rewards.joint_torques_l2(self.joint_efforts[:, self.ankle_pitch_indices])
         else:
             r_ankle_torques = torch.zeros(self.num_envs, device=self.device)
+
+        # 22: action_l2 — NOTE: kept for backward compat with config keys, but weight should be 0.0
+        # (see plan: action_l2 is structurally broken due to asymmetric joint limits)
+        r_action_l2 = rewards.action_l2(self.actions)
+
+        # 24: dof_pos_l2 — correct all-joint pose regulariser (joint-space, not action-space)
+        r_dof_pos_l2 = rewards.dof_pos_l2(self.joint_pos, self.default_joint_pos)
+
+        # 25: base_height_l2 — penalise crouching (below 0.29m) and tiptoe (above 0.29m)
+        r_base_height = torch.square(
+            self.robot.data.root_pos_w[:, 2] - getattr(self.cfg, "target_base_height", 0.29)
+        )
+
+        # 26: foot_separation — V2 hip joints are ±21.7 mm apart (4.3 cm natural spacing);
+        # penalise when feet come closer than min_sep to force stable hip-width stance.
+        r_foot_separation = rewards.foot_separation_penalty(feet_pos, min_sep=0.07)
+
+        # 23: hip pitch deviation — mild penalty allows walking but discourages lean/crouch
+        if len(self.hip_pitch_indices) > 0:
+            r_joint_deviation_hip_pitch = rewards.joint_deviation_l1(
+                self.joint_pos[:, self.hip_pitch_indices],
+                self.default_joint_pos[self.hip_pitch_indices]
+            )
+        else:
+            r_joint_deviation_hip_pitch = torch.zeros(self.num_envs, device=self.device)
 
         # 21: Animation tracking (optional)
         if self.motion_ref is not None:
@@ -553,13 +617,22 @@ class BipedEnv(DirectRLEnv):
             "undesired_contacts": r_undesired_contacts * self.cfg.rewards.get("undesired_contacts", 0.0),
             "joint_deviation_hip": r_joint_deviation_hip * self.cfg.rewards.get("joint_deviation_hip", 0.0),
             "joint_deviation_ankle_roll": r_joint_deviation_ankle * self.cfg.rewards.get("joint_deviation_ankle_roll", 0.0),
+            "joint_deviation_ankle_pitch": r_joint_deviation_ankle_pitch * self.cfg.rewards.get("joint_deviation_ankle_pitch", 0.0),
+            "joint_deviation_knee": r_joint_deviation_knee * self.cfg.rewards.get("joint_deviation_knee", 0.0),
             "step_length": r_step_length * self.cfg.rewards.get("step_length", 0.0),
             "swing_foot_height": r_swing_foot_height * self.cfg.rewards.get("swing_foot_height", 0.0),
             "torso_centering": r_torso_centering * self.cfg.rewards.get("torso_centering", 0.0),
+            "com_support_centering": r_com_support_centering * self.cfg.rewards.get("com_support_centering", 0.0),
+            "gait_phase_contact": r_gait_phase_contact * self.cfg.rewards.get("gait_phase_contact", 0.0),
             "knee_bend_touchdown": r_knee_bend_touchdown * self.cfg.rewards.get("knee_bend_touchdown", 0.0),
             "track_joint_pos_exp": r_track_joint_pos * self.cfg.rewards.get("track_joint_pos_exp", 0.0),
             "track_joint_vel_exp": r_track_joint_vel * self.cfg.rewards.get("track_joint_vel_exp", 0.0),
             "ankle_torques_l2": r_ankle_torques * self.cfg.rewards.get("ankle_torques_l2", 0.0),
+            "action_l2": r_action_l2 * self.cfg.rewards.get("action_l2", 0.0),
+            "joint_deviation_hip_pitch": r_joint_deviation_hip_pitch * self.cfg.rewards.get("joint_deviation_hip_pitch", 0.0),
+            "dof_pos_l2": r_dof_pos_l2 * self.cfg.rewards.get("dof_pos_l2", 0.0),
+            "base_height_l2": r_base_height * self.cfg.rewards.get("base_height_l2", 0.0),
+            "foot_separation": r_foot_separation * self.cfg.rewards.get("foot_separation", 0.0),
         }
         
         # Weighted sum

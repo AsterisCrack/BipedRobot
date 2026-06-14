@@ -96,12 +96,14 @@ def train():
     config = Config(args_cli.config_path)
     
     # Initialize Isaac Lab Environment
-    env_cfg = BipedEnvCfg()
-    
-    # Override config values if needed based on train_config
-    if hasattr(config.train, "use_rough_terrain"):
-        env_cfg.use_rough_terrain = config.train.use_rough_terrain
+    # terrain flags must reach __post_init__ via the constructor — setting them
+    # after construction is too late because __post_init__ already ran with defaults.
+    env_cfg = BipedEnvCfg(
+        use_rough_terrain=getattr(config.train, "use_rough_terrain", False),
+        use_terrain_curriculum=getattr(config.train, "use_terrain_curriculum", False),
+    )
 
+    # Override config values if needed based on train_config
     if hasattr(config.train, "use_history"):
         env_cfg.use_history = config.train.use_history
 

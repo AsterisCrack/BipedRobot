@@ -80,9 +80,14 @@ def play():
     config = Config(args_cli.config_path)
     
     # Initialize Isaac Lab Environment
-    env_cfg = BipedEnvCfg()
+    # terrain flags must reach __post_init__ via the constructor — setting them
+    # after construction is too late because __post_init__ already ran with defaults.
+    env_cfg = BipedEnvCfg(
+        use_rough_terrain=getattr(config.train, "use_rough_terrain", False),
+        use_terrain_curriculum=getattr(config.train, "use_terrain_curriculum", False),
+    )
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else 1
-    
+
     if hasattr(config.train, "history_size"):
         env_cfg.history_size = config.train.history_size
     if hasattr(config.train, "use_history"):
@@ -215,22 +220,52 @@ def play():
         use_history=use_history,
         history_size=history_size
     )
-    
+
+    # Load obs-normalisation statistics saved during training and freeze them.
+    if checkpoint_path and hasattr(wrapped_env, "load"):
+        wrapped_env.load(checkpoint_path)
+    if hasattr(wrapped_env, "set_eval_mode"):
+        wrapped_env.set_eval_mode()
+
+    # Switch neural-network layers to eval mode (BatchNorm uses running stats, Dropout disabled)
+    _net = getattr(model, "model", model)
+    if hasattr(_net, "eval"):
+        _net.eval()
+
     # Play loop
     obs = wrapped_env.start()
-    
+
     print("Starting playback...")
+    _step_count = 0
+    _history_size = getattr(env_cfg, "history_size", 0) if getattr(env_cfg, "use_history", False) else 0
+
     while simulation_app.is_running():
-        # Get action from policy
-        # SAC.step() returns action
-        action = model.step(obs)
-        
+        # For the first history_size steps after each reset, use stochastic rsample()
+        # to match SAC training behaviour (policy was trained with rsample, not .mean).
+        # The zero-padded history produces extreme obs at episode start that cause
+        # saturated deterministic actions; stochastic sampling is more robust here.
+        if _step_count < _history_size and hasattr(model, "model") and hasattr(model.model, "actor"):
+            obs_t = obs.get("actor", next(iter(obs.values()))) if isinstance(obs, dict) else obs
+            if not isinstance(obs_t, torch.Tensor):
+                obs_t = torch.from_numpy(obs_t).float()
+            if obs_t.dim() == 1:
+                obs_t = obs_t.unsqueeze(0)
+            obs_t = obs_t.to(device)
+            with torch.no_grad():
+                dist = model.model.actor.forward(obs_t)
+                action = dist.rsample() if hasattr(dist, "rsample") else model.step(obs)
+        else:
+            action = model.step(obs)
+
+        _step_count += 1
+
         # Step environment
         obs, rew, terminated, truncated, info = wrapped_env.step(action)
-        
+
         # Reset if needed
         if terminated.any() or truncated.any():
             obs = wrapped_env.start()
+            _step_count = 0   # restart warmup on each episode reset
             
     env.close()
     simulation_app.close()

@@ -22,46 +22,34 @@ from envs.assets.robot.biped_robot import JOINT_LIMITS as JOINT_LIMITS_V1
 from envs.assets.robotV2.biped_robot import BIPED_ROBOT_CFG as BIPED_ROBOT_V2_CFG
 from envs.assets.robotV2.biped_robot import JOINT_LIMITS as JOINT_LIMITS_V2
 
+# Rough terrain scaled for the 30 cm BipedRobotV2.
+# Purpose: ground perturbation training, NOT an obstacle course.
+# The robot has no height scanner, so stairs/slopes are impossible to anticipate.
+# Keep terrain gentle (max 8mm bumps, 12mm waves) so the flat-terrain policy adapts quickly.
 ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=20.0,
-    num_rows=10,
+    # num_rows=20 is critical: terrain generator centers the mesh at world origin, so
+    # num_rows*size must cover the env grid (64x64 @ 2.5m = ±78.75m). With num_rows=20,
+    # terrain spans ±80m — enough to cover all 4096 env origins without robot pileup.
+    # (num_rows=3 → only 3 x-positions for 4096 robots → 68 robots per 1m² → physics chaos)
+    num_rows=20,
     num_cols=20,
-    horizontal_scale=0.1,
-    vertical_scale=0.005,
+    horizontal_scale=0.1,  # 10 cm/pixel — coarser mesh reduces edge-contact artifacts
+    vertical_scale=0.005,  # 5 mm/unit
     slope_threshold=0.75,
     use_cache=False,
     sub_terrains={
-        "flat": terrain_gen.MeshPlaneTerrainCfg(
-            proportion=0.3,
-        ),
-        "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
-            proportion=0.1, slope_range=(0.0, 0.15), platform_width=2.0, border_width=0.25
-        ),
-        "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
-            proportion=0.1, slope_range=(0.0, 0.15), platform_width=2.0, border_width=0.25
-        ),
-        "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
-            proportion=0.05,
-            step_height_range=(0.0, 0.1),
-            step_width=0.3,
-            platform_width=3.0,
-            border_width=1.0,
-            holes=False,
-        ),
-        "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
-            proportion=0.05,
-            step_height_range=(0.0, 0.1),
-            step_width=0.3,
-            platform_width=3.0,
-            border_width=1.0,
-            holes=False,
-        ),
-        "wave_terrain": terrain_gen.HfWaveTerrainCfg(
-            proportion=0.2, amplitude_range=(0.0, 0.05), num_waves=4, border_width=0.25
-        ),
+        # 35% flat — still enough safe terrain for policy stability
+        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.35),
+        # Random bumps 0–20 mm at max difficulty
+        # noise_step must be >= vertical_scale (0.005) so int(noise_step/vertical_scale) >= 1
         "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
-            proportion=0.2, noise_range=(0.0, 0.03), noise_step=0.01, border_width=0.25
+            proportion=0.4, noise_range=(0.0, 0.020), noise_step=0.005, border_width=0.25
+        ),
+        # Smooth waves 0–25 mm amplitude
+        "wave_terrain": terrain_gen.HfWaveTerrainCfg(
+            proportion=0.25, amplitude_range=(0.0, 0.025), num_waves=3, border_width=0.25
         ),
     },
 )
@@ -286,15 +274,15 @@ class BipedEnvCfg(DirectRLEnvCfg):
             func="isaaclab.envs.mdp:reset_joints_by_scale",
             mode="reset",
             params={
-                "position_range": (-0.1, 0.1),  # wider init range (was ±0.01) for recovery curriculum
-                "velocity_range": (-0.1, 0.1),
+                "position_range": (-0.02, 0.02),  # tight: start near neutral; ±0.1 created escape-barrier for dof_pos_l2
+                "velocity_range": (-0.02, 0.02),
             },
         ),
         # Random perturbations (push)
         "push_robot": EventTerm(
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
-            interval_range_s=(10.0, 15.0),
+            interval_range_s=(1.0, 5.0),
             params={"velocity_range": {"x": (-0.3, 0.3), "y": (-0.2, 0.2)}},  # stronger push (was ±0.05)
         ),
         # Physics Randomization
@@ -330,7 +318,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
                 "num_buckets": 64,
             },
         ),
-        # # COM offset randomization: curriculum-scaled via curriculum_dr_events
+        # COM offset randomization: curriculum-scaled via curriculum_dr_events
         # "randomize_com": EventTerm(
         #     func="isaaclab.envs.mdp:randomize_rigid_body_com",
         #     mode="reset",
@@ -339,16 +327,16 @@ class BipedEnvCfg(DirectRLEnvCfg):
         #         "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
         #     },
         # ),
-        # # Payload: curriculum-scaled via curriculum_dr_events
-        # "randomize_payload": EventTerm(
-        #     func="isaaclab.envs.mdp:randomize_rigid_body_mass",
-        #     mode="reset",
-        #     params={
-        #         "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-        #         "mass_distribution_params": (0.0, 0.15),
-        #         "operation": "add",
-        #     },
-        # ),
+        # Payload: curriculum-scaled via curriculum_dr_events
+        "randomize_payload": EventTerm(
+            func="isaaclab.envs.mdp:randomize_rigid_body_mass",
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+                "mass_distribution_params": (0.0, 0.15),
+                "operation": "add",
+            },
+        ),
     }
 
     # observation groups
@@ -389,11 +377,11 @@ class BipedEnvCfg(DirectRLEnvCfg):
         #         self.events.pop(key, None)
 
         if self.use_rough_terrain:
-            # Update Terrain
             self.terrain.terrain_type = "generator"
             self.terrain.terrain_generator = ROUGH_TERRAINS_CFG
-            self.terrain.max_init_terrain_level = 5
+            self.terrain.max_init_terrain_level = 0 if self.use_terrain_curriculum else None
             self.terrain.collision_group = 0
+            self.scene.contact_forces.filter_prim_paths_expr = []
             
 @configclass
 class BipedRoughEnvCfg(BipedEnvCfg):
@@ -432,6 +420,11 @@ class BipedRobotV2EnvCfg(BipedEnvCfg):
     ankle_pitch_joint_names = [
         "(l|left)_ankle_pitch.*",
         "(r|right)_ankle_pitch.*",
+    ]
+
+    hip_pitch_joint_names = [
+        "(l|left)_hip_pitch.*",
+        "(r|right)_hip_pitch.*",
     ]
 
     knee_joint_names = [
