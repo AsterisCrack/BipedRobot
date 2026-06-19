@@ -83,8 +83,9 @@ class BipedRobotV2SceneCfg(InteractiveSceneCfg):
     )
     imu: ImuCfg = ImuCfg(
         prim_path="{ENV_REGEX_NS}/Robot/Robot/base_link",
+        offset=ImuCfg.OffsetCfg(pos=(-0.023673, 0.0, 0.025133)),
     )
-    
+
 
 @configclass
 class BipedEnvCfg(DirectRLEnvCfg):
@@ -319,14 +320,14 @@ class BipedEnvCfg(DirectRLEnvCfg):
             },
         ),
         # COM offset randomization: curriculum-scaled via curriculum_dr_events
-        # "randomize_com": EventTerm(
-        #     func="isaaclab.envs.mdp:randomize_rigid_body_com",
-        #     mode="reset",
-        #     params={
-        #         "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-        #         "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
-        #     },
-        # ),
+        #"randomize_com": EventTerm(
+        #    func="isaaclab.envs.mdp:randomize_rigid_body_com",
+        #    mode="reset",
+        #    params={
+        #        "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+        #        "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
+        #    },
+        #),
         # Payload: curriculum-scaled via curriculum_dr_events
         "randomize_payload": EventTerm(
             func="isaaclab.envs.mdp:randomize_rigid_body_mass",

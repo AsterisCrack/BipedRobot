@@ -19,6 +19,7 @@
     <geom name="floor" type="plane" size="0 0 0.05" condim="3" friction="1 0 0" rgba="0.8 0.8 0.8 1" />
     <body name="base_link" pos="0 0 0.3">
       <freejoint name="root" />
+      <site name="imu_site" pos="-0.023673 0.0 0.025133" size="0.005"/>
       <geom type="mesh" mesh="base_link" />
       <body name="r_hip_upper_link_1" pos="-0.00159 -0.021672 -0.00015">
         <inertial pos="0.000373 -0.028289 -0.025073" quat="0.991362 -0.075738 -0.044505 -0.0973831" mass="0.100649" diaginertia="3.41054e-05 3.32919e-05 2.06027e-05" />

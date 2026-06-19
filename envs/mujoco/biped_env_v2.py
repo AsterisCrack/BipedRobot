@@ -145,6 +145,8 @@ class BipedEnvV2(BaseEnv):
         self._qpos_ids = np.array([int(self.model.joint(n).qposadr) for n in JOINT_NAMES], dtype=int)
         self._qvel_ids = np.array([int(self.model.joint(n).dofadr)  for n in JOINT_NAMES], dtype=int)
         self._act_ids  = np.array([int(self.model.actuator(n).id)   for n in JOINT_NAMES], dtype=int)
+        self._base_body_id  = self.model.body("base_link").id
+        self._imu_offset_b  = np.array([0.023673, 0.0, 0.025133], dtype=np.float64)
 
         # Foot bodies and their geoms
         self._r_foot_body = self.model.body("r_foot_link_1").id
@@ -253,6 +255,16 @@ class BipedEnvV2(BaseEnv):
     # ------------------------------------------------------------------
     # Frame transforms
     # ------------------------------------------------------------------
+
+    def _v_imu_world(self) -> np.ndarray:
+        """World-frame translational velocity at the IMU mounting point.
+        v_imu = v_base + omega_world × r_imu_world
+        Uses data.xmat (always available regardless of MuJoCo version).
+        """
+        R_bw = self.data.xmat[self._base_body_id].reshape(3, 3)  # body-to-world
+        omega_w = R_bw @ self.data.qvel[3:6]
+        r_w = R_bw @ self._imu_offset_b
+        return self.data.qvel[:3] + np.cross(omega_w, r_w)
 
     def _world_to_body_rot(self) -> np.ndarray:
         """3×3 rotation matrix: world → body frame (R^T)."""
@@ -569,9 +581,9 @@ class BipedEnvV2(BaseEnv):
         # Run all but last substep, then capture last-substep velocity for instantaneous IMU acc
         for _ in range(DECIMATION - 1):
             mujoco.mj_step(self.model, self.data)
-        _vel_before_last = self.data.qvel[:3].copy()
+        _v_imu_before = self._v_imu_world()
         mujoco.mj_step(self.model, self.data)
-        self._last_physics_acc = (self.data.qvel[:3] - _vel_before_last) / PHYSICS_DT
+        self._last_physics_acc = (self._v_imu_world() - _v_imu_before) / PHYSICS_DT
         # Clamp joint velocities to match Isaac Lab velocity_limit=5 rad/s
         self.data.qvel[self._qvel_ids] = np.clip(self.data.qvel[self._qvel_ids], -5.0, 5.0)
 
