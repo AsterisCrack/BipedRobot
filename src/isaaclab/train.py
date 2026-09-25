@@ -98,9 +98,15 @@ def train():
     # Initialize Isaac Lab Environment
     # terrain flags must reach __post_init__ via the constructor — setting them
     # after construction is too late because __post_init__ already ran with defaults.
+    # The DR gates below are in the same boat: __post_init__ pops the randomization events,
+    # so assigning them further down (where the other env_config keys are handled) would be
+    # read too late and the flags would silently do nothing.
+    _env_conf = getattr(config.train, "env_config", None)
     env_cfg = BipedEnvCfg(
         use_rough_terrain=getattr(config.train, "use_rough_terrain", False),
         use_terrain_curriculum=getattr(config.train, "use_terrain_curriculum", False),
+        enable_perturbations=getattr(_env_conf, "enable_perturbations", True),
+        enable_physics_randomization=getattr(_env_conf, "enable_physics_randomization", True),
     )
 
     # Override config values if needed based on train_config
@@ -180,19 +186,18 @@ def train():
 
         # Curriculum
         for _field in ("curriculum_enabled", "curriculum_dr_start_steps", "curriculum_dr_full_steps",
-                       "curriculum_cmd_ramp_steps", "curriculum_init_ramp_steps", "curriculum_dr_events"):
+                       "curriculum_cmd_ramp_steps", "curriculum_init_ramp_steps", "curriculum_dr_events",
+                       "action_delay_steps_range", "servo_obs_delay_steps", "imu_obs_delay_steps_range"):
             if hasattr(env_conf, _field):
                 setattr(env_cfg, _field, getattr(env_conf, _field))
 
         # Randomization & Events
-        if hasattr(env_conf, "enable_perturbations"):
-            env_cfg.enable_perturbations = env_conf.enable_perturbations
+        # enable_perturbations / enable_physics_randomization are NOT set here -- they are
+        # passed to the BipedEnvCfg constructor above, because __post_init__ consumes them.
         if hasattr(env_conf, "push_interval_s"):
             env_cfg.push_interval_s = env_conf.push_interval_s
         if hasattr(env_conf, "push_vel_range"):
             env_cfg.push_vel_range = env_conf.push_vel_range
-        if hasattr(env_conf, "enable_physics_randomization"):
-            env_cfg.enable_physics_randomization = env_conf.enable_physics_randomization
             
         # Events
         if hasattr(env_conf, "events") and env_conf.events:

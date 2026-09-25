@@ -7,6 +7,7 @@ import math
 import numpy as np
 
 import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sensors import ContactSensor, Imu, TiledCamera
@@ -60,8 +61,12 @@ class BipedEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Find feet indices (right then left)
+        # preserve_order=True is required: without it find_bodies returns ascending body-index
+        # order, and V2's left chain precedes the right in the asset, so [right, left] silently
+        # came back as [left, right] — inverting right_foot_idx/left_foot_idx and the leg
+        # convention in gait_phase_contact.
         self.feet_indices, _ = self.robot.find_bodies(
-            [self.cfg.right_foot_body_name, self.cfg.left_foot_body_name]
+            [self.cfg.right_foot_body_name, self.cfg.left_foot_body_name], preserve_order=True
         )
         self.right_foot_idx = self.feet_indices[0]
         self.left_foot_idx = self.feet_indices[1]
@@ -102,7 +107,24 @@ class BipedEnv(DirectRLEnv):
         self.max_action_delay = int(delay_range[1])
         self.action_delay_buffer = torch.zeros(self.num_envs, self.max_action_delay + 1, self.num_joints, device=self.device)
         self.action_delay = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
-        
+
+        # Sensor lag buffers. Same ring-buffer convention as the actuator delay above:
+        # newest sample written at index 0, index == age in control steps.
+        # Servo encoders (joint pos+vel) lag a fixed number of steps for every env.
+        self.servo_obs_delay = int(getattr(cfg, 'servo_obs_delay_steps', 0))
+        self.servo_obs_buffer = torch.zeros(
+            self.num_envs, self.servo_obs_delay + 1, 2 * self.num_joints, device=self.device
+        )
+        # IMU (accel + gyro + projected gravity, all from the same sensor) lags a per-env
+        # amount drawn once at reset, so the policy must be robust to an unknown fixed lag.
+        imu_delay_range = getattr(cfg, 'imu_obs_delay_steps_range', [0, 0])
+        self.imu_obs_delay_range = [int(imu_delay_range[0]), int(imu_delay_range[1])]
+        self.max_imu_obs_delay = self.imu_obs_delay_range[1]
+        self.imu_obs_buffer = torch.zeros(
+            self.num_envs, self.max_imu_obs_delay + 1, 9, device=self.device
+        )
+        self.imu_obs_delay = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
+
         # Commands
         self.command_generator = UniformVelocityCommand(self.cfg, self.num_envs, self.device, self.step_dt)
         self.commands = self.command_generator.commands
@@ -161,12 +183,20 @@ class BipedEnv(DirectRLEnv):
             self._observation_noise_model = self.cfg.observation_noise_model.class_type(
                 self.cfg.observation_noise_model, num_envs=self.num_envs, device=self.device
             )
+            # Noise is applied here to the current 50-dim frame before it enters the history
+            # buffer. Null the cfg entry so DirectRLEnv.step() does not apply it a second time
+            # to the flattened 250-dim stack, which would re-randomise all 5 frames every step
+            # and destroy the history's temporal coherence.
+            self.cfg.observation_noise_model = None
 
         # Get specific body indices
         self._base_id, _ = self.contact_sensor.find_bodies(self.cfg.base_body_name)
         self._feet_ids, _ = self.contact_sensor.find_bodies(
-            [self.cfg.right_foot_body_name, self.cfg.left_foot_body_name]
+            [self.cfg.right_foot_body_name, self.cfg.left_foot_body_name], preserve_order=True
         )
+        # Must be [right, left] — gait_phase_contact indexes feet_in_contact[:, 0] as right.
+        print(f"[biped_env] _feet_ids order: {[self.contact_sensor.body_names[i] for i in self._feet_ids]}")
+        print(f"[biped_env] robot feet order: {[self.robot.body_names[i] for i in self.feet_indices]}")
         # Undesired contact bodies are all but feet
         self._undesired_contact_body_ids = [i for i in range(self.robot.num_bodies) if i not in self._feet_ids]
         
@@ -182,10 +212,17 @@ class BipedEnv(DirectRLEnv):
         _hpitch_idx, _ = self.robot.find_joints(_hpitch_names) if _hpitch_names else ([], [])
         self.hip_pitch_indices = torch.tensor(_hpitch_idx, device=self.device, dtype=torch.long)
 
-        # Custom joint limit scaling
+        # Custom joint limit scaling.
+        # NOTE: this binds row i of cfg.joint_limits to DOF i by POSITION, with no reference to
+        # robot.joint_names. mirror_joint_perm rests on the same unverified assumption. We
+        # already found find_bodies silently returning the feet in the wrong order, so print the
+        # real order and check it against the documented one in biped_env_cfg.
         self.joint_limits_min = torch.tensor([x[0] for x in self.cfg.joint_limits], device=self.device)
         self.joint_limits_max = torch.tensor([x[1] for x in self.cfg.joint_limits], device=self.device)
         self.joint_range = self.joint_limits_max - self.joint_limits_min
+        print(f"[biped_env] joint order ({len(self.robot.joint_names)}): {list(self.robot.joint_names)}")
+        print(f"[biped_env] joint_limits rows (deg): "
+              f"{[[round(math.degrees(v), 1) for v in lim] for lim in self.cfg.joint_limits]}")
 
         # Motion reference (imitation)
         self.motion_ref = None
@@ -338,6 +375,30 @@ class BipedEnv(DirectRLEnv):
         self.joint_vel = self.robot.data.joint_vel
         self.joint_efforts = self.robot.data.applied_torque
         
+        # Sensor lag. The self.* attributes above stay ground truth -- the reward terms and
+        # _get_dones read them -- so the delayed copies live in locals used only for the
+        # observation. Overwriting the attributes would silently compute rewards on stale data.
+        joint_pos_obs, joint_vel_obs = self.joint_pos, self.joint_vel
+        if self.servo_obs_delay > 0:
+            self.servo_obs_buffer = torch.roll(self.servo_obs_buffer, shifts=1, dims=1)
+            self.servo_obs_buffer[:, 0] = torch.cat([self.joint_pos, self.joint_vel], dim=-1)
+            joint_pos_obs, joint_vel_obs = self.servo_obs_buffer[:, self.servo_obs_delay].split(
+                self.num_joints, dim=-1
+            )
+
+        imu_acc_obs = self.imu_lin_acc_b
+        imu_gyro_obs = self.imu_ang_vel_b
+        gravity_obs = self.projected_gravity_b
+        if self.max_imu_obs_delay > 0:
+            self.imu_obs_buffer = torch.roll(self.imu_obs_buffer, shifts=1, dims=1)
+            self.imu_obs_buffer[:, 0] = torch.cat(
+                [self.imu_lin_acc_b, self.imu_ang_vel_b, self.projected_gravity_b], dim=-1
+            )
+            imu_delayed = self.imu_obs_buffer[
+                torch.arange(self.num_envs, device=self.device), self.imu_obs_delay
+            ]
+            imu_acc_obs, imu_gyro_obs, gravity_obs = imu_delayed.split(3, dim=-1)
+
         # Gait phase clock: advance proportional to commanded XY speed
         v_cmd_norm = torch.norm(self.commands[:, :2], dim=1)
         self.gait_phase = (
@@ -347,12 +408,12 @@ class BipedEnv(DirectRLEnv):
 
         # Proprioceptive observations (48 base + 2 phase = 50)
         obs_proprio = torch.cat([
-            self.imu_lin_acc_b,
-            self.imu_ang_vel_b,
-            self.projected_gravity_b,
+            imu_acc_obs,
+            imu_gyro_obs,
+            gravity_obs,
             self.commands,
-            (self.joint_pos - self.default_joint_pos),
-            self.joint_vel,
+            (joint_pos_obs - self.default_joint_pos),
+            joint_vel_obs,
             self.previous_actions,
             phase_obs,
         ], dim=-1)
@@ -367,9 +428,16 @@ class BipedEnv(DirectRLEnv):
         # Height above ground
         priv_height = self.robot.data.root_pos_w[:, 2:3]  # [N, 1]
 
-        # Net contact force at each foot, flattened — [N, 2, 3] → [N, 6]
+        # Net contact force at each foot, rotated into the body frame and flattened.
+        # Body frame is required for two reasons: it makes the feature heading-independent,
+        # and the symmetry mirror flips the y-component, which is only a valid sagittal
+        # reflection in the body frame (in world frame it would only be correct at yaw 0).
         feet_net_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]  # [N, 2, 3]
-        priv_feet_forces = feet_net_forces.reshape(self.num_envs, -1)  # [N, 6]
+        quat_expanded = self.base_quat.unsqueeze(1).expand(-1, feet_net_forces.shape[1], -1)
+        feet_net_forces_b = math_utils.quat_apply_inverse(
+            quat_expanded.reshape(-1, 4), feet_net_forces.reshape(-1, 3)
+        ).reshape(self.num_envs, -1)  # [N, 6]
+        priv_feet_forces = feet_net_forces_b
 
         obs_priv = torch.cat([
             priv_lin_vel,
@@ -576,6 +644,17 @@ class BipedEnv(DirectRLEnv):
             self.robot.data.root_pos_w[:, 2] - getattr(self.cfg, "target_base_height", 0.29)
         )
 
+        # One-shot diagnostic: which body axis is the lateral one? foot_separation currently
+        # measures world-Y, which is only correct while the robot faces world +-X. Print the
+        # foot separation vector in BOTH frames once so we can pick the right body axis.
+        if not getattr(self, "_logged_sep_axis", False):
+            self._logged_sep_axis = True
+            _vec_w = (feet_pos[:, 0, :] - feet_pos[:, 1, :])[:4]
+            _vec_b = math_utils.quat_apply_inverse(self.base_quat[:4], _vec_w)
+            print(f"[biped_env] foot sep vector, world frame (4 envs):\n{_vec_w.cpu().numpy()}")
+            print(f"[biped_env] foot sep vector, body frame  (4 envs):\n{_vec_b.cpu().numpy()}")
+            print("[biped_env] lateral axis = whichever body-frame column has the largest |value|")
+
         # 26: foot_separation — V2 hip joints are ±21.7 mm apart (4.3 cm natural spacing);
         # penalise when feet come closer than min_sep to force stable hip-width stance.
         r_foot_separation = rewards.foot_separation_penalty(feet_pos, min_sep=0.07)
@@ -661,14 +740,6 @@ class BipedEnv(DirectRLEnv):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         limit_angle = 0.784  # ~45 degrees
         died = torch.acos(-self.robot.data.projected_gravity_b[:, 2]).abs() > limit_angle
-        
-        # Terminate if both feet are airborne (after 1s of settling time)
-        feet_contact_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]
-        feet_in_contact = torch.norm(feet_contact_forces, dim=-1) > 1.0
-        both_airborne = torch.all(~feet_in_contact, dim=-1)
-        
-        min_time_steps = int(1.0 / self.step_dt)
-        died = died | (both_airborne & (self.episode_length_buf > min_time_steps))
         return died, time_out
         
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -745,7 +816,21 @@ class BipedEnv(DirectRLEnv):
             self.action_delay[env_ids] = torch.randint(
                 delay_range[0], delay_range[1] + 1, (len(env_ids),), device=self.device
             )
-        
+
+        # Seed the servo lag buffer with the post-reset encoder reading in every slot, so a
+        # freshly reset env doesn't observe pre-reset joint state for its first few steps.
+        self.servo_obs_buffer[env_ids] = torch.cat(
+            [self.robot.data.joint_pos[env_ids], self.robot.data.joint_vel[env_ids]], dim=-1
+        ).unsqueeze(1)
+        # The Imu sensor is lazily updated and may still hold the pre-reset step here, so zero
+        # rather than seeding from a stale read.
+        self.imu_obs_buffer[env_ids] = 0.0
+        if self.max_imu_obs_delay > 0:
+            self.imu_obs_delay[env_ids] = torch.randint(
+                self.imu_obs_delay_range[0], self.imu_obs_delay_range[1] + 1,
+                (len(env_ids),), device=self.device
+            )
+
         # Reset feet contact history to True.
         self.feet_in_contact_prev[env_ids] = True
 
@@ -896,7 +981,10 @@ class BipedEnv(DirectRLEnv):
         p[12:24] = 12 + j_perm;  s[12:24] = j_signs  # joint_pos
         p[24:36] = 24 + j_perm;  s[24:36] = j_signs  # joint_vel
         p[36:48] = 36 + j_perm;  s[36:48] = j_signs  # prev_actions
-        # phase_clock [48:50]: symmetric — no change
+        # phase_clock [48:50] is ANTIsymmetric, not symmetric: gait_phase_contact encodes
+        # "sin(phi) > 0 -> right foot stance", so an L<->R swap means phi -> phi + pi, which
+        # negates both sin and cos.
+        s[48] = -1.; s[49] = -1.
         self._mirror_obs_perm  = p
         self._mirror_obs_signs = s
 

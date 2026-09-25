@@ -117,7 +117,10 @@ class EnvConfig(BaseModel):
     curriculum_cmd_ramp_steps: int = 5_000_000
     curriculum_init_ramp_steps: int = 5_000_000
     curriculum_dr_events: List[str] = Field(default_factory=list)
-    
+    action_delay_steps_range: List[int] = Field(default_factory=lambda: [0, 0])
+    servo_obs_delay_steps: int = 0
+    imu_obs_delay_steps_range: List[int] = Field(default_factory=lambda: [0, 0])
+
     class Config:
         extra = "allow" # Allow extra fields to avoid validation errors for complex nested dicts
     

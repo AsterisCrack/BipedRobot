@@ -98,8 +98,16 @@ class UniformVelocityCommand:
             current_yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
             
             heading_error = wrap_to_pi(self.heading_target - current_yaw)
-            target_ang_vel_z = heading_error * self.heading_control_stiffness
-            
+            # Clamp to the configured yaw range. Without this, a heading error near +-pi with
+            # stiffness 0.5 commands +-1.57 rad/s -- over 5x the configured +-0.3 -- which is
+            # unreachable, and track_ang_vel_z_exp (std=0.15) returns numerically zero there,
+            # so those envs get no yaw reward and no gradient while still paying the stability
+            # penalties. Upstream Isaac Lab clamps this the same way.
+            r_z = self.ranges.get("ang_vel_z", (-1.0, 1.0))
+            target_ang_vel_z = torch.clamp(
+                heading_error * self.heading_control_stiffness, min=float(r_z[0]), max=float(r_z[1])
+            )
+
             # Apply to commands
             self.commands[self.in_heading_mode, 2] = target_ang_vel_z[self.in_heading_mode]
             

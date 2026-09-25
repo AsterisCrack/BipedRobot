@@ -158,6 +158,10 @@ class BipedEnvCfg(DirectRLEnvCfg):
 
     # Actuator delay simulation: per-env delay sampled from [min, max] steps at reset
     action_delay_steps_range: list = [0, 0]
+    # Sensor lag (observation side), in control steps. Servo delay is fixed for all envs;
+    # IMU delay is sampled per-env at reset from [min, max].
+    servo_obs_delay_steps: int = 0
+    imu_obs_delay_steps_range: list = [0, 0]
     # TODO: Changes made: action max delay 2 -> 0, commented new randomizations, removed history, lowered mlp size, removed symmetry
 
     # Randomization
@@ -275,7 +279,12 @@ class BipedEnvCfg(DirectRLEnvCfg):
             func="isaaclab.envs.mdp:reset_joints_by_scale",
             mode="reset",
             params={
-                "position_range": (-0.02, 0.02),  # tight: start near neutral; ±0.1 created escape-barrier for dof_pos_l2
+                # DEAD VALUES. _apply_curriculum overwrites both with
+                # curriculum_init_range_max (0.10) whenever curriculum_enabled is true, and
+                # curriculum_init_ramp_steps: 0 makes init_scale 1.0 from the very first reset.
+                # Edit curriculum_init_range_min/max above to change the actual init range.
+                # (Original note: ±0.1 created an escape-barrier for dof_pos_l2 at weight -0.5.)
+                "position_range": (-0.02, 0.02),
                 "velocity_range": (-0.02, 0.02),
             },
         ),
@@ -287,13 +296,27 @@ class BipedEnvCfg(DirectRLEnvCfg):
             params={"velocity_range": {"x": (-0.3, 0.3), "y": (-0.2, 0.2)}},  # stronger push (was ±0.05)
         ),
         # Physics Randomization
+        # NOTE: Isaac Lab draws an INDEPENDENT delta per body (events.py, sample shape is
+        # (num_envs, num_bodies)) -- not one value broadcast across bodies.
+        #
+        # The previous config was add (-0.2, +0.4) kg on body_names=".*". V2's nominal total is
+        # 1.661 kg and every one of the 12 leg links is LIGHTER than 0.2 kg, so the negative
+        # end of that range drove links to min_mass=1e-6 -- silently, no error. Result: the
+        # ankle/hip_lower links were massless on ~30% of episodes and the feet on ~17%, with
+        # recompute_inertia scaling their inertia by ~4.7e-5. Mean total mass was 1.86x nominal
+        # over a 0.38x-3.98x range, i.e. the real robot sat at ~the 1st percentile of training.
+        #
+        # scale is dimensionally correct, centred on 1.0, and cannot produce a zero or negative
+        # mass. body_names=".*_link_1" fullmatches exactly the 12 leg links and excludes
+        # base_link, which is owned by randomize_payload -- that term resets its target to
+        # default before applying, so any mass term on base_link would be silently discarded.
         "randomize_mass": EventTerm(
             func="isaaclab.envs.mdp:randomize_rigid_body_mass",
             mode="reset",
             params={
-                "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "mass_distribution_params": (-0.2, 0.4),
-                "operation": "add",
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*_link_1"),
+                "mass_distribution_params": (0.8, 1.2),
+                "operation": "scale",
             },
         ),
         # Randomize actuator gains
@@ -370,12 +393,17 @@ class BipedEnvCfg(DirectRLEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # if not self.enable_perturbations:
-        #     self.events.pop("push_robot", None)
-        # if not self.enable_physics_randomization:
-        #     for key in ["randomize_mass", "randomize_actuator_gains",
-        #                 "randomize_friction", "randomize_com", "randomize_payload"]:
-        #         self.events.pop(key, None)
+        # These gates were commented out while train.py/common.py kept assigning the flags,
+        # which default to False in schema.py. Net effect: the config claimed DR was OFF while
+        # every randomization ran at full strength, so anyone disabling DR to debug saw no
+        # change and wrongly cleared it as a cause. config.yaml now sets both to true
+        # explicitly, so re-enabling the gate preserves behaviour AND makes the flag usable.
+        if not self.enable_perturbations:
+            self.events.pop("push_robot", None)
+        if not self.enable_physics_randomization:
+            for key in ["randomize_mass", "randomize_actuator_gains",
+                        "randomize_friction", "randomize_com", "randomize_payload"]:
+                self.events.pop(key, None)
 
         if self.use_rough_terrain:
             self.terrain.terrain_type = "generator"
@@ -437,6 +465,11 @@ class BipedRobotV2EnvCfg(BipedEnvCfg):
     # V2 joint order (L,R interleaved): l_hip_yaw=0, r_hip_yaw=1, l_hip_roll=2, r_hip_roll=3,
     #   l_hip_pitch=4, r_hip_pitch=5, l_knee=6, r_knee=7,
     #   l_ankle_roll=8, r_ankle_roll=9, l_ankle_pitch=10, r_ankle_pitch=11
-    # yaw (0,1), roll (2,3), ankle_roll (8,9) flip; pitch and knee do not
+    # All signs are +1 and the mirror is a PURE PERMUTATION. The V2 URDF is a mirrored CAD
+    # model, so the sagittal reflection is already baked into the joint axis definitions:
+    # a_R = -M*a_L for all six pairs, which gives q_R = +q_L, i.e. no sign flip.
+    # Do NOT copy V1's sign vector here — V1 is not a mirrored model and its indices differ
+    # (V1: 8,9 = ankle_pitch, 10,11 = ankle_roll; V2: 8,9 = ankle_roll, 10,11 = ankle_pitch).
+    # Setting these to -1 collapses training.
     mirror_joint_perm: list = [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10]
     mirror_joint_signs: list = [1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.]

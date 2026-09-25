@@ -38,7 +38,8 @@ train:
       ang_vel_xy_l2: -0.05             # was -0.15 — damp pitch/roll oscillation (flowy body)
 
       # Smoothness
-      action_rate_l2: -0.15    # restored — posture-correction escape barrier now solved; jitter costs essentially nothing at -0.02
+      # action_rate_l2 was the single largest penalty (-4.25/ep) and is directly anti-dynamic.
+      action_rate_l2: -0.05    # was -0.15 — unpinning the gait
       dof_torques_l2: -0.001   # was -0.0001 — 10× to penalise oscillatory PD torques
 
       dof_pos_limits: -1.0
@@ -55,14 +56,19 @@ train:
       undesired_contacts: -0.5
       joint_deviation_hip: -0.15
       joint_deviation_hip_pitch: -0.08   # was -0.05 — slight increase for lean prevention
-      joint_deviation_ankle_roll: -0.05
-      joint_deviation_ankle_pitch: -0.5
-      joint_deviation_knee: -0.15        # was -0.05 — was too weak vs other gradients
+      joint_deviation_ankle_roll: -0.2
+      # Every V2 default joint pos is 0.0 and the knee limit is [-120deg, +5deg], so these
+      # deviation terms were literally enforcing a straight leg / flat foot.
+      joint_deviation_ankle_pitch: -0.05  # was -0.5 — heel-strike to toe-off needs ankle range
+      joint_deviation_knee: 0.0           # was -0.15 — directly penalised the knee bend we want
       torso_centering: 0.0
       com_support_centering: 0.1
-      ankle_torques_l2: -0.003
-      # dof_pos_l2: correct all-joint pose regulariser (was -0.2; increased now escape-barrier removed)
-      dof_pos_l2: -0.5
+      ankle_torques_l2: -0.001   # was -0.003 — was discouraging push-off
+      # dof_pos_l2 is L2 (0.5*theta^2) vs joint_deviation_knee's L1 (0.15*|theta|): they match
+      # at ~0.3 rad but L2 dominates at the 0.5-0.8 rad bend we want (0.32 vs 0.12 at 0.8).
+      # Reduced rather than zeroed: action 0 maps to the joint-limit midpoint (knee -57deg),
+      # so some joint-space anchor is still wanted.
+      dof_pos_l2: -0.05   # was -0.5 — dominant blocker on knee bend
       # base_height_l2: penalise crouching (<0.29m) and tiptoe (>0.29m)
       base_height_l2: 0 #-5.0
       # foot_separation: V2 natural spacing is only 4.3 cm; require 7 cm minimum
@@ -93,8 +99,22 @@ train:
       mean: 0.0
       std: 0.01
 
-    # Action delay: models servo comm latency (1–3 control steps @ 50 Hz = 20–60 ms)
-    action_delay_steps_range: [1, 3]
+    # Actuator delay. [1,3] was tested and measurably hurt; reference repo uses 0.
+    action_delay_steps_range: [0, 0]
+
+    # Sensor lag (observation side), in 50 Hz control steps.
+    # Servo encoders report one step stale, same for every env.
+    servo_obs_delay_steps: 1
+    # IMU (accel + gyro + projected gravity) lags 0-1 steps, drawn per-env at reset and held
+    # for the episode, so the policy must be robust to an unknown but fixed lag.
+    imu_obs_delay_steps_range: [0, 1]
+
+    # Domain randomization master switches. These MUST be set explicitly: the schema defaults
+    # are false, and biped_env_cfg.__post_init__ now actually honours them (the gate used to be
+    # commented out, so DR ran at full strength while the config claimed it was off).
+    # Set either to false to genuinely disable that group — useful for A/B debugging.
+    enable_perturbations: true          # push_robot
+    enable_physics_randomization: true  # mass / actuator gains / friction / com / payload
 
     # Curriculum — randomize_com and randomize_payload scale from 0→100% over dr_full_steps
     curriculum_enabled: true

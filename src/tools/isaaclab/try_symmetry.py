@@ -214,16 +214,20 @@ def main():
         return actions
 
     # Define Labels (Static)
-    base_labels = ["Lin Vel X", "Lin Vel Y", "Lin Vel Z", 
+    # Dims 0-2 are IMU linear ACCELERATION, not linear velocity. Base angular velocity is 3-5.
+    base_labels = ["Lin Acc X", "Lin Acc Y", "Lin Acc Z",
                    "Ang Vel X", "Ang Vel Y", "Ang Vel Z",
                    "Grav X", "Grav Y", "Grav Z",
                    "Cmd X", "Cmd Y", "Cmd Yaw"]
-    
+
     joint_labels = [f"Pos {name}" for name in joint_names]
     joint_vel_labels = [f"Vel {name}" for name in joint_names]
     prev_act_labels = [f"Act {name}" for name in joint_names]
-    
-    all_labels = base_labels + joint_labels + joint_vel_labels + prev_act_labels
+    # The phase clock occupies dims 48-49. Without these two labels every display loop stops
+    # at index 47 and the clock — the one dim whose mirror sign was wrong — is never checked.
+    phase_labels = ["Phase Sin", "Phase Cos"]
+
+    all_labels = base_labels + joint_labels + joint_vel_labels + prev_act_labels + phase_labels
 
     # Main Loop
     while simulation_app.is_running():
@@ -290,8 +294,11 @@ def main():
             val_sym = obs_0_sym[i].item() # Theoretical
             val_act = obs_1[i].item()     # Actual
             
-            # Comparison (Tolerance 1e-3)
-            is_close = np.isclose(val_sym, val_act, atol=1e-1, rtol=1e-1)
+            # atol/rtol 1e-1 is far too loose to catch a wrong mirror — a sign error on a
+            # small-magnitude dim passes cleanly. Note dims 9-11 (commands) and 48-49 (phase)
+            # will still mismatch until env 1's commands are pinned to mirror(commands_0) and
+            # its phase to phi_0 + pi, since both are resampled independently per env.
+            is_close = np.isclose(val_sym, val_act, atol=1e-4, rtol=1e-4)
             
             tag = "match" if is_close else "mismatch"
             status = "TRUE" if is_close else "FALSE"

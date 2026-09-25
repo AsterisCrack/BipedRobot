@@ -149,13 +149,17 @@ class BaseIsaacLabWrapper:
         if isinstance(info, dict) and "log" in info:
             infos["log"] = info["log"]
         
-        # If dict obs, SAC/DDPG update expects specific keys in kwargs
+        # Only the next_* keys are published. There used to be matching observations_actor /
+        # observations_critic keys here holding this same post-step tensor, which reads as
+        # "the replay stores (s', a, s')" -- an external audit flagged exactly that as a
+        # critical bug. It was never live: DDPG.update() takes `observations` positionally and
+        # never reads **kwargs, and the real store pairs self.last_observations (pre-step, what
+        # the actor saw) with this observation. Removed so nobody trusts them as `s`.
+        # PPO reads next_observations_actor for its GAE bootstrap, where post-step is correct.
         if isinstance(processed_obs, dict):
             if "actor" in processed_obs:
-                infos["observations_actor"] = processed_obs["actor"]
-                infos["next_observations_actor"] = processed_obs["actor"] # It's actually next obs
+                infos["next_observations_actor"] = processed_obs["actor"]
             if "critic" in processed_obs:
-                infos["observations_critic"] = processed_obs["critic"]
                 infos["next_observations_critic"] = processed_obs["critic"]
         else:
             infos["next_observations"] = processed_obs
@@ -239,14 +243,23 @@ def make_env(args_cli, config):
                 setattr(env_cfg, _field, getattr(env_conf, _field))
 
         # Randomization & Events
+        # parse_env_cfg() has already run __post_init__, which is where the DR gate pops the
+        # randomization events -- so assigning the flags here is too late and would silently
+        # do nothing. Re-apply the gate explicitly after setting each flag.
         if hasattr(env_conf, "enable_perturbations"):
             env_cfg.enable_perturbations = env_conf.enable_perturbations
+            if not env_cfg.enable_perturbations:
+                env_cfg.events.pop("push_robot", None)
         if hasattr(env_conf, "push_interval_s"):
             env_cfg.push_interval_s = env_conf.push_interval_s
         if hasattr(env_conf, "push_vel_range"):
             env_cfg.push_vel_range = env_conf.push_vel_range
         if hasattr(env_conf, "enable_physics_randomization"):
             env_cfg.enable_physics_randomization = env_conf.enable_physics_randomization
+            if not env_cfg.enable_physics_randomization:
+                for _key in ["randomize_mass", "randomize_actuator_gains",
+                             "randomize_friction", "randomize_com", "randomize_payload"]:
+                    env_cfg.events.pop(_key, None)
             
         # Events
         if hasattr(env_conf, "events") and env_conf.events:
