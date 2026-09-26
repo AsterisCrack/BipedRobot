@@ -145,6 +145,27 @@ class BipedEnv(DirectRLEnv):
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in self.cfg.rewards.keys()
         }
+
+        # Torque headroom accumulators. The STS3215's continuous rating is 0.98 N-m at 12 V and
+        # the DCMotor envelope clamps there, so we need to see whether the policy is living at
+        # the ceiling -- a gait that draws near-continuous torque will not survive on hardware.
+        self.actuator_effort_limit_ref = 0.98
+        self.torque_abs_sum = torch.zeros(self.num_envs, device=self.device)
+        self.torque_sat_sum = torch.zeros(self.num_envs, device=self.device)
+        self.episode_step_count = torch.zeros(self.num_envs, device=self.device)
+
+        # Nominal per-body COM and mass, captured before any randomization event has run (the
+        # first _reset_idx happens after __init__). randomize_com caches onto the same
+        # attribute, so both read one source of truth and the logged delta is a true drift.
+        if not hasattr(self.robot, "_nominal_coms"):
+            self.robot._nominal_coms = self.robot.root_physx_view.get_coms().clone()
+        self._nominal_masses = self.robot.root_physx_view.get_masses().clone()
+
+        # Raw body-frame lateral foot separation, in metres. foot_separation_penalty clamps at
+        # min_sep, so once the stance is wider than min_sep the reward term reads a flat zero
+        # and tells us nothing -- which is exactly what happened when it moved to body frame.
+        # Log the unclamped value so min_sep can be calibrated against the real distribution.
+        self.foot_sep_sum = torch.zeros(self.num_envs, device=self.device)
         
         # History
         self.history_size = self.cfg.history_size if self.cfg.use_history else 0
@@ -512,13 +533,16 @@ class BipedEnv(DirectRLEnv):
         # 1. track_lin_vel_xy_exp (w=2.0)
         r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp(self.commands, self.base_lin_vel_b, std=0.15)
         
-        # 2. track_ang_vel_z_exp (w=1.0)
-        r_track_ang_vel_z = rewards.track_ang_vel_z_exp(self.commands, self.base_ang_vel_b, std=0.15)
+        # 2. track_ang_vel_z_exp (w=1.5)
+        r_track_ang_vel_z = rewards.track_ang_vel_z_exp(self.commands, self.base_ang_vel_b, std=0.5)
         
         # 3. termination_penalty (w=-10.0)
-        limit_angle = 0.78 # From TerminationsCfg
-        died = torch.acos(-self.projected_gravity_b[:, 2]).abs() > limit_angle
-        r_termination = died.float()
+        # Uses the same helper as _get_dones. Previously this recomputed the test with a
+        # different threshold (0.78 vs 0.784) against a different, one-step-stale source
+        # (self.projected_gravity_b, the IMU copy refreshed only in _get_observations), so it
+        # almost never fired on the step that actually terminated -- the logged episodic value
+        # was ~1% of a single firing.
+        r_termination = self._tilt_exceeded().float()
 
         # 4. lin_vel_z_l2 (w=-0.1)
         r_lin_vel_z = rewards.lin_vel_z_l2(self.base_lin_vel_b)
@@ -544,7 +568,7 @@ class BipedEnv(DirectRLEnv):
         # 11. feet_air_time (w=1.0) ~ threshold 0.4
         current_air_time = self.contact_sensor.data.current_air_time[:, self._feet_ids]
         current_contact_time = self.contact_sensor.data.current_contact_time[:, self._feet_ids]
-        r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.2, min_speed_command_threshold=0.05)
+        r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.3, min_speed_command_threshold=0.05)
 
         # 12. feet_slide
         # force_matrix_w_history is only populated when filter_prim_paths_expr is non-empty
@@ -604,7 +628,13 @@ class BipedEnv(DirectRLEnv):
         r_step_length = rewards.step_length(touchdown, stride_dist, self.commands, min_speed_command_threshold=0.1)
 
         # 17. swing_foot_height (w=0.0 default)
-        r_swing_foot_height = rewards.swing_foot_height(feet_pos, feet_in_contact, min_height=0.02, max_height=0.04)
+        # max_height 0.04 -> 0.09. The reward clamps at (max_height - min_height), and the
+        # policy was sitting at 82% of the old 0.02 cap -- lifting the foot to 3.65 cm and then
+        # stopping, because beyond 4 cm there was no gradient at all. Foot clearance and knee
+        # flexion are geometrically coupled (you cannot raise the foot without shortening the
+        # leg), so capping clearance caps knee bend. This is the root of the stiff, straight-leg
+        # gait. min_height stays 0.02 as a dead zone so foot scuffs earn nothing.
+        r_swing_foot_height = rewards.swing_foot_height(feet_pos, feet_in_contact, min_height=0.02, max_height=0.09)
         
         # 18: Gait phase contact — reward feet in sync with clock to enforce alternation
         r_gait_phase_contact = rewards.gait_phase_contact(
@@ -632,6 +662,15 @@ class BipedEnv(DirectRLEnv):
         else:
             r_ankle_torques = torch.zeros(self.num_envs, device=self.device)
 
+        # upright: positive reward for staying vertical (complements flat_orientation_l2)
+        r_upright = rewards.upright(self.projected_gravity_b, std=0.3)
+
+        # angular_momentum: mass-weighted body angular momentum to discourage limb wobble
+        r_angular_momentum = rewards.angular_momentum_l2(
+            self.robot.data.body_ang_vel_w,
+            self.robot.data.default_mass.to(self.device),
+        )
+
         # 22: action_l2 — NOTE: kept for backward compat with config keys, but weight should be 0.0
         # (see plan: action_l2 is structurally broken due to asymmetric joint limits)
         r_action_l2 = rewards.action_l2(self.actions)
@@ -644,20 +683,17 @@ class BipedEnv(DirectRLEnv):
             self.robot.data.root_pos_w[:, 2] - getattr(self.cfg, "target_base_height", 0.29)
         )
 
-        # One-shot diagnostic: which body axis is the lateral one? foot_separation currently
-        # measures world-Y, which is only correct while the robot faces world +-X. Print the
-        # foot separation vector in BOTH frames once so we can pick the right body axis.
-        if not getattr(self, "_logged_sep_axis", False):
-            self._logged_sep_axis = True
-            _vec_w = (feet_pos[:, 0, :] - feet_pos[:, 1, :])[:4]
-            _vec_b = math_utils.quat_apply_inverse(self.base_quat[:4], _vec_w)
-            print(f"[biped_env] foot sep vector, world frame (4 envs):\n{_vec_w.cpu().numpy()}")
-            print(f"[biped_env] foot sep vector, body frame  (4 envs):\n{_vec_b.cpu().numpy()}")
-            print("[biped_env] lateral axis = whichever body-frame column has the largest |value|")
-
         # 26: foot_separation — V2 hip joints are ±21.7 mm apart (4.3 cm natural spacing);
         # penalise when feet come closer than min_sep to force stable hip-width stance.
-        r_foot_separation = rewards.foot_separation_penalty(feet_pos, min_sep=0.07)
+        # Measured along body +Y (URDF-verified lateral axis) so it is heading-independent;
+        # the previous world-Y version read ~0 whenever the robot faced world ±Y.
+        # min_sep raised 0.07 -> 0.09. Diagnostics/foot_sep_body_m showed the policy settling at
+        # 0.0433 m -- exactly the URDF hip spacing, i.e. hip_roll driven to zero -- so 0.07 was
+        # not enough pressure to widen the stance. 0.09 needs ~6.7 deg of abduction and gives
+        # the swing leg room, which matters more for a 30 cm biped than the penalty costs.
+        r_foot_separation = rewards.foot_separation_penalty(
+            feet_pos, self.robot.data.root_quat_w, min_sep=0.09
+        )
 
         # 23: hip pitch deviation — mild penalty allows walking but discourages lean/crouch
         if len(self.hip_pitch_indices) > 0:
@@ -712,6 +748,8 @@ class BipedEnv(DirectRLEnv):
             "dof_pos_l2": r_dof_pos_l2 * self.cfg.rewards.get("dof_pos_l2", 0.0),
             "base_height_l2": r_base_height * self.cfg.rewards.get("base_height_l2", 0.0),
             "foot_separation": r_foot_separation * self.cfg.rewards.get("foot_separation", 0.0),
+            "upright": r_upright * self.cfg.rewards.get("upright", 0.0),
+            "angular_momentum": r_angular_momentum * self.cfg.rewards.get("angular_momentum", 0.0),
         }
         
         # Weighted sum
@@ -726,6 +764,24 @@ class BipedEnv(DirectRLEnv):
             if key in self.episode_sums:
                 self.episode_sums[key] += value
 
+        # Torque headroom. Read applied_torque fresh rather than self.joint_efforts, which is
+        # assigned in _get_observations and therefore one step stale at this point.
+        _abs_tau = self.robot.data.applied_torque.abs()
+        self.torque_abs_sum += _abs_tau.mean(dim=1)
+        self.torque_sat_sum += (_abs_tau > 0.95 * self.actuator_effort_limit_ref).float().mean(dim=1)
+        self.episode_step_count += 1.0
+
+        # Unclamped body-frame lateral foot separation, for calibrating min_sep.
+        _q = self.robot.data.root_quat_w
+        _body_y = torch.stack([
+            2.0 * (_q[:, 1] * _q[:, 2] - _q[:, 0] * _q[:, 3]),
+            1.0 - 2.0 * (_q[:, 1] * _q[:, 1] + _q[:, 3] * _q[:, 3]),
+            2.0 * (_q[:, 2] * _q[:, 3] + _q[:, 0] * _q[:, 1]),
+        ], dim=-1)
+        self.foot_sep_sum += torch.abs(
+            torch.sum((feet_pos[:, 0, :] - feet_pos[:, 1, :]) * _body_y, dim=-1)
+        )
+
         if self.motion_time is not None:
             self.motion_time += self.step_dt
         
@@ -736,10 +792,32 @@ class BipedEnv(DirectRLEnv):
             return
         self.motion_time[env_ids] = torch.rand(len(env_ids), device=self.device) * self.motion_ref.duration
 
+    def _tilt_exceeded(self) -> torch.Tensor:
+        """Shared tilt-past-limit test for the termination AND its reward penalty.
+
+        Both must read the SAME source at the SAME freshness. _get_rewards runs before
+        _get_dones within a step, and self.projected_gravity_b is only refreshed in
+        _get_observations (which runs last), so reading that attribute here would be one step
+        stale -- and would therefore miss the exact step on which the episode terminates,
+        which is precisely when the penalty needs to fire. Read the articulation directly.
+
+        The clamp guards acos: projected_gravity_b can land a hair outside [-1, 1] on
+        normalisation round-off, and acos would return NaN, which silently compares False.
+        """
+        limit_angle = 0.784  # ~45 degrees
+        cos_tilt = (-self.robot.data.projected_gravity_b[:, 2]).clamp(-1.0, 1.0)
+        return torch.acos(cos_tilt).abs() > limit_angle
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        limit_angle = 0.784  # ~45 degrees
-        died = torch.acos(-self.robot.data.projected_gravity_b[:, 2]).abs() > limit_angle
+        died = self._tilt_exceeded()
+        # Terminate on NaN physics — prevents replay buffer corruption
+        nan_state = (
+            torch.isnan(self.robot.data.joint_pos).any(dim=-1) |
+            torch.isnan(self.robot.data.joint_vel).any(dim=-1) |
+            torch.isnan(self.robot.data.root_pos_w).any(dim=-1)
+        )
+        died = died | nan_state
         return died, time_out
         
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -782,11 +860,42 @@ class BipedEnv(DirectRLEnv):
                 self._randomize_motion_time(env_ids)
             else:
                 self.motion_time[env_ids] = 0.0
+        # _apply_curriculum runs at the TOP of this method and writes Curriculum/* into
+        # extras["log"], so the unconditional wipe below used to destroy them before they were
+        # ever logged. Carry them across explicitly.
+        _curriculum_log = {
+            k: v for k, v in self.extras.get("log", {}).items() if k.startswith("Curriculum/")
+        }
         self.extras["log"] = dict()
+        self.extras["log"].update(_curriculum_log)
         self.extras["log"].update(extras)
         extras_term = dict()
         extras_term["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
         extras_term["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+
+        # Torque headroom. Normalised by ACTUAL episode length (unlike Reward_Terms, which
+        # divides by max length), so these read directly against the servo's continuous rating.
+        _steps = self.episode_step_count[env_ids].clamp(min=1.0)
+        extras_term["Torque/mean_abs"] = torch.mean(self.torque_abs_sum[env_ids] / _steps).item()
+        extras_term["Torque/frac_saturated"] = torch.mean(self.torque_sat_sum[env_ids] / _steps).item()
+        extras_term["Diagnostics/foot_sep_body_m"] = torch.mean(self.foot_sep_sum[env_ids] / _steps).item()
+
+        # Whole-run scalars for mass / COM drift. com_drift_max_m is the one that matters: with
+        # a correct (non-accumulating) randomizer it should sit flat near the configured range;
+        # if it climbs steadily, something is compounding again.
+        _masses_now = self.robot.root_physx_view.get_masses().to(self.device)
+        _coms_now = self.robot.root_physx_view.get_coms().to(self.device)
+        _coms_nom = self.robot._nominal_coms.to(self.device)
+        _com_drift = torch.norm(_coms_now[..., :3] - _coms_nom[..., :3], dim=-1)
+        extras_term["Diagnostics/total_mass_mean_kg"] = _masses_now.sum(dim=1).mean().item()
+        extras_term["Diagnostics/com_drift_max_m"] = _com_drift.max().item()
+        extras_term["Diagnostics/com_drift_mean_m"] = _com_drift.mean().item()
+
+        self.torque_abs_sum[env_ids] = 0.0
+        self.torque_sat_sum[env_ids] = 0.0
+        self.foot_sep_sum[env_ids] = 0.0
+        self.episode_step_count[env_ids] = 0.0
+
         self.extras["log"].update(extras_term)
         
         # Console Logging
@@ -904,7 +1013,14 @@ class BipedEnv(DirectRLEnv):
 
             if "randomize_mass" in self.cfg.events and _dr_applies("randomize_mass"):
                 lo, hi = self.cfg.curriculum_dr_mass_range
-                self.cfg.events["randomize_mass"].params["mass_distribution_params"] = (lo * dr, hi * dr)
+                # randomize_mass uses operation="scale", so the neutral point is 1.0, NOT 0.
+                # Multiplying the bounds by dr (correct for an "add" term) would drive the
+                # scale factors toward ZERO at low dr and produce massless links -- exactly the
+                # bug this event was just fixed for. Interpolate toward 1.0 instead, the same
+                # way the gains and friction terms below do.
+                scaled_lo = 1.0 - (1.0 - lo) * dr
+                scaled_hi = 1.0 + (hi - 1.0) * dr
+                self.cfg.events["randomize_mass"].params["mass_distribution_params"] = (scaled_lo, scaled_hi)
 
             if "randomize_actuator_gains" in self.cfg.events and _dr_applies("randomize_actuator_gains"):
                 lo, hi = self.cfg.curriculum_dr_gains_range

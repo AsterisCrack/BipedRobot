@@ -17,6 +17,7 @@ from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelCfg
 import isaaclab.terrains as terrain_gen
 from isaaclab.terrains import TerrainGeneratorCfg
 
+from .mdp.events import randomize_actuator_effort_limit, randomize_rigid_body_com_absolute
 from envs.assets.robot.biped_robot import BIPED_ROBOT_CFG as BIPED_ROBOT_V1_CFG
 from envs.assets.robot.biped_robot import JOINT_LIMITS as JOINT_LIMITS_V1
 from envs.assets.robotV2.biped_robot import BIPED_ROBOT_CFG as BIPED_ROBOT_V2_CFG
@@ -40,17 +41,18 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     slope_threshold=0.75,
     use_cache=False,
     sub_terrains={
-        # 35% flat — still enough safe terrain for policy stability
-        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.35),
-        # Random bumps 0–20 mm at max difficulty
-        # noise_step must be >= vertical_scale (0.005) so int(noise_step/vertical_scale) >= 1
-        "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
-            proportion=0.4, noise_range=(0.0, 0.020), noise_step=0.005, border_width=0.25
-        ),
-        # Smooth waves 0–25 mm amplitude
-        "wave_terrain": terrain_gen.HfWaveTerrainCfg(
-            proportion=0.25, amplitude_range=(0.0, 0.025), num_waves=3, border_width=0.25
-        ),
+        # # 35% flat — still enough safe terrain for policy stability
+        # "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.35),
+        # # Random bumps 0–20 mm at max difficulty
+        # # noise_step must be >= vertical_scale (0.005) so int(noise_step/vertical_scale) >= 1
+        # "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
+        #     proportion=0.4, noise_range=(0.0, 0.020), noise_step=0.005, border_width=0.25
+        # ),
+        # # Smooth waves 0–25 mm amplitude
+        # "wave_terrain": terrain_gen.HfWaveTerrainCfg(
+        #     proportion=0.25, amplitude_range=(0.0, 0.025), num_waves=3, border_width=0.25
+        # ),
+        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
     },
 )
 
@@ -151,7 +153,14 @@ class BipedEnvCfg(DirectRLEnvCfg):
     critic_has_privileged_info = True
 
     # Gait clock
-    gait_clock_base_freq: float = 1.5  # Hz, advances proportional to commanded speed
+    # Phase advances as dphi = dt * 2*pi * freq * v_cmd, so a full cycle takes
+    # T = 1 / (freq * v_cmd) and the implied step length is v_cmd * T / 2 = 1 / (2 * freq).
+    # The frequency therefore sets STEP LENGTH directly and is independent of speed.
+    #   freq 1.5 -> 0.33 m stride (impossible on 0.2 m legs; the old value)
+    #   freq 5.0 -> 0.10 m stride (sane for a 30 cm biped)
+    # A miscalibrated clock makes gait_phase_contact unsatisfiable regardless of policy, which
+    # is one of the reasons the earlier attempt to enable that reward failed.
+    gait_clock_base_freq: float = 5.0  # => 1/(2*freq) = 0.10 m step length
 
     # Action smoothing filter (EMA): target = alpha*raw + (1-alpha)*prev
     action_filter_alpha: float = 0.4
@@ -187,9 +196,11 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # Target (full-curriculum) DR values — curriculum scales toward these
     curriculum_dr_max_push_x: float = 0.3
     curriculum_dr_max_push_y: float = 0.2
-    curriculum_dr_mass_range: tuple = (-0.2, 0.4)
+    # Mass is now a SCALE factor, not an additive kg offset, so this is centred on 1.0.
+    # The old (-0.2, 0.4) was in kg and drove sub-0.2 kg leg links to zero mass.
+    curriculum_dr_mass_range: tuple = (0.8, 1.2)
     curriculum_dr_gains_range: tuple = (0.8, 1.2)
-    curriculum_dr_friction_range: tuple = (0.8, 1.1)
+    curriculum_dr_friction_range: tuple = (0.5, 1.3)
     curriculum_dr_com_range: float = 0.01
     curriculum_dr_payload_max: float = 0.15
     # Command range limits
@@ -336,21 +347,48 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                "static_friction_range": (0.8, 1.1),
-                "dynamic_friction_range": (0.8, 1.1),
+                # Widened from (0.8, 1.1). That band was both narrow and asymmetric about 1.0,
+                # so it never trained for a genuinely slippery floor. A small biped with flat
+                # feet is very sensitive to this.
+                "static_friction_range": (0.5, 1.3),
+                "dynamic_friction_range": (0.5, 1.3),
                 "restitution_range": (0.0, 0.0),
                 "num_buckets": 64,
             },
         ),
-        # COM offset randomization: curriculum-scaled via curriculum_dr_events
-        #"randomize_com": EventTerm(
-        #    func="isaaclab.envs.mdp:randomize_rigid_body_com",
-        #    mode="reset",
-        #    params={
-        #        "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-        #        "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
-        #    },
-        #),
+        # Effort limit randomization: battery sag, unit-to-unit variation and thermal derating
+        # all move the STS3215's usable torque. Now that effort_limit is the binding constraint
+        # (0.98 N-m continuous rather than the old 3.0 stall figure), uncertainty in it matters
+        # far more than it used to. randomize_actuator_gains only covers kp/kd, so this needs a
+        # custom term -- see envs/isaaclab/mdp/events.py.
+        "randomize_effort_limit": EventTerm(
+            func=randomize_actuator_effort_limit,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "distribution_params": (0.8, 1.1),
+                "operation": "scale",
+            },
+        ),
+        # COM offset randomization: curriculum-scaled via curriculum_dr_events.
+        #
+        # Deliberately NOT isaaclab.envs.mdp:randomize_rigid_body_com. That implementation does
+        # `coms += sample` against the CURRENT com (events.py:426-429) and, unlike
+        # randomize_rigid_body_mass, never resets to a nominal. Under mode="reset" the offset
+        # therefore compounds every episode into an unbounded random walk: sigma is 5.77 mm per
+        # reset for a +-1 cm range, growing as sqrt(N) -- ~3 cm by 29 resets, ~6 cm by 100,
+        # ~12 cm by 400. On a 30 cm robot that eventually displaces the whole-body com by more
+        # than half a foot length, per-env and invisible to the policy. This was the confirmed
+        # cause of the robot refusing to walk whenever COM randomization was on; the magnitude
+        # was never the problem, the accumulation was.
+        "randomize_com": EventTerm(
+            func=randomize_rigid_body_com_absolute,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
+                "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
+            },
+        ),
         # Payload: curriculum-scaled via curriculum_dr_events
         "randomize_payload": EventTerm(
             func="isaaclab.envs.mdp:randomize_rigid_body_mass",
@@ -401,8 +439,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
         if not self.enable_perturbations:
             self.events.pop("push_robot", None)
         if not self.enable_physics_randomization:
-            for key in ["randomize_mass", "randomize_actuator_gains",
-                        "randomize_friction", "randomize_com", "randomize_payload"]:
+            for key in ["randomize_mass", "randomize_actuator_gains", "randomize_friction",
+                        "randomize_com", "randomize_payload", "randomize_effort_limit"]:
                 self.events.pop(key, None)
 
         if self.use_rough_terrain:

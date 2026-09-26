@@ -29,50 +29,75 @@ train:
     reward_weights:
       # Primary locomotion
       track_lin_vel_xy_exp: 2.0
-      track_ang_vel_z_exp: 0.8          # was 0.5 — stronger yaw tracking for symmetric turns
+      track_ang_vel_z_exp: 1.5          # was 0.5 — stronger yaw tracking for symmetric turns
 
       # Stability
-      termination_penalty: -5.0
+      # Softened -5.0 -> -2.0. This term was effectively dead until 2026-09-25 (it compared a
+      # one-step-stale IMU copy against a different threshold, so it missed the step that
+      # actually terminated). Fixing it made a full-strength -5.0 signal live for the first
+      # time, which punishes the falls that walking attempts cause. Restore toward -5.0 once
+      # walking is stable again.
+      termination_penalty: -0.2
       flat_orientation_l2: -2.0         # was -1.5 — stronger tilt penalty
       lin_vel_z_l2: -2
       ang_vel_xy_l2: -0.05             # was -0.15 — damp pitch/roll oscillation (flowy body)
+      angular_momentum: -0.02
+      upright: 0.5
 
       # Smoothness
       # action_rate_l2 was the single largest penalty (-4.25/ep) and is directly anti-dynamic.
-      action_rate_l2: -0.05    # was -0.15 — unpinning the gait
+      action_rate_l2: -0.01    # was -0.15 — unpinning the gait
       dof_torques_l2: -0.001   # was -0.0001 — 10× to penalise oscillatory PD torques
 
       dof_pos_limits: -1.0
 
       # Gait shaping — keep only symmetry/alternation signals, remove energy-encouraging terms
-      gait_phase_contact: 0 #1.5          # primary alternation enforcer
+      # Re-enabled at 0.5 (last attempt was 1.2 and destabilised). Three separate defects that
+      # made the earlier attempt unwinnable are now fixed: feet indices were INVERTED so it
+      # rewarded the wrong stance leg; the phase clock was mirrored with sign +1 when it is
+      # antisymmetric; and gait_clock_base_freq demanded a 0.33 m stride (see biped_env_cfg).
+      # Standing with both feet down scores 0.5 here, perfect alternation 1.0, so the real
+      # incentive to alternate is 0.5*weight per step. Speed-gated, so standing envs are exempt.
+      gait_phase_contact: 0.5
       feet_air_time: 0.05               # removed — was encouraging big hops; gait_phase_contact handles timing
-      swing_foot_height: 0.15           # removed — was encouraging unnecessary foot lifting
-      feet_slide: -0.3                 # flat foot contact (keep)
+      # 0.15 -> 1.5, alongside widening the clearance window to 0.09 in biped_env.
+      # Break-even analysis: bending the knee to ~0.6 rad for clearance costs ~0.024/step in
+      # joint_deviation_knee + dof_pos_l2, while the clearance reward at weight 0.15 paid only
+      # ~0.0075/step. Lifting was a NET LOSS, so the policy correctly refused to do it. Weight
+      # must exceed ~0.5 just to break even; 1.5 gives a 3x margin.
+      # (The old "was encouraging unnecessary foot lifting" note predates the 4 cm cap.)
+      swing_foot_height: 1.5
+      feet_slide: -0.1                 # flat foot contact (keep)
       step_length: 0.0
       knee_bend_touchdown: 0.0
 
       # Contact & joint quality
       undesired_contacts: -0.5
-      joint_deviation_hip: -0.15
-      joint_deviation_hip_pitch: -0.08   # was -0.05 — slight increase for lean prevention
-      joint_deviation_ankle_roll: -0.2
+      joint_deviation_hip: -0.08
+      joint_deviation_hip_pitch: -0.05   # was -0.05 — slight increase for lean prevention
+      joint_deviation_ankle_roll: -0.05
       # Every V2 default joint pos is 0.0 and the knee limit is [-120deg, +5deg], so these
       # deviation terms were literally enforcing a straight leg / flat foot.
-      joint_deviation_ankle_pitch: -0.05  # was -0.5 — heel-strike to toe-off needs ankle range
-      joint_deviation_knee: 0.0           # was -0.15 — directly penalised the knee bend we want
+      joint_deviation_ankle_pitch: -0.05  # was -0.2 — heel-strike to toe-off needs ankle range
+      joint_deviation_knee: -0.05           # was -0.15 — directly penalised the knee bend we want
       torso_centering: 0.0
       com_support_centering: 0.1
-      ankle_torques_l2: -0.001   # was -0.003 — was discouraging push-off
+      ankle_torques_l2: -0.003
       # dof_pos_l2 is L2 (0.5*theta^2) vs joint_deviation_knee's L1 (0.15*|theta|): they match
       # at ~0.3 rad but L2 dominates at the 0.5-0.8 rad bend we want (0.32 vs 0.12 at 0.8).
       # Reduced rather than zeroed: action 0 maps to the joint-limit midpoint (knee -57deg),
       # so some joint-space anchor is still wanted.
-      dof_pos_l2: -0.05   # was -0.5 — dominant blocker on knee bend
+      dof_acc_l2: -1.0e-06
+      # Cut -0.5 -> -0.05. This pulls all 12 joints toward their defaults, and every V2 default
+      # is 0.0 -- i.e. a fully straight, zero-abduction leg. Direct evidence it dominates:
+      # Diagnostics/foot_sep_body_m decays from 0.07 to 0.0433, which is EXACTLY the URDF hip
+      # spacing (2 * 0.021672), meaning the policy drives hip_roll to zero and parks at neutral.
+      # An earlier cut to -0.05 was reverted, but that was on broken COM/mass physics.
+      dof_pos_l2: -0.05
       # base_height_l2: penalise crouching (<0.29m) and tiptoe (>0.29m)
       base_height_l2: 0 #-5.0
       # foot_separation: V2 natural spacing is only 4.3 cm; require 7 cm minimum
-      foot_separation: -3.0
+      foot_separation: -1.0
       # action_l2 DISABLED: action=0 maps to tiptoe+crouch+lean due to asymmetric joint limits
       action_l2: 0.0
 
@@ -82,7 +107,7 @@ train:
 
     commands:
       base_velocity:
-        resampling_time_range: [8.0, 12.0]
+        resampling_time_range: [4.0, 8.0]
         heading_control_stiffness: 0.5
         rel_standing_envs: 0.02
         rel_heading_envs: 1.0

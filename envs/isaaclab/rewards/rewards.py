@@ -20,7 +20,7 @@ def swing_foot_height(
     return torch.sum(height_reward * swing, dim=1)
 
 @torch.jit.script
-def track_lin_vel_xy_exp(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, std: float = 0.25):
+def track_lin_vel_xy_exp(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, std: float = 0.35):
     """
     Tracking of linear velocity commands (xy axes) using exponential kernel.
     """
@@ -29,7 +29,7 @@ def track_lin_vel_xy_exp(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, s
     return torch.exp(-lin_vel_error / std**2)
 
 @torch.jit.script
-def track_ang_vel_z_exp(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, std: float = 0.25):
+def track_ang_vel_z_exp(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, std: float = 0.5):
     """
     Tracking of angular velocity commands (yaw) using exponential kernel.
     """
@@ -305,13 +305,56 @@ def action_l2(actions: torch.Tensor) -> torch.Tensor:
 @torch.jit.script
 def foot_separation_penalty(
     feet_pos_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
     min_sep: float = 0.07,
 ) -> torch.Tensor:
-    """Penalise lateral (Y-axis) foot separation below min_sep metres.
-    V2 hip joints are only ±21.7 mm apart, giving 4.3 cm natural spacing at hip_roll=0;
-    min_sep=0.07 m requires ~0.15 rad hip abduction for a stable wider stance."""
-    sep = torch.abs(feet_pos_w[:, 0, 1] - feet_pos_w[:, 1, 1])
+    """Penalise lateral foot separation below min_sep metres, in the BODY frame.
+
+    The lateral axis is body +Y, verified from the URDF: l_hip_yaw sits at
+    origin y = +0.021672 and r_hip_yaw at y = -0.021672 relative to base_link, i.e. 4.33 cm
+    apart along Y (matching the "+-21.7 mm" figure quoted elsewhere). +Y is left. Standard
+    REP-103: X forward, Y left, Z up.
+
+    This must be body frame, not world. Reset yaw is uniform over +-pi and heading commands
+    keep rotating the robot, so a world-Y measurement collapses to ~0 whenever the robot faces
+    world +-Y -- charging the full penalty for a perfectly good stance roughly half the time.
+    At weight -3.0 that is a large spurious signal.
+
+    (An earlier body-frame attempt was reverted after appearing to read ~0. That run also
+    carried three other changes and a collapsing policy, and Reward_Terms are deflated by
+    actual/max episode length -- so a short episode alone shrinks the logged value ~10x. The
+    formula was fine; the diagnosis was not.)
+
+    V2's natural spacing is only 4.3 cm at hip_roll=0, so min_sep=0.07 m asks for roughly
+    0.15 rad of hip abduction.
+    """
+    # Body +Y expressed in world = second column of R(q), for quaternion [w, x, y, z].
+    qw = root_quat_w[:, 0]; qx = root_quat_w[:, 1]
+    qy = root_quat_w[:, 2]; qz = root_quat_w[:, 3]
+    body_y_w = torch.stack([
+        2.0 * (qx * qy - qw * qz),
+        1.0 - 2.0 * (qx * qx + qz * qz),
+        2.0 * (qy * qz + qw * qx),
+    ], dim=-1)
+    feet_vec = feet_pos_w[:, 0, :] - feet_pos_w[:, 1, :]
+    sep = torch.abs(torch.sum(feet_vec * body_y_w, dim=-1))
     return torch.clamp(min_sep - sep, min=0.0)
+
+@torch.jit.script
+def angular_momentum_l2(body_ang_vel_w: torch.Tensor, body_mass: torch.Tensor) -> torch.Tensor:
+    """Penalize mass-weighted body angular momentum to reduce limb wobble.
+    body_ang_vel_w: (N, num_bodies, 3) — world-frame angular velocity per body
+    body_mass: (N, num_bodies) or (1, num_bodies) broadcast
+    """
+    ang_vel_sq = torch.sum(torch.square(body_ang_vel_w), dim=-1)  # (N, num_bodies)
+    return torch.sum(ang_vel_sq * body_mass, dim=-1)
+
+@torch.jit.script
+def upright(projected_gravity_b: torch.Tensor, std: float = 0.3) -> torch.Tensor:
+    """Reward uprightness: 1.0 when perfectly vertical, decays with tilt.
+    std=0.3 → reward≈0.37 at ~17° tilt."""
+    tilt_sq = torch.sum(projected_gravity_b[:, :2] ** 2, dim=1)
+    return torch.exp(-tilt_sq / (std ** 2))
 
 @torch.jit.script
 def dof_pos_l2(joint_pos: torch.Tensor, default_pos: torch.Tensor) -> torch.Tensor:

@@ -9,7 +9,7 @@ import math
 import os
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
-from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.actuators import DCMotorCfg
 
 # Get the directory of the current file
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,14 +78,38 @@ BIPED_ROBOT_CFG = ArticulationCfg(
     ),
     soft_joint_pos_limit_factor=0.9,
     actuators={
-        "legs": ImplicitActuatorCfg(
+        # Feetech STS3215 @ 12 V (C018 variant), modelled as a DC motor so the torque-speed
+        # droop is enforced. ImplicitActuatorCfg delivered full torque at ANY speed and
+        # silently discarded velocity_limit entirely, which made the sim servo far stronger
+        # than the real one at exactly the speeds a swing leg runs at.
+        #
+        #   saturation_effort = 2.94  stall, 30 kg-cm @ 12 V
+        #   effort_limit      = 0.98  rated continuous, 10 kg-cm @ 12 V (was 3.0 = stall)
+        #   velocity_limit    = 4.71  no-load, 45 RPM = 0.222 s/60deg
+        #
+        # Envelope: flat 0.98 N-m up to the corner at 3.14 rad/s (= 2/3 of no-load), then
+        # linear droop to zero at 4.71.
+        #
+        # stiffness dropped 80 -> 20 because it MUST move with effort_limit: at kp=80 a
+        # 0.98 N-m ceiling saturates after only 0.70 deg of position error, i.e. bang-bang.
+        # At kp=20 it saturates at 2.8 deg, and holding a 30 deg knee bend in single support
+        # (~0.42 N-m) costs 1.2 deg of droop. damping 8 -> 2.0 keeps it just past critical
+        # (2*sqrt(20*0.042) = 1.83 with armature included).
+        #
+        # NOTE: DCMotor is an EXPLICIT actuator. Isaac Lab zeroes the PhysX drive gains for
+        # explicit models (articulation.py:1736-1740), so this PD is the only controller --
+        # no double PD. set_joint_position_target still works; the actuator converts it to
+        # torque. randomize_actuator_gains also still applies (it writes actuator.stiffness
+        # directly, events.py:631).
+        "legs": DCMotorCfg(
             joint_names_expr=[".*"],
-            stiffness=80,
-            damping=8,
+            stiffness=20.0,
+            damping=2.0,
             armature=0.04,
             friction=0.2,
-            effort_limit=3.0,
-            velocity_limit=5.0,
+            effort_limit=0.98,
+            velocity_limit=4.71,
+            saturation_effort=2.94,
         ),
     }
 )
