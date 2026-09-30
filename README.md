@@ -96,6 +96,8 @@ BipedRobot/
 │   ├── isaaclab/                  # Isaac Lab training entry points
 │   │   ├── train.py               # Train (pass --checkpoint to resume)
 │   │   ├── play.py                # Evaluate / play
+│   │   ├── export_onnx.py         # Export a checkpoint to a standalone ONNX bundle
+│   │   ├── verify_onnx_bundle.py  # Verify a bundle against the training actor
 │   │   └── common.py              # Shared IsaacLabWrapper base class
 │   │
 │   └── tools/                     # Developer utilities
@@ -276,6 +278,27 @@ rewards:
 ```
 
 See the [robot-motion-reference](robot-motion-reference/) submodule for the FBX conversion pipeline.
+
+---
+
+## Deployment
+
+Trained checkpoints export to a self-contained ONNX bundle - no torch, no Isaac Lab, no
+project import required to run it:
+
+```bash
+python -m src.isaaclab.export_onnx --checkpoint checkpoints/my_run/step_5000000.pt
+python -m src.isaaclab.verify_onnx_bundle --bundle exported/my_run_step_5000000
+```
+
+The first command writes `policy.onnx` + `deploy_config.json` (normalizer stats, joint
+limits, timing) + `checkpoint_info.json`, and validates the export numerically against
+PyTorch. The second cross-checks against the repo's own actor class as an independent
+verification path. See [`src/README.md`](src/README.md#deployment-srcisaaclab) for full
+argument reference.
+
+The exported bundle is what [BipedRobotJetson](https://github.com/AsterisCrack/BipedRobotJetson)
+loads to drive the physical robot - copy it to that repo's `models/<name>/` directory.
 
 ---
 

@@ -70,11 +70,31 @@ KNEE_IDX        = [6, 7]
 ANKLE_ROLL_IDX  = [8, 9]
 ANKLE_PITCH_IDX = [10, 11]
 
-GAIT_CLOCK_FREQ: float = 1.5      # Hz — matches biped_env_cfg.py
+GAIT_CLOCK_FREQ: float = 5.0      # Hz — matches biped_env_cfg.py gait_clock_base_freq
 ACTION_FILTER_ALPHA: float = 0.4  # EMA — matches biped_env_cfg.py
 PHYSICS_DT: float = 0.005         # 200 Hz — matches Isaac Lab sim dt
 DECIMATION: int   = 4             # 50 Hz control — matches Isaac Lab decimation
 STEP_DT: float    = PHYSICS_DT * DECIMATION
+
+# Sensor lag, in 50 Hz control steps. Mirrors servo_obs_delay_steps / imu_obs_delay_steps_range
+# in config.yaml so the policy sees the observation timing it was trained with.
+# DETERMINISTIC on purpose -- MuJoCo is the sim-to-real validation path standing in for one
+# physical robot, so it gets a fixed lag rather than Isaac's per-episode draw. Isaac samples
+# the IMU lag from [0, 1]; 1 is the conservative end of that range. Set either to 0 to A/B the
+# effect of lag on a trained policy.
+SERVO_OBS_DELAY: int = 1
+IMU_OBS_DELAY: int   = 1
+
+# Actuator model — mirrors DCMotorCfg in envs/assets/robotV2/biped_robot.py.
+# Feetech STS3215 @ 12 V. These MUST track the Isaac values or the two sims are
+# running different robots.
+ACT_KP: float = 20.0              # stiffness
+ACT_KD: float = 2.0               # damping
+EFFORT_LIMIT: float     = 0.98    # N-m, rated continuous @ 12 V (drive clamp)
+SATURATION_EFFORT: float = 2.94   # N-m, stall @ 12 V (physical torque-speed curve)
+VELOCITY_LIMIT: float    = 4.71   # rad/s, no-load speed (45 RPM)
+# Velocity at which the torque-speed line crosses the effort limit in Q2/Q4.
+_VEL_AT_EFFORT_LIM: float = VELOCITY_LIMIT * (1.0 + EFFORT_LIMIT / SATURATION_EFFORT)
 
 _XML_DEFAULT = os.path.join(
     os.path.dirname(__file__),
@@ -146,7 +166,11 @@ class BipedEnvV2(BaseEnv):
         self._qvel_ids = np.array([int(self.model.joint(n).dofadr)  for n in JOINT_NAMES], dtype=int)
         self._act_ids  = np.array([int(self.model.actuator(n).id)   for n in JOINT_NAMES], dtype=int)
         self._base_body_id  = self.model.body("base_link").id
-        self._imu_offset_b  = np.array([0.023673, 0.0, 0.025133], dtype=np.float64)
+        # Read from the MJCF site rather than hardcoding. The previous hardcoded constant was
+        # [+0.023673, 0, 0.025133] while the site (and Isaac's ImuCfg.OffsetCfg) is at
+        # [-0.023673, ...] -- a sign flip on x that corrupted the omega x r tangential term in
+        # _v_imu_world whenever the base was rotating, i.e. throughout any real gait.
+        self._imu_offset_b  = np.array(self.model.site("imu_site").pos, dtype=np.float64)
 
         # Foot bodies and their geoms
         self._r_foot_body = self.model.body("r_foot_link_1").id
@@ -194,6 +218,12 @@ class BipedEnvV2(BaseEnv):
             )
         else:
             self._history = None
+
+        # Sensor-lag ring buffers. maxlen = D+1 so that buf[0] is exactly D steps old once
+        # full; _reset_sensor_lag() pre-fills them so index 0 is valid from the first step
+        # rather than returning a too-fresh sample during warm-up.
+        self._servo_buf = deque(maxlen=SERVO_OBS_DELAY + 1) if SERVO_OBS_DELAY > 0 else None
+        self._imu_buf   = deque(maxlen=IMU_OBS_DELAY + 1)   if IMU_OBS_DELAY > 0   else None
 
         # Randomizer
         self._randomizer = Randomizer(self.model, None)
@@ -256,6 +286,53 @@ class BipedEnvV2(BaseEnv):
     # Frame transforms
     # ------------------------------------------------------------------
 
+    def _reset_sensor_lag(self) -> None:
+        """Seed the lag buffers with the CURRENT post-reset reading, repeated.
+
+        Zero-filling instead would feed the policy a fabricated zero acceleration and zero
+        projected-gravity for the first D steps of every episode -- a body orientation that is
+        physically impossible and would look like the robot lying on its side. Isaac seeds its
+        servo buffer the same way (biped_env._reset_idx).
+        """
+        if self._servo_buf is not None:
+            seed = np.concatenate([
+                (self._qpos()[self._qpos_ids] - self._default_joint_pos).astype(np.float32),
+                self._qvel()[self._qvel_ids].astype(np.float32),
+            ])
+            self._servo_buf.clear()
+            for _ in range(SERVO_OBS_DELAY + 1):
+                self._servo_buf.append(seed.copy())
+        if self._imu_buf is not None:
+            R_wb = self._world_to_body_rot()
+            seed = np.concatenate([
+                np.zeros(3, dtype=np.float32),                                   # lin_acc
+                self._qvel()[3:6].astype(np.float32),                            # ang_vel
+                (R_wb @ np.array([0.0, 0.0, -1.0])).astype(np.float32),          # proj_grav
+            ])
+            self._imu_buf.clear()
+            for _ in range(IMU_OBS_DELAY + 1):
+                self._imu_buf.append(seed.copy())
+
+    @staticmethod
+    def _clip_effort_dcmotor(effort: np.ndarray, joint_vel: np.ndarray) -> np.ndarray:
+        """Four-quadrant DC-motor torque-speed clip. Port of Isaac Lab DCMotor._clip_effort.
+
+        A flat symmetric clip (what this used to be) lets the servo deliver full torque at any
+        speed, which is the single biggest way a sim servo flatters the real one -- a real
+        STS3215's torque collapses toward zero as it approaches no-load speed, exactly when a
+        swing leg needs it most.
+
+        Envelope: flat +-EFFORT_LIMIT up to the corner at
+        VELOCITY_LIMIT * (1 - EFFORT_LIMIT/SATURATION_EFFORT) = 3.14 rad/s, then linear droop
+        to zero at VELOCITY_LIMIT (4.71 rad/s).
+        """
+        vel = np.clip(joint_vel, -_VEL_AT_EFFORT_LIM, _VEL_AT_EFFORT_LIM)
+        torque_speed_top    = SATURATION_EFFORT * (1.0 - vel / VELOCITY_LIMIT)
+        torque_speed_bottom = SATURATION_EFFORT * (-1.0 - vel / VELOCITY_LIMIT)
+        max_effort = np.minimum(torque_speed_top, EFFORT_LIMIT)
+        min_effort = np.maximum(torque_speed_bottom, -EFFORT_LIMIT)
+        return np.clip(effort, min_effort, max_effort)
+
     def _v_imu_world(self) -> np.ndarray:
         """World-frame translational velocity at the IMU mounting point.
         v_imu = v_base + omega_world × r_imu_world
@@ -299,6 +376,20 @@ class BipedEnvV2(BaseEnv):
 
         joint_pos_rel = (qpos[self._qpos_ids] - self._default_joint_pos).astype(np.float32)
         joint_vel     = qvel[self._qvel_ids].astype(np.float32)
+
+        # --- Sensor lag (deterministic; see SERVO_OBS_DELAY / IMU_OBS_DELAY) ------------------
+        # The policy is TRAINED with a 1-step servo delay and 0-1 step IMU delay, so it has
+        # learned to compensate for a known phase lag. Handing it zero-lag observations here is
+        # just as much a distribution shift as handing it too much -- it is not "easier".
+        # These are pure delays, NOT randomization: MuJoCo stands in for one physical robot.
+        if SERVO_OBS_DELAY > 0:
+            self._servo_buf.append(np.concatenate([joint_pos_rel, joint_vel]))
+            delayed = self._servo_buf[0]          # deque(maxlen=D+1): [0] is D steps old
+            joint_pos_rel, joint_vel = delayed[:12], delayed[12:]
+        if IMU_OBS_DELAY > 0:
+            self._imu_buf.append(np.concatenate([lin_acc_b, ang_vel_b, proj_grav]))
+            d = self._imu_buf[0]
+            lin_acc_b, ang_vel_b, proj_grav = d[:3], d[3:6], d[6:9]
 
         gait_obs = np.array([math.sin(self.gait_phase), math.cos(self.gait_phase)], dtype=np.float32)
 
@@ -544,6 +635,8 @@ class BipedEnvV2(BaseEnv):
             for _ in range(self.history_size):
                 self._history.append(np.zeros(self._base_actor_dim, dtype=np.float32))
 
+        self._reset_sensor_lag()
+
         self._sample_commands()
 
         obs = self._build_obs()
@@ -570,12 +663,13 @@ class BipedEnvV2(BaseEnv):
             self.gait_phase + STEP_DT * 2.0 * math.pi * GAIT_CLOCK_FREQ * v_cmd
         ) % (2.0 * math.pi)
 
-        # Python PD torque — matches Isaac Lab ImplicitActuatorCfg:
-        #   tau = clip(kp*(q_des - q) + kd*(0 - qdot), -limit, limit)
-        # kd is INSIDE the clip, same as Isaac Lab. Passive joint damping set to 0 in XML.
-        pos_err = self.filtered_targets - self._qpos()[self._qpos_ids]
-        tau = np.clip(80.0 * pos_err - 8.0 * self._qvel()[self._qvel_ids], -3.0, 3.0)
-        self.data.ctrl[self._act_ids] = tau
+        # Python PD torque + DC-motor torque-speed envelope. Mirrors Isaac Lab's DCMotorCfg
+        # (IdealPDActuator.compute + DCMotor._clip_effort). kd is INSIDE the clip, and passive
+        # joint damping is 0 in the XML so this PD is the only damping.
+        pos_err  = self.filtered_targets - self._qpos()[self._qpos_ids]
+        joint_vel = self._qvel()[self._qvel_ids]
+        tau = ACT_KP * pos_err - ACT_KD * joint_vel
+        self.data.ctrl[self._act_ids] = self._clip_effort_dcmotor(tau, joint_vel)
 
         # Physics: DECIMATION sub-steps at 200 Hz
         # Run all but last substep, then capture last-substep velocity for instantaneous IMU acc
@@ -584,8 +678,12 @@ class BipedEnvV2(BaseEnv):
         _v_imu_before = self._v_imu_world()
         mujoco.mj_step(self.model, self.data)
         self._last_physics_acc = (self._v_imu_world() - _v_imu_before) / PHYSICS_DT
-        # Clamp joint velocities to match Isaac Lab velocity_limit=5 rad/s
-        self.data.qvel[self._qvel_ids] = np.clip(self.data.qvel[self._qvel_ids], -5.0, 5.0)
+        # NOTE: the old hard clamp `qvel = clip(qvel, -5, 5)` was removed. Isaac Lab does not
+        # clamp joint velocity -- for an explicit actuator `velocity_limit` feeds the
+        # torque-speed curve, it is not a state constraint, and the USD's own limit is ~100
+        # rad/s. Overwriting qvel mid-episode also injects/removes energy, which MuJoCo's
+        # integrator never accounts for. _clip_effort_dcmotor now enforces the speed ceiling
+        # the physical way: torque reaches zero at VELOCITY_LIMIT.
 
         self._update_gait()
 

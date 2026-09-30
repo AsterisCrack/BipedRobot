@@ -134,6 +134,17 @@ train:
     # for the episode, so the policy must be robust to an unknown but fixed lag.
     imu_obs_delay_steps_range: [0, 1]
 
+    # Per-episode CONSTANT sensor biases, drawn uniformly in +-range at each reset. These are
+    # deliberately different from observation_noise_model: that resamples every step, so across
+    # a 5-frame history stack it largely averages out. A real MPU-6050 has a fixed null offset
+    # per power-cycle and each servo's encoder zero carries a fixed assembly error, so the
+    # policy has to stay upright with a consistently WRONG reading -- a much harder ask, and the
+    # one that actually bites on hardware.
+    imu_accel_bias: 0.2        # m/s^2, ~2% of g
+    imu_gyro_bias: 0.02        # rad/s, ~1% of walking gyro amplitude
+    encoder_offset_rad: 0.0175 # ~1 deg per joint; STS3215 resolution is 0.088 deg, so this is
+                               # assembly/zeroing error, not encoder quantisation
+
     # Domain randomization master switches. These MUST be set explicitly: the schema defaults
     # are false, and biped_env_cfg.__post_init__ now actually honours them (the gate used to be
     # commented out, so DR ran at full strength while the config claimed it was off).

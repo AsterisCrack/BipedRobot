@@ -120,6 +120,9 @@ class EnvConfig(BaseModel):
     action_delay_steps_range: List[int] = Field(default_factory=lambda: [0, 0])
     servo_obs_delay_steps: int = 0
     imu_obs_delay_steps_range: List[int] = Field(default_factory=lambda: [0, 0])
+    imu_accel_bias: float = 0.0
+    imu_gyro_bias: float = 0.0
+    encoder_offset_rad: float = 0.0
 
     class Config:
         extra = "allow" # Allow extra fields to avoid validation errors for complex nested dicts

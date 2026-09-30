@@ -136,20 +136,34 @@ def feet_slide_with_vel(feet_contact: torch.Tensor, feet_vel_xy_norm: torch.Tens
     return torch.sum(feet_contact * feet_vel_xy_norm, dim=1)
 
 @torch.jit.script
-def undesired_contacts(net_contact_forces: torch.Tensor, threshold: float = 1.0):
-    """
-    Penalty for contacts on undesired bodies (hips, thighs, etc).
-    net_contact_forces: (num_envs, num_bodies) magnitude 
+def undesired_contacts(
+    net_contact_forces: torch.Tensor,
+    threshold: float = 1.0,
+    saturation: float = 20.0,
+):
+    """Graded penalty for contacts on undesired bodies (hips, thighs, etc).
+
+    net_contact_forces: (num_envs, num_bodies) magnitude
                         OR (num_envs, num_bodies, 3) vector
+
+    Was `any(force > threshold)`, i.e. binary. That is a cliff: a 2 N brush cost exactly as
+    much as a 40 N impact, and the gradient was zero on both sides of the threshold so the
+    policy got no signal about how to reduce it. It matters more now the gait is dynamic --
+    V2's hips are only 4.3 cm apart, so the legs legitimately pass close during swing and a
+    light graze should be nearly free.
+
+    Now each body contributes `clamp((force - threshold) / saturation, 0, 1)`. A body at or
+    above `threshold + saturation` still costs 1.0, exactly as before, so hard impacts are
+    deterred identically and existing weights keep their meaning -- but a light touch now costs
+    proportionally little and there is a usable gradient in between.
     """
-    # If input is vector (num_envs, num_bodies, 3), take norm
     if net_contact_forces.dim() == 3:
         forces = torch.norm(net_contact_forces, dim=-1)
     else:
         forces = net_contact_forces
-        
-    # Check if any force exceeds threshold
-    return torch.any(forces > threshold, dim=-1).float()
+
+    over = (forces - threshold) / saturation
+    return torch.sum(torch.clamp(over, min=0.0, max=1.0), dim=-1)
 
 @torch.jit.script
 def joint_deviation_l1(joint_pos: torch.Tensor, default_joint_pos: torch.Tensor):

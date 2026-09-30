@@ -23,10 +23,10 @@ from envs.assets.robot.biped_robot import JOINT_LIMITS as JOINT_LIMITS_V1
 from envs.assets.robotV2.biped_robot import BIPED_ROBOT_CFG as BIPED_ROBOT_V2_CFG
 from envs.assets.robotV2.biped_robot import JOINT_LIMITS as JOINT_LIMITS_V2
 
-# Rough terrain scaled for the 30 cm BipedRobotV2.
+# Rough terrain scaled for the 29 cm BipedRobotV2.
 # Purpose: ground perturbation training, NOT an obstacle course.
-# The robot has no height scanner, so stairs/slopes are impossible to anticipate.
-# Keep terrain gentle (max 8mm bumps, 12mm waves) so the flat-terrain policy adapts quickly.
+# The robot is BLIND (no height scanner), so anything it cannot absorb reactively is just
+# noise in the reward. Worst feature is ~12 mm; see the per-terrain notes below for scaling.
 ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     size=(8.0, 8.0),
     border_width=20.0,
@@ -37,22 +37,63 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
     num_rows=20,
     num_cols=20,
     horizontal_scale=0.1,  # 10 cm/pixel — coarser mesh reduces edge-contact artifacts
-    vertical_scale=0.005,  # 5 mm/unit
+    # 5 mm was too coarse: a 10 mm feature had only TWO height levels, so "rough" ground was
+    # really a blocky two-tone staircase. 1 mm gives smooth relief at these amplitudes and
+    # costs nothing (it is Z quantisation, not extra vertices).
+    vertical_scale=0.001,
     slope_threshold=0.75,
     use_cache=False,
+    # curriculum is deliberately left False. With True, difficulty is set by ROW index, which
+    # only helps if envs also start at row 0 (max_init_terrain_level=0, i.e.
+    # use_terrain_curriculum: true). But _compute_env_origins_curriculum assigns each env to a
+    # PATCH ORIGIN, so that would pack all 4096 envs onto the 20 row-0 patches (~205 per patch)
+    # instead of spreading them over 400. With curriculum False each patch instead draws
+    # difficulty ~ U(0, 1), which already gives the full easy->hard spread as randomization --
+    # just without progression. See TODO for what enabling progression would require.
+    difficulty_range=(0.0, 1.0),
     sub_terrains={
-        # # 35% flat — still enough safe terrain for policy stability
-        # "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.35),
-        # # Random bumps 0–20 mm at max difficulty
-        # # noise_step must be >= vertical_scale (0.005) so int(noise_step/vertical_scale) >= 1
-        # "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
-        #     proportion=0.4, noise_range=(0.0, 0.020), noise_step=0.005, border_width=0.25
-        # ),
-        # # Smooth waves 0–25 mm amplitude
-        # "wave_terrain": terrain_gen.HfWaveTerrainCfg(
-        #     proportion=0.25, amplitude_range=(0.0, 0.025), num_waves=3, border_width=0.25
-        # ),
-        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=1.0),
+        # Amplitudes are sized for a 29 cm robot with ~5 cm feet, ~20 cm legs, no height
+        # scanner, and (post swing_foot_height fix) roughly 5-7 cm of foot clearance.
+        # Rule of thumb: keep the worst feature under ~20-25% of swing clearance.
+        # Scaling to a 1.7 m human is ~5.9x, so 12 mm here feels like ~7 cm of undulation --
+        # rough grass or gravel, walked blind. The previous 20-25 mm was ~12-15 cm at human
+        # scale, i.e. curbs, which is why it was too much.
+
+        # Flat baseline. Keeps a safe fraction of envs for stable policy improvement.
+        "flat": terrain_gen.MeshPlaneTerrainCfg(proportion=0.25),
+
+        # Fine ground texture. NOTE: random_uniform_terrain IGNORES the difficulty parameter
+        # (documented in hf_terrains.py), so this is ALWAYS at full range -- hence the small
+        # ceiling. downsampled_scale > horizontal_scale samples coarsely and interpolates,
+        # giving rolling texture instead of per-pixel noise the foot can catch on.
+        "rough": terrain_gen.HfRandomUniformTerrainCfg(
+            proportion=0.20, noise_range=(0.002, 0.008), noise_step=0.001,
+            downsampled_scale=0.2, border_width=0.25,
+        ),
+
+        # Smooth long-wavelength undulation. Respects difficulty (amplitude scales with it).
+        "waves": terrain_gen.HfWaveTerrainCfg(
+            proportion=0.20, amplitude_range=(0.0, 0.012), num_waves=4, border_width=0.25,
+        ),
+
+        # Gentle grades, up and down. 0.08 rad = 4.6 deg at max difficulty.
+        "slope_up": terrain_gen.HfPyramidSlopedTerrainCfg(
+            proportion=0.10, slope_range=(0.0, 0.08), platform_width=1.5, border_width=0.25,
+        ),
+        "slope_down": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
+            proportion=0.10, slope_range=(0.0, 0.08), platform_width=1.5, border_width=0.25,
+        ),
+
+        # Discrete height patches. grid_width 0.25 m >> 5 cm foot, so the foot lands squarely
+        # on one tile rather than straddling an edge -- tests stepping onto a slightly
+        # different level, not knife-edge contact.
+        # grid_width must NOT divide size (8.0 m) evenly: random_grid_terrain derives its
+        # border as the remainder, `size - int(size/grid_width) * grid_width`, and raises if
+        # that is 0. 0.25 gives exactly 32 tiles and no border. 0.3 gives 26 tiles + 0.2 m.
+        "grid": terrain_gen.MeshRandomGridTerrainCfg(
+            proportion=0.15, grid_width=0.3, grid_height_range=(0.0, 0.010),
+            platform_width=1.5,
+        ),
     },
 )
 
@@ -129,7 +170,12 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 20.0
     decimation = 4
-    action_scale = 0.7 
+    # DEAD: never read. _pre_physics_step maps action [-1,1] affinely onto the full joint-limit
+    # box, so action 0 lands on the limit MIDPOINT (knee -57.5 deg, hip_pitch -30 deg) rather
+    # than the all-zeros default pose. Switching to a residual map
+    # (target = default_pos + action_scale * action) would make this live and put action 0 at
+    # the neutral pose
+    action_scale = 0.7
     action_space = 12
     observation_space = 48
     state_space = 59 # Observations + privileged info
@@ -171,12 +217,16 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # IMU delay is sampled per-env at reset from [min, max].
     servo_obs_delay_steps: int = 0
     imu_obs_delay_steps_range: list = [0, 0]
+    # Per-episode CONSTANT sensor biases, drawn uniformly in +-range at reset. Distinct from
+    # observation_noise_model, which resamples every step and therefore averages out across the
+    # history stack. Real hardware has a fixed null offset per power-cycle, which is harder.
+    imu_accel_bias: float = 0.0      # m/s^2
+    imu_gyro_bias: float = 0.0       # rad/s
+    encoder_offset_rad: float = 0.0  # rad, per joint
     # TODO: Changes made: action max delay 2 -> 0, commented new randomizations, removed history, lowered mlp size, removed symmetry
 
     # Randomization
     enable_perturbations = True
-    push_interval_s = 15.0
-    push_vel_range = 1.0
 
     # Physics Randomization
     enable_physics_randomization = True
@@ -194,15 +244,20 @@ class BipedEnvCfg(DirectRLEnvCfg):
     curriculum_dr_events: list = []
 
     # Target (full-curriculum) DR values — curriculum scales toward these
-    curriculum_dr_max_push_x: float = 0.3
-    curriculum_dr_max_push_y: float = 0.2
+    curriculum_dr_max_push_x: float = 0.4
+    curriculum_dr_max_push_y: float = 0.3
     # Mass is now a SCALE factor, not an additive kg offset, so this is centred on 1.0.
     # The old (-0.2, 0.4) was in kg and drove sub-0.2 kg leg links to zero mass.
-    curriculum_dr_mass_range: tuple = (0.8, 1.2)
-    curriculum_dr_gains_range: tuple = (0.8, 1.2)
-    curriculum_dr_friction_range: tuple = (0.5, 1.3)
-    curriculum_dr_com_range: float = 0.01
-    curriculum_dr_payload_max: float = 0.15
+    curriculum_dr_mass_range: tuple = (0.75, 1.25)
+    curriculum_dr_gains_range: tuple = (0.7, 1.3)
+    curriculum_dr_friction_range: tuple = (0.3, 1.4)
+    # NOTE: com and payload are the ONLY two names in curriculum_dr_events, so these two values
+    # are what actually reach the sim -- _apply_curriculum overwrites the event params from
+    # them every reset. Editing the EventTerm params for com/payload does nothing; edit here.
+    # (The reverse holds for mass/gains/friction/push: those are not in the list, so their
+    # EventTerm params are live and these values are only documentation of the intended target.)
+    curriculum_dr_com_range: float = 0.02      # was 0.01 — most ZMP-critical term at this scale
+    curriculum_dr_payload_max: float = 0.3     # was 0.15 — 18% of the 1.661 kg body
     # Command range limits
     curriculum_cmd_start_lin_vel_x: tuple = (0.0, 0.2)   # slow forward-only at start
     curriculum_cmd_full_lin_vel_x: tuple  = (-0.3, 0.5)  # full range at end
@@ -304,7 +359,15 @@ class BipedEnvCfg(DirectRLEnvCfg):
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
             interval_range_s=(1.0, 5.0),
-            params={"velocity_range": {"x": (-0.3, 0.3), "y": (-0.2, 0.2)}},  # stronger push (was ±0.05)
+            # Added yaw: every disturbance was previously a pure linear shove. A real knock --
+            # a hand, a cable snag, an uneven foot strike -- almost always has a rotational
+            # component, and recovering yaw mid-stride is a different skill from recovering a
+            # lateral shove. x/y also widened 0.3/0.2 -> 0.4/0.3.
+            # NOTE: push_robot is NOT in curriculum_dr_events, so these params are live from
+            # step 0 and curriculum_dr_max_push_x/y never reach the sim.
+            params={"velocity_range": {
+                "x": (-0.4, 0.4), "y": (-0.3, 0.3), "yaw": (-0.6, 0.6),
+            }},
         ),
         # Physics Randomization
         # NOTE: Isaac Lab draws an INDEPENDENT delta per body (events.py, sample shape is
@@ -326,7 +389,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*_link_1"),
-                "mass_distribution_params": (0.8, 1.2),
+                "mass_distribution_params": (0.75, 1.25),  # widened from (0.8, 1.2)
                 "operation": "scale",
             },
         ),
@@ -336,8 +399,32 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-                "stiffness_distribution_params": (0.8, 1.2),
-                "damping_distribution_params": (0.8, 1.2),
+                "stiffness_distribution_params": (0.7, 1.3),  # widened from (0.8, 1.2)
+                "damping_distribution_params": (0.7, 1.3),
+                "operation": "scale",
+            },
+        ),
+        # Joint friction (stiction) and armature (reflected rotor inertia).
+        # Previously fixed constants: friction=0.2, armature=0.04 for every joint on every
+        # robot. Stiction is the largest unmodelled unit-to-unit variation on hobby servos --
+        # nominally-identical STS3215s differ substantially, and it directly sets how much
+        # torque is lost before the joint moves at all.
+        #
+        # mode="startup", NOT "reset", deliberately. These are manufacturing properties: a
+        # given physical servo's stiction does not change between episodes, so re-drawing it
+        # every reset models something that cannot happen. Drawing once per env gives 4096
+        # distinct robots, and the shared policy must be robust across that population. It also
+        # avoids the per-reset CPU round-trip this term warns about in its own docstring.
+        #
+        # friction band is wider than armature's on purpose: armature is set by the gearbox
+        # ratio and is well determined, stiction is not.
+        "randomize_joint_params": EventTerm(
+            func="isaaclab.envs.mdp:randomize_joint_parameters",
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+                "friction_distribution_params": (0.5, 1.5),    # nominal 0.2 -> 0.10 .. 0.30
+                "armature_distribution_params": (0.85, 1.15),  # nominal 0.04 -> 0.034 .. 0.046
                 "operation": "scale",
             },
         ),
@@ -347,12 +434,18 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
-                # Widened from (0.8, 1.1). That band was both narrow and asymmetric about 1.0,
-                # so it never trained for a genuinely slippery floor. A small biped with flat
-                # feet is very sensitive to this.
-                "static_friction_range": (0.5, 1.3),
-                "dynamic_friction_range": (0.5, 1.3),
-                "restitution_range": (0.0, 0.0),
+                # Effective foot-ground mu equals this range: sim.physics_material uses
+                # friction_combine_mode="multiply" and the terrain material is exactly 1.0, so
+                # the robot's draw passes through unchanged. If terrain friction ever changes
+                # from 1.0, this whole range scales silently.
+                # Widened (0.5, 1.3) -> (0.3, 1.4): 0.5 is still a reasonable floor. Wet tile
+                # or laminate is mu ~0.2-0.3, and that is exactly where a flat-footed biped
+                # slips. Training only down to 0.5 never sees a genuinely slippery surface.
+                "static_friction_range": (0.3, 1.4),
+                "dynamic_friction_range": (0.3, 1.4),
+                # Was pinned at zero. Carpet/rubber/tile differ in bounce, and a hard zero also
+                # means foot-strike never has any rebound to reject.
+                "restitution_range": (0.0, 0.3),
                 "num_buckets": 64,
             },
         ),
@@ -366,7 +459,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot"),
-                "distribution_params": (0.8, 1.1),
+                "distribution_params": (0.7, 1.15),  # widened from (0.8, 1.1)
                 "operation": "scale",
             },
         ),
@@ -440,7 +533,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
             self.events.pop("push_robot", None)
         if not self.enable_physics_randomization:
             for key in ["randomize_mass", "randomize_actuator_gains", "randomize_friction",
-                        "randomize_com", "randomize_payload", "randomize_effort_limit"]:
+                        "randomize_com", "randomize_payload", "randomize_effort_limit",
+                        "randomize_joint_params"]:
                 self.events.pop(key, None)
 
         if self.use_rough_terrain:

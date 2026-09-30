@@ -125,6 +125,14 @@ class BipedEnv(DirectRLEnv):
         )
         self.imu_obs_delay = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
 
+        # Per-episode constant sensor biases (see _get_observations for why constant matters).
+        self.imu_accel_bias_range = float(getattr(cfg, 'imu_accel_bias', 0.0))
+        self.imu_gyro_bias_range = float(getattr(cfg, 'imu_gyro_bias', 0.0))
+        self.encoder_offset_range = float(getattr(cfg, 'encoder_offset_rad', 0.0))
+        self.imu_accel_bias = torch.zeros(self.num_envs, 3, device=self.device)
+        self.imu_gyro_bias = torch.zeros(self.num_envs, 3, device=self.device)
+        self.encoder_offset = torch.zeros(self.num_envs, self.num_joints, device=self.device)
+
         # Commands
         self.command_generator = UniformVelocityCommand(self.cfg, self.num_envs, self.device, self.step_dt)
         self.commands = self.command_generator.commands
@@ -195,9 +203,6 @@ class BipedEnv(DirectRLEnv):
         self._curriculum_last_cmd_scale: float = -1.0
         self._curriculum_last_init_scale: float = -1.0
 
-        # Randomization
-        self.push_interval_steps = int(self.cfg.push_interval_s / self.step_dt)
-        
         # Observation Noise
         self._observation_noise_model = None
         if self.cfg.observation_noise_model:
@@ -419,6 +424,19 @@ class BipedEnv(DirectRLEnv):
                 torch.arange(self.num_envs, device=self.device), self.imu_obs_delay
             ]
             imu_acc_obs, imu_gyro_obs, gravity_obs = imu_delayed.split(3, dim=-1)
+
+        # Per-episode sensor biases. Unlike the observation noise model (resampled every step,
+        # so it averages out over the history stack), these are CONSTANT within an episode --
+        # which is what makes them hard, and what real hardware actually does. An MPU-6050 has
+        # a run-to-run accel/gyro null offset, and each servo's encoder zero carries an
+        # assembly error that never changes while the robot is powered.
+        # Applied to the observation copies only; self.* stay ground truth for the rewards.
+        if self.imu_accel_bias_range > 0.0:
+            imu_acc_obs = imu_acc_obs + self.imu_accel_bias
+        if self.imu_gyro_bias_range > 0.0:
+            imu_gyro_obs = imu_gyro_obs + self.imu_gyro_bias
+        if self.encoder_offset_range > 0.0:
+            joint_pos_obs = joint_pos_obs + self.encoder_offset
 
         # Gait phase clock: advance proportional to commanded XY speed
         v_cmd_norm = torch.norm(self.commands[:, :2], dim=1)
@@ -938,6 +956,22 @@ class BipedEnv(DirectRLEnv):
             self.imu_obs_delay[env_ids] = torch.randint(
                 self.imu_obs_delay_range[0], self.imu_obs_delay_range[1] + 1,
                 (len(env_ids),), device=self.device
+            )
+
+        # Redraw the per-episode sensor biases. Held constant for the whole episode.
+        _n = len(env_ids)
+        if self.imu_accel_bias_range > 0.0:
+            self.imu_accel_bias[env_ids] = (
+                torch.empty(_n, 3, device=self.device).uniform_(-1.0, 1.0) * self.imu_accel_bias_range
+            )
+        if self.imu_gyro_bias_range > 0.0:
+            self.imu_gyro_bias[env_ids] = (
+                torch.empty(_n, 3, device=self.device).uniform_(-1.0, 1.0) * self.imu_gyro_bias_range
+            )
+        if self.encoder_offset_range > 0.0:
+            self.encoder_offset[env_ids] = (
+                torch.empty(_n, self.num_joints, device=self.device).uniform_(-1.0, 1.0)
+                * self.encoder_offset_range
             )
 
         # Reset feet contact history to True.

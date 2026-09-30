@@ -16,7 +16,7 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default="BipedRobot", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
-parser.add_argument("--config_path", type=str, default="config/train_config.yaml", help="Path to training config")
+parser.add_argument("--config_path", type=str, default="config/config.yaml", help="Path to training config")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)

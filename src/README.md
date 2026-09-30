@@ -140,6 +140,84 @@ python src/isaaclab/play.py --task BipedRobot \
 
 ---
 
+## Deployment (`src/isaaclab/`)
+
+### `export_onnx.py` - Export a checkpoint to a standalone ONNX bundle
+
+```bash
+python -m src.isaaclab.export_onnx [--checkpoint PATH] [--out_dir PATH] [--config_path PATH] [--opset N]
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--checkpoint` | newest in `checkpoints/` | Path to a `step_<N>.pt` weights file |
+| `--out_dir` | `exported/<run>_<step>/` | Output bundle directory |
+| `--config_path` | run's own `config.yaml` | Override for reading `history_size` |
+| `--opset` | `17` | ONNX opset version |
+
+Rebuilds the actor from the checkpoint's own tensor shapes (never from config, which is what
+broke the old `export.py` - it hardcoded a 52-dim observation and never ran successfully
+against a V2 checkpoint), traces the deterministic path
+`tanh(mean_layer(torso(obs)))`, and writes a directory that needs nothing but `onnxruntime` +
+`numpy` to run - no torch, no Isaac Lab, no import from this repo:
+
+```
+<out>/policy.onnx           [1,250] float32 -> [1,12] float32, stage-2 normalizer baked in
+<out>/deploy_config.json    stage-1 normalizer stats, joint limits, timing, obs layout
+<out>/checkpoint_info.json  source checkpoint, step, git sha, export timestamp
+```
+
+There are two trained observation normalizers in series - stage 1 (`obs_mean`/`obs_var` in
+`deploy_config.json`) is applied by the runtime; stage 2 is inside `policy.onnx` as baked-in
+constants. Both are required; skipping either produces a policy that looks plausible and
+walks into the floor. The export validates this automatically (see below) and fails loudly
+rather than writing a bad bundle.
+
+```bash
+python -m src.isaaclab.export_onnx --checkpoint checkpoints/my_run/step_5000000.pt
+```
+
+**Built-in checks, run every export:**
+- ONNX output vs PyTorch on 100 random inputs, max abs diff must be < 1e-5
+- `obs_dim == history_size * 50` (catches a stale/mismatched `history_size`)
+- IMU specific-force channel mean is ~+9.81 (catches a gravity-convention error)
+- `step_dt == 0.02` (50 Hz)
+
+---
+
+### `verify_onnx_bundle.py` - Independent verification against the training actor
+
+```bash
+python -m src.isaaclab.verify_onnx_bundle --bundle PATH [--checkpoint PATH] [--n N] [--tol TOL]
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--bundle` | *(required)* | Path to an exported bundle directory |
+| `--checkpoint` | `source_checkpoint` from `checkpoint_info.json` | Override the reference weights |
+| `--n` | `200` | Number of random observations to compare |
+| `--tol` | `1e-5` | Max allowed action difference |
+
+`export_onnx.py`'s self-check compares ONNX against its *own* reconstruction of the actor - a
+mis-mapped layer would be wrong in both and still pass. This script closes that hole by
+loading the checkpoint into the repo's real `torch_rl_algorithms.models.mlp.MLPActor` and
+comparing its `get_action()` output against the ONNX bundle, on observations drawn from the
+checkpoint's own trained distribution (`obs_mean + sigma * randn`) rather than arbitrary noise.
+
+```bash
+python -m src.isaaclab.verify_onnx_bundle --bundle exported/my_run_step_5000000
+```
+
+Also asserts the structural invariants the Jetson runtime depends on: `history_order`,
+`obs_dim == history_size * obs_proprio_dim`, `joint_names` length and uniqueness, `obs_layout`
+tiling the full proprio frame, and the EMA filter's `action_filter_applications_per_step == 4`
+(Isaac applies it once per decimation substep, not once per control step).
+
+Copy the bundle directory to `BipedRobotJetson/models/<name>/` to deploy - see that repo's
+README for the control-side setup.
+
+---
+
 ## Developer Tools (`src/tools/`)
 
 These scripts do not train - they are for debugging, analysis, and validation.
