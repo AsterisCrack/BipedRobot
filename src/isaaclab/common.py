@@ -275,16 +275,18 @@ def make_env(args_cli, config):
                         env_cfg.events[key].interval_range_s = tuple(val["interval_range_s"])
 
         # Noise
-        if hasattr(env_conf, "observation_noise_model") and env_conf.observation_noise_model:
-            obs_noise = env_conf.observation_noise_model
+        if hasattr(env_conf, "observation_noise_std") and env_conf.observation_noise_std:
+            obs_noise = env_conf.observation_noise_std
             if hasattr(obs_noise, "model_dump"):
                 obs_noise = obs_noise.model_dump()
-            if env_cfg.observation_noise_model and env_cfg.observation_noise_model.noise_cfg:
-                if "mean" in obs_noise:
-                    env_cfg.observation_noise_model.noise_cfg.mean = obs_noise["mean"]
-                if "std" in obs_noise:
-                    env_cfg.observation_noise_model.noise_cfg.std = obs_noise["std"]
-                    
+            unknown = set(obs_noise) - set(env_cfg.observation_noise_std)
+            if unknown:
+                raise ValueError(
+                    f"unknown observation_noise_std channels: {sorted(unknown)}; "
+                    f"expected a subset of {sorted(env_cfg.observation_noise_std)}")
+            env_cfg.observation_noise_std = {**env_cfg.observation_noise_std, **obs_noise}
+
+
         if hasattr(env_conf, "action_noise_model") and env_conf.action_noise_model:
             act_noise = env_conf.action_noise_model
             if hasattr(act_noise, "model_dump"):

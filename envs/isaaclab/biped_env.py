@@ -203,17 +203,27 @@ class BipedEnv(DirectRLEnv):
         self._curriculum_last_cmd_scale: float = -1.0
         self._curriculum_last_init_scale: float = -1.0
 
-        # Observation Noise
-        self._observation_noise_model = None
-        if self.cfg.observation_noise_model:
-            self._observation_noise_model = self.cfg.observation_noise_model.class_type(
-                self.cfg.observation_noise_model, num_envs=self.num_envs, device=self.device
-            )
-            # Noise is applied here to the current 50-dim frame before it enters the history
-            # buffer. Null the cfg entry so DirectRLEnv.step() does not apply it a second time
-            # to the flattened 250-dim stack, which would re-randomise all 5 frames every step
-            # and destroy the history's temporal coherence.
-            self.cfg.observation_noise_model = None
+        # Observation noise, one std per proprio dim. Applied to the current 50-dim frame
+        # before it enters the history buffer -- applying it to the flattened 250-dim stack
+        # instead would re-randomise all 5 frames every step and destroy the history's
+        # temporal coherence, which is the only thing carrying velocity information.
+        _noise = self.cfg.observation_noise_std
+        self.obs_noise_std = torch.cat([
+            torch.full((n,), float(_noise[k]), device=self.device) for k, n in [
+                ("imu_acc", 3), ("gyro", 3), ("projected_gravity", 3), ("commands", 3),
+                ("joint_pos", self.num_joints), ("joint_vel", self.num_joints),
+                ("previous_actions", self.num_joints), ("gait_clock", 2),
+            ]
+        ])
+        assert self.obs_noise_std.shape[0] == self.obs_proprio_dim, (
+            f"noise vector is {self.obs_noise_std.shape[0]} dims, "
+            f"proprio is {self.obs_proprio_dim}"
+        )
+
+        # STS3215 magnetic encoder: 4096 counts/rev on position, and the speed register
+        # reports in counts/s, so both channels share the same quantum.
+        self.quantize_joint_obs = bool(getattr(self.cfg, 'quantize_joint_obs', False))
+        self.encoder_step_rad = 2.0 * math.pi / 4096.0
 
         # Get specific body indices
         self._base_id, _ = self.contact_sensor.find_bodies(self.cfg.base_body_name)
@@ -438,6 +448,12 @@ class BipedEnv(DirectRLEnv):
         if self.encoder_offset_range > 0.0:
             joint_pos_obs = joint_pos_obs + self.encoder_offset
 
+        # Encoder quantisation, applied after the offset because the servo digitises the
+        # angle it actually sees, offset included.
+        if self.quantize_joint_obs:
+            joint_pos_obs = torch.round(joint_pos_obs / self.encoder_step_rad) * self.encoder_step_rad
+            joint_vel_obs = torch.round(joint_vel_obs / self.encoder_step_rad) * self.encoder_step_rad
+
         # Gait phase clock: advance proportional to commanded XY speed
         v_cmd_norm = torch.norm(self.commands[:, :2], dim=1)
         self.gait_phase = (
@@ -488,10 +504,7 @@ class BipedEnv(DirectRLEnv):
         if self.cfg.policy_has_privileged_info:
             obs_policy = torch.cat([obs_proprio, obs_priv], dim=-1)
         else:
-            obs_policy = obs_proprio.clone()
-            # Add observation noise to policy observations
-            if self._observation_noise_model:
-                obs_policy = self._observation_noise_model(obs_policy)
+            obs_policy = obs_proprio + torch.randn_like(obs_proprio) * self.obs_noise_std
 
         # Construct Critic Observations
         if self.cfg.critic_has_privileged_info:

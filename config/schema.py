@@ -107,8 +107,11 @@ class EnvConfig(BaseModel):
     events: Optional[Dict[str, Any]] = None
     
     # Noise
-    observation_noise_model: Optional[Dict[str, float]] = None
+    # Per-channel observation noise std. Keys must match biped_env_cfg.observation_noise_std;
+    # anything listed here overrides that default, anything omitted keeps it.
+    observation_noise_std: Optional[Dict[str, float]] = None
     action_noise_model: Optional[Dict[str, float]] = None
+    quantize_joint_obs: bool = True
 
     # Curriculum
     curriculum_enabled: bool = False

@@ -117,9 +117,22 @@ train:
           ang_vel_z: [-0.3, 0.3]
           heading: [-3.14159, 3.14159]
 
-    observation_noise_model:
-      mean: 0.0
-      std: 0.05    # raised from 0.01 — better matches MPU-6050 noise floor (~0.3 m/s² accel, ~0.02 rad/s gyro)
+    # Per-channel observation noise std, in each channel's own units. The previous single
+    # scalar (0.05 across all 50 dims) was sized for the IMU and was therefore 0.05 rad =
+    # 2.9 deg on joint positions whose real encoder LSB is 0.088 deg — it also noised the
+    # command, the previous actions and the gait clock, none of which are sensors.
+    observation_noise_std:
+      imu_acc: 0.15             # m/s^2
+      gyro: 0.02                # rad/s
+      projected_gravity: 0.01
+      commands: 0.0             # not a sensor
+      joint_pos: 0.0015         # rad, ~1 encoder LSB
+      joint_vel: 0.05           # rad/s — PLACEHOLDER; set from tools/speed_register_check.py
+      previous_actions: 0.0     # not a sensor
+      gait_clock: 0.0           # generated
+    # Round joint_pos and joint_vel onto the STS3215's 4096-counts/rev grid, so the policy
+    # sees the same resolution floor in sim as the servo gives on hardware.
+    quantize_joint_obs: true
     action_noise_model:
       mean: 0.0
       std: 0.01
@@ -135,7 +148,7 @@ train:
     imu_obs_delay_steps_range: [0, 1]
 
     # Per-episode CONSTANT sensor biases, drawn uniformly in +-range at each reset. These are
-    # deliberately different from observation_noise_model: that resamples every step, so across
+    # deliberately different from observation_noise_std: that resamples every step, so across
     # a 5-frame history stack it largely averages out. A real MPU-6050 has a fixed null offset
     # per power-cycle and each servo's encoder zero carries a fixed assembly error, so the
     # policy has to stay upright with a consistently WRONG reading -- a much harder ask, and the

@@ -218,7 +218,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     servo_obs_delay_steps: int = 0
     imu_obs_delay_steps_range: list = [0, 0]
     # Per-episode CONSTANT sensor biases, drawn uniformly in +-range at reset. Distinct from
-    # observation_noise_model, which resamples every step and therefore averages out across the
+    # observation_noise_std, which resamples every step and therefore averages out across the
     # history stack. Real hardware has a fixed null offset per power-cycle, which is harder.
     imu_accel_bias: float = 0.0      # m/s^2
     imu_gyro_bias: float = 0.0       # rad/s
@@ -271,10 +271,28 @@ class BipedEnvCfg(DirectRLEnvCfg):
         noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.01)
     )
     
-    # Observation noise
-    observation_noise_model: NoiseModelCfg = NoiseModelCfg(
-        noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.01)
-    )
+    # Observation noise, per proprio channel. This replaces DirectRLEnvCfg's
+    # observation_noise_model, which is deliberately left at its inherited None so
+    # DirectRLEnv.step() does not also noise the flattened history stack.
+    #
+    # A single scalar across all 50 dims cannot be
+    # right: the same number is either negligible for the IMU or enormous for the encoders,
+    # and three of the channels are not sensors at all (commands and previous actions are
+    # the policy's own inputs; the gait clock is generated). Those get exactly zero.
+    observation_noise_std: dict = {
+        "imu_acc": 0.15,        # m/s^2
+        "gyro": 0.02,           # rad/s
+        "projected_gravity": 0.01,
+        "commands": 0.0,
+        "joint_pos": 0.0015,    # rad, ~1 encoder LSB of jitter on top of the quantisation
+        "joint_vel": 0.05,      # rad/s -- PLACEHOLDER, set from tools/speed_register_check.py
+        "previous_actions": 0.0,
+        "gait_clock": 0.0,
+    }
+
+    # Encoder quantisation. STS3215 is 4096 counts/rev on both position and the speed
+    # register, so the policy sees the same resolution floor in sim as on hardware.
+    quantize_joint_obs: bool = True
 
     # simulation
     sim: sim_utils.SimulationCfg = sim_utils.SimulationCfg(
