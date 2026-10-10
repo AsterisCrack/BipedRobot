@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import subprocess
@@ -268,6 +269,50 @@ def _load_history_size(ckpt_dir: str, explicit: str | None) -> int:
     raise RuntimeError("could not determine history_size from any config.yaml")
 
 
+def _load_policy_contract(ckpt_dir: str, explicit_cfg: str | None, explicit_map: str | None) -> dict:
+    """Action map + servo model the checkpoint was TRAINED with, from the run's own config.
+
+    The repo's current config.yaml is deliberately NOT used as a fallback here, unlike
+    history_size. Exporting an old checkpoint with today's action_map would stamp an
+    absolute-map policy as "centered", and the robot would execute every action wrongly.
+    If the run's config can't be found, the caller must say what the map is.
+    """
+    paths = [p for p in (explicit_cfg, os.path.join(ckpt_dir, "config.yaml")) if p and os.path.exists(p)]
+    found: dict = {}
+    if paths:
+        with open(paths[0], "r", encoding="utf-8") as fh:
+            for line in fh:
+                s = line.split("#", 1)[0].strip()
+                for key in ("action_map", "params_file", "kp_fw", "stall_torque_cap_nm"):
+                    if s.startswith(key + ":"):
+                        found.setdefault(key, s.split(":", 1)[1].strip().strip("'\""))
+    if explicit_map:
+        found["action_map"] = explicit_map
+    if "action_map" not in found:
+        if not paths:
+            raise RuntimeError(
+                f"no config.yaml beside the checkpoint ({ckpt_dir}); pass --action_map "
+                f"absolute|centered explicitly. Guessing would silently mis-map every action.")
+        found["action_map"] = "absolute"    # runs from before the key existed
+    if found["action_map"] not in ("absolute", "centered"):
+        raise RuntimeError(f"unknown action_map {found['action_map']!r}")
+
+    contract = {"action_map": found["action_map"], "actuator": None}
+    if "params_file" in found:
+        pf = found["params_file"]
+        full = pf if os.path.isabs(pf) else os.path.join(_PROJECT_ROOT, pf)
+        sha = None
+        if os.path.exists(full):
+            with open(full, "rb") as fh:
+                sha = hashlib.sha256(fh.read()).hexdigest()
+        contract["actuator"] = {"model": "bam", "params_file": pf, "params_sha256": sha,
+                                "kp_fw": float(found.get("kp_fw", 32)),
+                                "stall_torque_cap_nm": (None if found.get("stall_torque_cap_nm") in (None, "null", "None")
+                                                        else float(found["stall_torque_cap_nm"])),
+                                "requires_pid": {"p": int(float(found.get("kp_fw", 32))), "d": 0, "i": 0}}
+    return contract
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--checkpoint", type=str, default=None,
@@ -277,6 +322,8 @@ def main() -> int:
     p.add_argument("--config_path", type=str, default=None,
                    help="Override config.yaml used for history_size.")
     p.add_argument("--opset", type=int, default=17)
+    p.add_argument("--action_map", choices=["absolute", "centered"], default=None,
+                   help="Only needed when the checkpoint's run config.yaml is missing.")
     args = p.parse_args()
 
     # -- resolve checkpoint ---------------------------------------------------
@@ -319,6 +366,8 @@ def main() -> int:
 
     env = _gather_env_constants()
     history_size = _load_history_size(ckpt_dir, args.config_path)
+    contract = _load_policy_contract(ckpt_dir, args.config_path, args.action_map)
+    print(f"[export] action_map = {contract['action_map']}, actuator = {contract['actuator']}")
     proprio_dim = in_dim // history_size
 
     # -- stage-1 normalizer ---------------------------------------------------
@@ -403,7 +452,11 @@ def main() -> int:
 
     # -- bundle ---------------------------------------------------------------
     deploy = {
-        "format_version": 1,
+        # v2 adds action_map and actuator. A runtime that predates them must refuse v2 bundles
+        # rather than silently applying the v1 (absolute) map to a centered policy.
+        "format_version": 2,
+        "action_map": contract["action_map"],
+        "actuator": contract["actuator"],
         "obs_dim": in_dim,
         "action_dim": act_dim,
         "history_size": history_size,
@@ -431,8 +484,9 @@ def main() -> int:
         "notes": {
             "normalizer": "stage 1 (obs_mean/obs_var) applied by runtime; "
                           "stage 2 baked into policy.onnx",
-            "action": "tanh already applied in-graph; clip to [-1,1] then "
-                      "target = min + (a+1)/2 * (max-min)",
+            "action": "tanh already applied in-graph; clip to [-1,1]. action_map 'absolute': "
+                      "target = min + (a+1)/2 * (max-min). 'centered': target = default + "
+                      "a * (max - default) for a >= 0, default + a * (default - min) for a < 0",
             "ema": "apply action_filter_applications_per_step times per control step",
         },
     }

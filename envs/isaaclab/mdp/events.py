@@ -109,3 +109,40 @@ def randomize_actuator_effort_limit(
                 f"randomize_actuator_effort_limit: unknown operation '{operation}'."
                 " Expected 'scale' or 'abs'."
             )
+
+
+def randomize_bam_actuator(
+    env,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg,
+    vin_range: tuple[float, float],
+    friction_scale_range: tuple[float, float],
+    lash_range_rad: tuple[float, float] | None = None,
+):
+    """Draw a per-robot servo population for the BAM actuator (use mode="startup").
+
+    Supply voltage is per robot (one battery), so it is drawn per env. Friction scale and
+    backlash are per servo, so they are drawn per env AND per joint. All three are
+    manufacturing or wiring properties, which is why this runs at startup, not on reset.
+    Every value is written as an absolute draw, never accumulated, so repeated calls cannot
+    random-walk the way the old COM randomizer did.
+
+    This replaces randomize_actuator_gains and randomize_effort_limit. Under BAM there are no
+    PD gains to scale, and the torque ceiling falls out of vin and duty rather than being a
+    free parameter (the reference implementation turned kp/kd DR off for the same reason).
+    """
+    asset = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.scene.num_envs, device=asset.device)
+    n = len(env_ids)
+    for actuator in asset.actuators.values():
+        servo = getattr(actuator, "servo", None)
+        if servo is None:
+            continue
+        k = servo.kernel
+        k.vin[env_ids] = torch.empty(n, 1, device=k.vin.device).uniform_(*vin_range)
+        k.friction_scale[env_ids] = torch.empty(n, k.num_joints, device=k.friction_scale.device).uniform_(
+            *friction_scale_range)
+        lm = servo.lost_motion
+        if lm is not None and lash_range_rad is not None:
+            lm.lash[env_ids] = torch.empty(n, k.num_joints, device=lm.lash.device).uniform_(*lash_range_rad)

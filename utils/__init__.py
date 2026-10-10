@@ -32,8 +32,8 @@ class Config:
     
     def copy_in_file(self, config_path):
         with open(config_path, 'w') as file:
-            # Dump the Pydantic model back to dict/yaml
-            yaml.dump(self.config_obj.model_dump(), file, default_flow_style=False)
+            # mode='json' converts Enum instances to their string values so safe_dump works.
+            yaml.safe_dump(self.config_obj.model_dump(mode='json'), file, default_flow_style=False)
             
     def __getitem__(self, key):
         # Allow dict-style access for backward compatibility

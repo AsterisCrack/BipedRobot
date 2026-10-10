@@ -1,0 +1,42 @@
+{
+  "source_urdf": "pendulum_arm.urdf",
+  "arm_mass_kg": 0.031733,
+  "arm_inertia_about_axis_kg_m2": 0.000222623176722768,
+  "payload_mass_kg": 0.28017,
+  "vin": 12.0,
+  "kp_sweep": [
+    4,
+    8,
+    16,
+    32
+  ],
+  "loads": [
+    {
+      "hole_m": 0.05,
+      "inertia_kg_m2": 0.000923048176722768,
+      "first_moment_kg_m": 0.01608722487433609,
+      "mass": 0.2803741025482644,
+      "length": 0.05737771330562454,
+      "arm_mass": 0.0,
+      "static_torque_nm": 0.157761783813908
+    },
+    {
+      "hole_m": 0.1,
+      "inertia_kg_m2": 0.003024323176722768,
+      "first_moment_kg_m": 0.03009572487433609,
+      "mass": 0.29948937424512556,
+      "length": 0.10049012573549068,
+      "arm_mass": 0.0,
+      "static_torque_nm": 0.295138240338908
+    },
+    {
+      "hole_m": 0.15,
+      "inertia_kg_m2": 0.006526448176722767,
+      "first_moment_kg_m": 0.04410422487433609,
+      "mass": 0.29804613460407076,
+      "length": 0.14797784555375915,
+      "arm_mass": 0.0,
+      "static_torque_nm": 0.432514696863908
+    }
+  ]
+}

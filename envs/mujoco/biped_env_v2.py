@@ -22,6 +22,8 @@ import numpy as np
 import torch
 from gymnasium.spaces import Box, Dict
 
+from actuator.backlash import LASH_SUFFIX, add_backlash
+from actuator.bam_kernel import BamServo, apply_stall_cap, load_params
 from envs.mujoco.base_env import BaseEnv
 from envs.utils.randomizer import Randomizer
 from envs.isaaclab.rewards import rewards as R
@@ -85,16 +87,15 @@ STEP_DT: float    = PHYSICS_DT * DECIMATION
 SERVO_OBS_DELAY: int = 1
 IMU_OBS_DELAY: int   = 1
 
-# Actuator model — mirrors DCMotorCfg in envs/assets/robotV2/biped_robot.py.
-# Feetech STS3215 @ 12 V. These MUST track the Isaac values or the two sims are
-# running different robots.
-ACT_KP: float = 20.0              # stiffness
-ACT_KD: float = 2.0               # damping
-EFFORT_LIMIT: float     = 0.98    # N-m, rated continuous @ 12 V (drive clamp)
-SATURATION_EFFORT: float = 2.94   # N-m, stall @ 12 V (physical torque-speed curve)
-VELOCITY_LIMIT: float    = 4.71   # rad/s, no-load speed (45 RPM)
-# Velocity at which the torque-speed line crosses the effort limit in Q2/Q4.
-_VEL_AT_EFFORT_LIM: float = VELOCITY_LIMIT * (1.0 + EFFORT_LIMIT / SATURATION_EFFORT)
+# Actuator model -- the SAME BAM kernel Isaac trains with (actuator/bam_kernel.py), read from
+# the same config key (env_config.actuator.params_file), so the two sims cannot drift apart.
+# It runs once per 200 Hz physics substep, as in Isaac. The old version computed one PD torque
+# per 50 Hz step and held it for 4 substeps; with kd=2 and armature 0.04 that put kd*T/I at
+# 1.00 against Isaac's 0.25, marginally damped, which is a large part of why MuJoCo looked
+# jitterier than Isaac regardless of the policy.
+DEFAULT_ACTUATOR_PARAMS = "actuator/params/sts3215_12v/m6.json"
+DEFAULT_KP_FW = 32.0
+DEFAULT_VIN = 12.0       # fixed: MuJoCo stands in for one physical robot, so no DR here
 
 _XML_DEFAULT = os.path.join(
     os.path.dirname(__file__),
@@ -149,9 +150,21 @@ class BipedEnvV2(BaseEnv):
                 f"V2 robot XML not found at {xml_path}.\n"
                 "Run  python scripts/generate_v2_xml.py  once to generate it."
             )
-        super().__init__(xml_path, render_mode)
-
         self.config = env_config or NoConfig()
+
+        # Servo model + backlash, from the SAME env_config keys Isaac reads.
+        act_cfg = dict(getattr(self.config, "actuator", None) or {})
+        lash_cfg = dict(getattr(self.config, "backlash", None) or {})
+        self.action_map = getattr(self.config, "action_map", "absolute") or "absolute"
+        self._lash_deg = (float(lash_cfg.get("mujoco_lash_deg", 0.0))
+                          if lash_cfg.get("enabled", False) else 0.0)
+        if self._lash_deg > 0.0:
+            # Faithful backlash: a passive hinge in series with each servo (actuator/backlash.py).
+            # Written next to the source so relative mesh paths still resolve.
+            out = os.path.join(os.path.dirname(os.path.abspath(xml_path)), "robot_v2.backlash.xml")
+            xml_path = str(add_backlash(xml_path, out, JOINT_NAMES, self._lash_deg))
+
+        super().__init__(xml_path, render_mode)
         self.history_size = history_size
         self.use_history  = use_history and history_size > 1
         self.critic_has_privileged_info = critic_has_privileged_info
@@ -165,6 +178,32 @@ class BipedEnvV2(BaseEnv):
         self._qpos_ids = np.array([int(self.model.joint(n).qposadr) for n in JOINT_NAMES], dtype=int)
         self._qvel_ids = np.array([int(self.model.joint(n).dofadr)  for n in JOINT_NAMES], dtype=int)
         self._act_ids  = np.array([int(self.model.actuator(n).id)   for n in JOINT_NAMES], dtype=int)
+        if self._lash_deg > 0.0:
+            self._lash_qpos_ids = np.array([int(self.model.joint(n + LASH_SUFFIX).qposadr) for n in JOINT_NAMES], dtype=int)
+            self._lash_qvel_ids = np.array([int(self.model.joint(n + LASH_SUFFIX).dofadr) for n in JOINT_NAMES], dtype=int)
+        else:
+            self._lash_qpos_ids = self._lash_qvel_ids = None
+
+        # BAM servo, N = 1 robot x 12 joints, on CPU in float64.
+        params = apply_stall_cap(load_params(act_cfg.get("params_file", DEFAULT_ACTUATOR_PARAMS)),
+                                 act_cfg.get("stall_torque_cap_nm"))
+        self.servo = BamServo(params, 1, 12, PHYSICS_DT,
+                              kp=float(act_cfg.get("kp_fw", DEFAULT_KP_FW)),
+                              vin=DEFAULT_VIN, backlash=False, dtype=torch.float64)
+        self.servo.kernel.torque_scale[:] = float(act_cfg.get("torque_scale", 1.0))
+        # The kernel owns all servo friction, so MJCF frictionloss must be 0 or it's counted
+        # twice. Rotor armature comes from the identified params, on the SERVO joint only
+        # (the lash hinge keeps its own small conditioning armature). ctrlrange +-2.94 was a
+        # DC-motor-era backstop; BAM's 12 V duty-limited stall is ~6.3 N*m, and leaving the
+        # clip in would make MuJoCo a weaker robot than Isaac, which has no such clip.
+        self.model.dof_frictionloss[self._qvel_ids] = 0.0
+        self.model.dof_damping[self._qvel_ids] = 0.0
+        self.model.dof_armature[self._qvel_ids] = params.armature
+        self.model.actuator_ctrllimited[self._act_ids] = 0
+        # Unit right-hand sides for 1/(M^-1)_ii in _servo_torque (one column per actuated dof).
+        self._unit_rhs = np.zeros((12, self.model.nv))
+        self._unit_rhs[np.arange(12), self._qvel_ids] = 1.0
+        self._minv_cols = np.zeros_like(self._unit_rhs)
         self._base_body_id  = self.model.body("base_link").id
         # Read from the MJCF site rather than hardcoding. The previous hardcoded constant was
         # [+0.023673, 0, 0.025133] while the site (and Isaac's ImuCfg.OffsetCfg) is at
@@ -193,6 +232,8 @@ class BipedEnvV2(BaseEnv):
         self.prev_actions       = np.zeros(12, dtype=np.float32)
         self.filtered_targets   = np.zeros(12, dtype=np.float32)
         self._prev_qvel         = np.zeros(self.model.nv, dtype=np.float32)
+        self._prev_jvel         = np.zeros(12, dtype=np.float32)
+        self._foot_ground_z: np.ndarray | None = None
         self._last_physics_acc  = np.zeros(3, dtype=np.float64)
         self.gait_phase         = 0.0
 
@@ -282,6 +323,33 @@ class BipedEnvV2(BaseEnv):
     def _qvel(self) -> np.ndarray:
         return np.asarray(self.data.qvel).reshape(-1)
 
+    def _jpos(self) -> np.ndarray:
+        """Output-side joint angles (12, Isaac order): what the encoder reads.
+
+        With backlash this is servo + lash hinge. The magnetic sensor sits after the gear
+        play, so everything that stands for "the joint angle" (observations, rewards, the
+        firmware's own error) must use the sum.
+        """
+        q = self._qpos()[self._qpos_ids]
+        if self._lash_qpos_ids is not None:
+            q = q + self._qpos()[self._lash_qpos_ids]
+        return q
+
+    def _jvel(self) -> np.ndarray:
+        """Output-side joint velocities. The firmware derives speed from the encoder, so it sees lash motion too."""
+        v = self._qvel()[self._qvel_ids]
+        if self._lash_qvel_ids is not None:
+            v = v + self._qvel()[self._lash_qvel_ids]
+        return v
+
+    def _actions_to_targets(self, action: np.ndarray) -> np.ndarray:
+        """Same map as BipedEnv.actions_to_targets (Isaac) for the configured action_map."""
+        if self.action_map == "centered":
+            span = np.where(action >= 0.0, JLIM_MAX - self._default_joint_pos,
+                            self._default_joint_pos - JLIM_MIN)
+            return self._default_joint_pos + action * span
+        return JLIM_MIN + (action + 1.0) * 0.5 * JRANGE
+
     # ------------------------------------------------------------------
     # Frame transforms
     # ------------------------------------------------------------------
@@ -296,8 +364,8 @@ class BipedEnvV2(BaseEnv):
         """
         if self._servo_buf is not None:
             seed = np.concatenate([
-                (self._qpos()[self._qpos_ids] - self._default_joint_pos).astype(np.float32),
-                self._qvel()[self._qvel_ids].astype(np.float32),
+                (self._jpos() - self._default_joint_pos).astype(np.float32),
+                self._jvel().astype(np.float32),
             ])
             self._servo_buf.clear()
             for _ in range(SERVO_OBS_DELAY + 1):
@@ -313,25 +381,30 @@ class BipedEnvV2(BaseEnv):
             for _ in range(IMU_OBS_DELAY + 1):
                 self._imu_buf.append(seed.copy())
 
-    @staticmethod
-    def _clip_effort_dcmotor(effort: np.ndarray, joint_vel: np.ndarray) -> np.ndarray:
-        """Four-quadrant DC-motor torque-speed clip. Port of Isaac Lab DCMotor._clip_effort.
+    def _servo_torque(self, goal: np.ndarray) -> np.ndarray:
+        """BAM servo torque for the 12 actuated joints, one physics substep.
 
-        A flat symmetric clip (what this used to be) lets the servo deliver full torque at any
-        speed, which is the single biggest way a sim servo flatters the real one -- a real
-        STS3215's torque collapses toward zero as it approaches no-load speed, exactly when a
-        swing leg needs it most.
-
-        Envelope: flat +-EFFORT_LIMIT up to the corner at
-        VELOCITY_LIMIT * (1 - EFFORT_LIMIT/SATURATION_EFFORT) = 3.14 rad/s, then linear droop
-        to zero at VELOCITY_LIMIT (4.71 rad/s).
+        External torque is computed the way bam/mujoco.py does it: -qfrc_bias +
+        qfrc_constraint on the SERVO dof, which covers gravity, coupling, contacts and the
+        lash-limit contact. It comes from the previous step's solve, as in BAM. There is no
+        own-dof friction constraint to subtract, because MJCF frictionloss is 0 (the kernel
+        owns friction). Effective inertia is 1 / (M^-1)_ii, armature included, NOT the qM
+        diagonal: the stiction clip is a one-step deadbeat, and on a floating base M_ii (the
+        other dofs locked) overestimates what a torque on one joint actually moves, so it
+        over-corrects into chatter. BAM's MuJoCo backend uses dof_invweight0 for the same
+        reason. mj_solveM reuses the factorisation from the last step.
         """
-        vel = np.clip(joint_vel, -_VEL_AT_EFFORT_LIM, _VEL_AT_EFFORT_LIM)
-        torque_speed_top    = SATURATION_EFFORT * (1.0 - vel / VELOCITY_LIMIT)
-        torque_speed_bottom = SATURATION_EFFORT * (-1.0 - vel / VELOCITY_LIMIT)
-        max_effort = np.minimum(torque_speed_top, EFFORT_LIMIT)
-        min_effort = np.maximum(torque_speed_bottom, -EFFORT_LIMIT)
-        return np.clip(effort, min_effort, max_effort)
+        enc = torch.from_numpy(self._jpos()).unsqueeze(0)
+        dq_motor = torch.from_numpy(self._qvel()[self._qvel_ids].copy()).unsqueeze(0)
+        tau_ext = torch.from_numpy(
+            (-self.data.qfrc_bias[self._qvel_ids] + self.data.qfrc_constraint[self._qvel_ids]).copy()
+        ).unsqueeze(0)
+        mujoco.mj_solveM(self.model, self.data, self._minv_cols, self._unit_rhs)
+        inv_ii = self._minv_cols[np.arange(12), self._qvel_ids]
+        inertia = torch.from_numpy(1.0 / inv_ii).unsqueeze(0)
+        g = torch.from_numpy(np.asarray(goal, dtype=np.float64)).unsqueeze(0)
+        tau = self.servo.step(g, enc, dq_motor, tau_ext, inertia)
+        return tau[0].numpy()
 
     def _v_imu_world(self) -> np.ndarray:
         """World-frame translational velocity at the IMU mounting point.
@@ -374,8 +447,8 @@ class BipedEnvV2(BaseEnv):
         # Projected gravity (normalised gravity vector in body frame)
         proj_grav = (R_wb @ np.array([0.0, 0.0, -1.0])).astype(np.float32)
 
-        joint_pos_rel = (qpos[self._qpos_ids] - self._default_joint_pos).astype(np.float32)
-        joint_vel     = qvel[self._qvel_ids].astype(np.float32)
+        joint_pos_rel = (self._jpos() - self._default_joint_pos).astype(np.float32)
+        joint_vel     = self._jvel().astype(np.float32)
 
         # --- Sensor lag (deterministic; see SERVO_OBS_DELAY / IMU_OBS_DELAY) ------------------
         # The policy is TRAINED with a 1-step servo delay and 0-1 step IMU delay, so it has
@@ -454,7 +527,7 @@ class BipedEnvV2(BaseEnv):
 
             if not in_c:
                 # Track max knee bend during swing
-                knee_bend = abs(self._qpos()[self._qpos_ids[KNEE_IDX[i]]])
+                knee_bend = abs(self._jpos()[KNEE_IDX[i]])
                 if knee_bend > self._knee_bend_max[i]:
                     self._knee_bend_max[i] = knee_bend
 
@@ -478,10 +551,10 @@ class BipedEnvV2(BaseEnv):
         ang_vel_b = qvel[3:6].astype(np.float32)
         proj_grav = (R_wb @ np.array([0.0, 0.0, -1.0])).astype(np.float32)
 
-        joint_pos = qpos[self._qpos_ids].astype(np.float32)
-        joint_vel = qvel[self._qvel_ids].astype(np.float32)
+        joint_pos = self._jpos().astype(np.float32)
+        joint_vel = self._jvel().astype(np.float32)
         efforts   = self.data.actuator_force[self._act_ids].astype(np.float32)
-        joint_acc = ((joint_vel - self._prev_qvel[self._qvel_ids]) / STEP_DT).astype(np.float32)
+        joint_acc = ((joint_vel - self._prev_jvel) / STEP_DT).astype(np.float32)
 
         r_foot_pos = self.data.body("r_foot_link_1").xpos.astype(np.float32)
         l_foot_pos = self.data.body("l_foot_link_1").xpos.astype(np.float32)
@@ -543,8 +616,19 @@ class BipedEnvV2(BaseEnv):
         total += _w("feet_air_time",   R.feet_air_time_positive_biped(
             air_t, ctt_t, cmd_t, threshold=0.2, min_speed_command_threshold=0.05))
         total += _w("feet_slide",      R.feet_slide_with_vel(fc_t, fvel_t))
+        # Same datum as Isaac: each foot's own last touchdown height, so clearance is local
+        # and per foot. Command-gated in the reward fn.
+        fh = fp_t[0, :, 2].numpy()
+        contact = fc_t[0].bool().numpy()
+        if self._foot_ground_z is None:
+            self._foot_ground_z = fh.copy()
+        self._foot_ground_z = np.where(contact, fh, self._foot_ground_z)
+        clearance = torch.from_numpy((fh - self._foot_ground_z).astype(np.float32)).unsqueeze(0)
         total += _w("swing_foot_height", R.swing_foot_height(
-            fp_t, fc_t.bool(), min_height=0.02, max_height=0.04))
+            clearance, fc_t.bool(), cmd_t,
+            min_clearance=float(getattr(self.config, "swing_min_clearance", 0.01)),
+            max_clearance=float(getattr(self.config, "swing_max_clearance", 0.07)),
+            min_speed_command_threshold=0.05))
         total += _w("gait_phase_contact", R.gait_phase_contact(
             gp_t, fc_t, cmd_t, min_speed=0.05))
         total += _w("knee_bend_touchdown", R.knee_bend_on_touchdown(
@@ -614,9 +698,12 @@ class BipedEnvV2(BaseEnv):
         mujoco.mj_forward(self.model, self.data)
 
         # Reset EMA filter to current joint positions (matches biped_env.py _reset_idx)
-        self.filtered_targets[:] = self._qpos()[self._qpos_ids].copy()
+        self.filtered_targets[:] = self._jpos().copy()
         self.prev_actions[:] = 0.0
         self._prev_qvel[:] = self._qvel().copy()
+        self._prev_jvel[:] = self._jvel().copy()
+        self.servo.reset()      # firmware slew state + delay ring reseed on the next step
+        self._foot_ground_z = None  # swing datum reseeds from the post-reset foot height
 
         # Random gait phase at reset (matches Isaac Lab)
         self.gait_phase = np.random.uniform(0.0, 2.0 * math.pi)
@@ -645,17 +732,11 @@ class BipedEnvV2(BaseEnv):
     def step(self, action: np.ndarray):
         action = np.clip(action, -1.0, 1.0)
 
-        # [-1,1] → joint position targets (same formula as Isaac Lab _pre_physics_step)
-        norm_01 = (action + 1.0) * 0.5
-        targets = JLIM_MIN + norm_01 * JRANGE
+        targets = self._actions_to_targets(action)
 
-        # EMA action filter (matches biped_env_cfg.py action_filter_alpha=0.4)
-        self.filtered_targets[:] = (
-            ACTION_FILTER_ALPHA * targets + (1.0 - ACTION_FILTER_ALPHA) * self.filtered_targets
-        )
-
-        # Cache velocity before stepping (for reward joint_acc computation on line 380)
+        # Cache velocity before stepping (for reward joint_acc computation)
         self._prev_qvel[:] = self._qvel().copy()
+        self._prev_jvel[:] = self._jvel().copy()
 
         # Advance gait phase (matches _get_observations in biped_env.py)
         v_cmd = float(np.linalg.norm(self.commands[:2]))
@@ -663,27 +744,23 @@ class BipedEnvV2(BaseEnv):
             self.gait_phase + STEP_DT * 2.0 * math.pi * GAIT_CLOCK_FREQ * v_cmd
         ) % (2.0 * math.pi)
 
-        # Python PD torque + DC-motor torque-speed envelope. Mirrors Isaac Lab's DCMotorCfg
-        # (IdealPDActuator.compute + DCMotor._clip_effort). kd is INSIDE the clip, and passive
-        # joint damping is 0 in the XML so this PD is the only damping.
-        pos_err  = self.filtered_targets - self._qpos()[self._qpos_ids]
-        joint_vel = self._qvel()[self._qvel_ids]
-        tau = ACT_KP * pos_err - ACT_KD * joint_vel
-        self.data.ctrl[self._act_ids] = self._clip_effort_dcmotor(tau, joint_vel)
-
-        # Physics: DECIMATION sub-steps at 200 Hz
-        # Run all but last substep, then capture last-substep velocity for instantaneous IMU acc
-        for _ in range(DECIMATION - 1):
+        # DECIMATION substeps at 200 Hz. Like Isaac, the EMA filter AND the servo model run
+        # EVERY substep (Isaac calls _apply_action and the actuator per substep). Doing them
+        # once per 50 Hz step is what made the effective filter alpha 0.40 here vs 0.87 in
+        # Isaac, and the held torque marginally damped.
+        for k in range(DECIMATION):
+            self.filtered_targets[:] = (
+                ACTION_FILTER_ALPHA * targets + (1.0 - ACTION_FILTER_ALPHA) * self.filtered_targets
+            )
+            self.data.ctrl[self._act_ids] = self._servo_torque(self.filtered_targets)
+            if k == DECIMATION - 1:
+                _v_imu_before = self._v_imu_world()
             mujoco.mj_step(self.model, self.data)
-        _v_imu_before = self._v_imu_world()
-        mujoco.mj_step(self.model, self.data)
         self._last_physics_acc = (self._v_imu_world() - _v_imu_before) / PHYSICS_DT
-        # NOTE: the old hard clamp `qvel = clip(qvel, -5, 5)` was removed. Isaac Lab does not
-        # clamp joint velocity -- for an explicit actuator `velocity_limit` feeds the
-        # torque-speed curve, it is not a state constraint, and the USD's own limit is ~100
-        # rad/s. Overwriting qvel mid-episode also injects/removes energy, which MuJoCo's
-        # integrator never accounts for. _clip_effort_dcmotor now enforces the speed ceiling
-        # the physical way: torque reaches zero at VELOCITY_LIMIT.
+        # NOTE: no qvel clamp. Isaac Lab doesn't clamp joint velocity, and overwriting qvel
+        # mid-episode injects or removes energy that MuJoCo's integrator never accounts for.
+        # The speed ceiling is physical: BAM's back-EMF drives motor torque to zero near
+        # no-load speed.
 
         self._update_gait()
 

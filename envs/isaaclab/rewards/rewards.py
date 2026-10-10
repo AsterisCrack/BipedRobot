@@ -2,22 +2,34 @@ import torch
 
 @torch.jit.script
 def swing_foot_height(
-    feet_pos_w: torch.Tensor,
+    foot_clearance: torch.Tensor,
     feet_contact: torch.Tensor,
-    min_height: float = 0.01,
-    max_height: float = 0.05,
+    commands: torch.Tensor,
+    min_clearance: float = 0.01,
+    max_clearance: float = 0.07,
+    min_speed_command_threshold: float = 0.05,
 ) -> torch.Tensor:
-    # feet_pos_w: (N, F, 3)
-    foot_height = feet_pos_w[:, :, 2]
+    """Reward swing-foot clearance, only while the robot is commanded to move.
 
-    # only reward when foot is NOT in contact
+    foot_clearance (N, F) is the foot height ABOVE ITS OWN RESTING STANCE HEIGHT, which the
+    env measures from feet in contact. It is not the link origin's world Z. The old version
+    used world Z with min_height = 0.02, but the V2 foot-link origin rests ~0.036 m above
+    the ground, so an UNLOADED foot sitting flat on the floor already earned
+    1.5 * (0.036 - 0.02) ~= 0.025 per step. Rocking side to side to alternately unweight
+    each foot farmed it, which was the standing jitter. It also had no command gate
+    (every other gait term has one), so it paid out while the robot was told to stand
+    still. On rough terrain world Z added the patch elevation on top.
+
+    min_clearance is a dead zone, so scuffing the floor earns nothing. The reward is
+    linear up to max_clearance, the cap that controls how high the foot is lifted (and,
+    through the leg geometry, how much the knee bends).
+    """
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    moving = (cmd_norm > min_speed_command_threshold).float()
     swing = (~feet_contact).float()
-
-    # clamp reward window
-    height_error = torch.clamp(foot_height - min_height, min=0.0)
-    height_reward = torch.clamp(height_error, max=max_height - min_height)
-
-    return torch.sum(height_reward * swing, dim=1)
+    height_error = torch.clamp(foot_clearance - min_clearance, min=0.0)
+    height_reward = torch.clamp(height_error, max=max_clearance - min_clearance)
+    return torch.sum(height_reward * swing, dim=1) * moving
 
 @torch.jit.script
 def track_lin_vel_xy_exp(commands: torch.Tensor, base_lin_vel_b: torch.Tensor, std: float = 0.35):
@@ -195,35 +207,82 @@ def torso_centering_reward(base_pos: torch.Tensor, feet_pos: torch.Tensor, sigma
     return torch.exp(-sigma * dist_sq)
 
 @torch.jit.script
-def com_support_centering_reward(
+def com_support_offset(
     body_com_pose_w: torch.Tensor,
     body_mass: torch.Tensor,
     feet_pos: torch.Tensor,
     feet_in_contact: torch.Tensor,
-    sigma: float = 1.0,
 ) -> torch.Tensor:
+    """World-frame XY vector from the support centre to the whole-body CoM, (num_envs, 2).
+
+    The support centre is the contact-weighted mean of the feet, falling back to the feet's
+    midpoint when airborne. In single support it is the stance foot.
     """
-    Reward for keeping the true whole-body COM centered over the support polygon.
-    body_com_pose_w: (num_envs, num_bodies, 7) — world-frame COM pose per body
-    body_mass:       (num_envs, num_bodies)     — mass of each body
-    feet_pos:        (num_envs, 2, 3)
-    feet_in_contact: (num_envs, 2) bool
-    """
-    # True whole-body COM (mass-weighted centroid of all body COMs)
     com_pos = body_com_pose_w[:, :, :3]
     total_mass = body_mass.sum(dim=1, keepdim=True)
     com = (com_pos * body_mass.unsqueeze(-1)).sum(dim=1) / total_mass  # (num_envs, 3)
 
-    # Support center: contact-weighted average of feet; fall back to midpoint when airborne
     contact_f = feet_in_contact.float()
     contact_sum = contact_f.sum(dim=1, keepdim=True)
     no_contact = contact_sum.squeeze(1) < 0.5
     midpoint = feet_pos[:, :, :2].mean(dim=1)
     weighted = (feet_pos[:, :, :2] * contact_f.unsqueeze(-1)).sum(dim=1) / contact_sum.clamp(min=1.0)
     support_center = torch.where(no_contact.unsqueeze(-1), midpoint, weighted)
+    return com[:, :2] - support_center
 
-    dist_sq = torch.sum(torch.square(com[:, :2] - support_center), dim=1)
-    return torch.exp(-sigma * dist_sq)
+
+def com_support_distance(
+    body_com_pose_w: torch.Tensor,
+    body_mass: torch.Tensor,
+    feet_pos: torch.Tensor,
+    feet_in_contact: torch.Tensor,
+    foot_margin: float = 0.03,
+) -> torch.Tensor:
+    """Horizontal distance from the whole-body CoM to the SUPPORT POLYGON, 0 when inside.
+
+    With two feet the polygon is the segment between them, so this is the point-to-segment
+    distance; in single support the segment degenerates to the stance foot. foot_margin is
+    the foot's own half-extent, so a CoM over any part of a planted foot reads 0.
+
+    Why not distance to the support CENTRE (the previous two attempts): lifting a foot
+    REQUIRES first shifting the CoM over the other foot, which is a ~half-stance-width
+    excursion from the centre but is perfectly stable -- the CoM is directly over a planted
+    foot. Penalising it taxed the weight transfer that begins every single step. At std_lat
+    0.04 that tax was ~0.09/step against a swing reward of ~0.045/step, so stepping stayed
+    a net loss and foot lift never moved off ~6 mm across two rounds of retuning.
+
+    This form is direction-agnostic and needs no fore/aft split: a CoM between the feet is
+    free whatever the stance, while a genuine fall (CoM outside the polygon, in any
+    direction) grows the distance immediately.
+    """
+    com_pos = body_com_pose_w[:, :, :3]
+    total_mass = body_mass.sum(dim=1, keepdim=True)
+    com = ((com_pos * body_mass.unsqueeze(-1)).sum(dim=1) / total_mass)[:, :2]
+
+    a, b = feet_pos[:, 0, :2], feet_pos[:, 1, :2]
+    c0 = feet_in_contact[:, 0:1].float()
+    c1 = feet_in_contact[:, 1:2].float()
+    # Collapse the segment onto whichever feet are planted. Airborne (neither in contact)
+    # keeps the full segment, matching com_support_offset's midpoint fallback.
+    both = ((c0 + c1) > 1.5).float()
+    none = ((c0 + c1) < 0.5).float()
+    keep_seg = torch.clamp(both + none, max=1.0)
+    a_eff = torch.where(keep_seg > 0.5, a, c0 * a + c1 * b)
+    b_eff = torch.where(keep_seg > 0.5, b, c0 * a + c1 * b)
+
+    ab = b_eff - a_eff
+    denom = torch.sum(ab * ab, dim=1, keepdim=True).clamp(min=1e-12)
+    t = (torch.sum((com - a_eff) * ab, dim=1, keepdim=True) / denom).clamp(0.0, 1.0)
+    closest = a_eff + t * ab
+    dist = torch.norm(com - closest, dim=1)
+    return torch.clamp(dist - foot_margin, min=0.0)
+
+
+@torch.jit.script
+def com_support_centering_reward(com_dist: torch.Tensor, std: float = 0.04) -> torch.Tensor:
+    """exp(-0.5 (d/std)^2) on the distance OUTSIDE the support polygon (see above)."""
+    return torch.exp(-0.5 * torch.square(com_dist / std))
+
 
 @torch.jit.script
 def joint_pos_limits(joint_pos: torch.Tensor, limits_min: torch.Tensor, limits_max: torch.Tensor):

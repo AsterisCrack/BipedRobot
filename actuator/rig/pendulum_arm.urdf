@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<!--
+  Pendulum arm — Fusion 360 physical properties (2026-10-08), density set to match
+  the printed/real part.
+
+  Fusion world origin is on the servo rotation axis (Z). Inertial data from the
+  "Physical" and "Moment of Inertia at Center of Mass" panels, converted to SI:
+    mass     = 31.733 g
+    CoM      = (-62.88, -18.364, ~0) mm  ->  (-0.06288, -0.018364, 0.0) m
+    Ixx CoM  = 4681.892  g mm^2  ->  4.681892e-6 kg m^2
+    Iyy CoM  = 83819.118 g mm^2  ->  8.381912e-5 kg m^2
+    Izz CoM  = 86452.723 g mm^2  ->  8.645272e-5 kg m^2
+    Ixy CoM  = -520.38   g mm^2  ->  -5.2038e-7  kg m^2  (off-diagonal; rig.py handles it)
+    Ixz, Iyz ~= 0 (< 0.01 g mm^2)
+
+  Cross-check (parallel axis about Z through origin):
+    I_z_origin = Izz_CoM + m*(x^2+y^2) = 8.645e-5 + 0.031733*(0.06288^2 + 0.018364^2)
+               = 8.645e-5 + 1.362e-4 = 2.227e-4 kg m^2
+    Fusion says 2.226e+05 g mm^2 = 2.226e-4 kg m^2  ✓
+
+  The visual is approximate (bounding box 170.5 x 48.1 mm); rig.py reads only
+  <inertial>. The real geometry is complex (holes, servo mounting flanges, etc.)
+  but all of that enters dynamics only through the two scalars I and S.
+-->
+<robot name="pendulum_arm">
+  <link name="arm">
+    <inertial>
+      <origin xyz="-0.06288 -0.018364 0.0" rpy="0 0 0"/>
+      <mass value="0.031733"/>
+      <inertia ixx="4.681892e-06" ixy="-5.2038e-07" ixz="0.0"
+               iyy="8.381912e-05" iyz="0.0"
+               izz="8.645272e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.06288 -0.018364 0.0" rpy="0 0 0"/>
+      <geometry>
+        <!-- approximate bounding box; real geometry is in Fusion -->
+        <box size="0.1705 0.04815 0.020"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.06288 -0.018364 0.0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.1705 0.04815 0.020"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

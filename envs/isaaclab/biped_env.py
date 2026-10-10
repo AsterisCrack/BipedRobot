@@ -128,14 +128,42 @@ class BipedEnv(DirectRLEnv):
         # Per-episode constant sensor biases (see _get_observations for why constant matters).
         self.imu_accel_bias_range = float(getattr(cfg, 'imu_accel_bias', 0.0))
         self.imu_gyro_bias_range = float(getattr(cfg, 'imu_gyro_bias', 0.0))
-        self.encoder_offset_range = float(getattr(cfg, 'encoder_offset_rad', 0.0))
         self.imu_accel_bias = torch.zeros(self.num_envs, 3, device=self.device)
         self.imu_gyro_bias = torch.zeros(self.num_envs, 3, device=self.device)
-        self.encoder_offset = torch.zeros(self.num_envs, self.num_joints, device=self.device)
+
+        # Per-robot assembly errors, drawn ONCE here, never per episode. A mis-zeroed servo
+        # horn or a crooked IMU board does not change between resets.
+        #
+        # Mount offset d, per joint, applied on BOTH paths. The servo closes its loop on its
+        # own (offset) encoder, so the true joint settles displaced rather than the sensor
+        # merely misreporting:
+        #   observation  r = q + d                       (_get_observations)
+        #   command      sim target = t - d              (_apply_action)
+        #   next step    r = (t - d) + d = t             self-consistent in encoder space
+        # The old encoder_offset was observation-only. That models a sensor lying to a PD
+        # that still tracks the true angle, which a real serial servo cannot do.
+        self.mount_offset_range = float(getattr(cfg, 'mount_offset_rad', 0.0))
+        self.mount_offset = torch.zeros(self.num_envs, self.num_joints, device=self.device)
+        if self.mount_offset_range > 0.0:
+            self.mount_offset.uniform_(-self.mount_offset_range, self.mount_offset_range)
+
+        # IMU mounting misalignment: a constant rotation of the sensor frame, random axis,
+        # angle uniform in [0, max]. This trains tolerance to residual misalignment. It can't
+        # learn a SYSTEMATIC mount error, which is why the runtime corrects the known 180 deg
+        # board flip explicitly (BipedRobotJetson hardware/imu/bno055.py).
+        self.imu_misalign_max_rad = math.radians(float(getattr(cfg, 'imu_misalignment_deg', 0.0)))
+        self.imu_rot = torch.eye(3, device=self.device).repeat(self.num_envs, 1, 1)
+        if self.imu_misalign_max_rad > 0.0:
+            axis = torch.nn.functional.normalize(torch.randn(self.num_envs, 3, device=self.device), dim=-1)
+            angle = torch.rand(self.num_envs, device=self.device) * self.imu_misalign_max_rad
+            self.imu_rot = math_utils.matrix_from_quat(math_utils.quat_from_angle_axis(angle, axis))
 
         # Commands
         self.command_generator = UniformVelocityCommand(self.cfg, self.num_envs, self.device, self.step_dt)
         self.commands = self.command_generator.commands
+        # The configured (full) command ranges. The command curriculum ramps TOWARD these;
+        # it used to hard-code lat/yaw at +-0.3 and silently override config.yaml.
+        self._cmd_full_ranges = {k: tuple(v) for k, v in self.command_generator.ranges.items()}
         
         # Base state
         self.base_lin_vel_b = torch.zeros(self.num_envs, 3, device=self.device)
@@ -157,9 +185,13 @@ class BipedEnv(DirectRLEnv):
         # Torque headroom accumulators. The STS3215's continuous rating is 0.98 N-m at 12 V and
         # the DCMotor envelope clamps there, so we need to see whether the policy is living at
         # the ceiling -- a gait that draws near-continuous torque will not survive on hardware.
+        # Under BAM there is no fixed torque ceiling (it is set by duty, back-EMF and vin), so
+        # "saturated" means the firmware duty is pinned at its limit; see _get_rewards.
         self.actuator_effort_limit_ref = 0.98
         self.torque_abs_sum = torch.zeros(self.num_envs, device=self.device)
         self.torque_sat_sum = torch.zeros(self.num_envs, device=self.device)
+        self.tau_ext_abs_sum = torch.zeros(self.num_envs, device=self.device)
+        self.friction_abs_sum = torch.zeros(self.num_envs, device=self.device)
         self.episode_step_count = torch.zeros(self.num_envs, device=self.device)
 
         # Nominal per-body COM and mass, captured before any randomization event has run (the
@@ -260,6 +292,57 @@ class BipedEnv(DirectRLEnv):
         print(f"[biped_env] joint_limits rows (deg): "
               f"{[[round(math.degrees(v), 1) for v in lim] for lim in self.cfg.joint_limits]}")
 
+        # Action map. "centered": a = 0 is the default (standing) pose and a = +-1 reaches each
+        # joint limit, piecewise linear on either side. "absolute" is the legacy map that
+        # spreads [-1, 1] across the whole limit box, which puts a = 0 at the box MIDPOINT
+        # (knee -57.5 deg) and forces the policy to hold a ~ +0.92 on both knees just to
+        # stand, close to tanh saturation. A plain residual (default + scale*a) was rejected:
+        # with the knee box at [-120, +5] deg it either wastes most of one side or clips
+        # flexion. The map is identical for L and R, so the mirror table is unaffected.
+        self.action_map = getattr(self.cfg, "action_map", "absolute")
+        if self.action_map not in ("centered", "absolute"):
+            raise ValueError(f"action_map must be 'centered' or 'absolute', got {self.action_map!r}")
+        self.action_span_pos = self.joint_limits_max - self.default_joint_pos
+        self.action_span_neg = self.default_joint_pos - self.joint_limits_min
+        if self.action_map == "centered" and (
+                (self.action_span_pos <= 0).any() or (self.action_span_neg <= 0).any()):
+            raise ValueError("centered action map needs every default joint pos strictly inside its limits")
+
+        # BAM servo actuators need the articulation for the mass matrix and joint_acc, and
+        # Isaac Lab gives an actuator no handle to it. Duck-typed, so the V1 robot (DCMotor)
+        # is unaffected.
+        self.bam_actuators = [a for a in self.robot.actuators.values() if hasattr(a, "attach")]
+        for act in self.bam_actuators:
+            act.attach(self.robot)
+
+        # swing_foot_height datum: each foot's OWN last touchdown height (world Z of the
+        # foot-link origin while in contact). Clearance is measured from there, so it is
+        # terrain-local and per foot. A foot that is unloaded but still on the ground reads
+        # ~0, which keeps the standing exploit closed.
+        # (The previous datum was a single EMA of in-contact foot height relative to the
+        # env origin. On rough terrain it absorbed the patch elevation, measuring 46.5 mm
+        # against a true ~34 mm, which raised the effective dead zone to ~22 mm and
+        # collapsed the reward.)
+        self.foot_ground_z = torch.zeros(self.num_envs, 2, device=self.device)
+        self.foot_ground_init = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # Gait-quality diagnostics (per-episode means, logged at reset). They turn what you
+        # see on screen into numbers: body ahead of the feet, torso lean, toe-in, foot lift,
+        # limping. Signs are verified in src/isaaclab/check_actuator.py.
+        _hy_l, _ = self.robot.find_joints(["(l|left)_hip_yaw.*"])
+        _hy_r, _ = self.robot.find_joints(["(r|right)_hip_yaw.*"])
+        self.hip_yaw_lr = torch.tensor(_hy_l + _hy_r, device=self.device, dtype=torch.long)
+        self.diag_keys = ("com_ahead_m", "com_lateral_abs_m", "com_outside_mm", "lean_fwd_deg",
+                          "toe_in_deg", "vel_err_moving_ms", "yaw_err_moving_rads")
+        self.diag_sums = {k: torch.zeros(self.num_envs, device=self.device) for k in self.diag_keys}
+        # Separate count per key: the *_moving_* keys are nan on envs the command tells to
+        # stand, so they must be averaged over the steps they were actually valid.
+        self.diag_counts = {k: torch.zeros(self.num_envs, device=self.device) for k in self.diag_keys}
+        self.swing_peak = torch.zeros(self.num_envs, 2, device=self.device)
+        self.swing_peak_sum = torch.zeros(self.num_envs, device=self.device)
+        self.swing_count = torch.zeros(self.num_envs, device=self.device)
+        self.contact_steps = torch.zeros(self.num_envs, 2, device=self.device)
+
         # Motion reference (imitation)
         self.motion_ref = None
         self.motion_time = None
@@ -340,10 +423,10 @@ class BipedEnv(DirectRLEnv):
         # --- Command Updates ---
         self.command_generator.compute(self.base_quat)
 
-        # Map actions in [-1, 1] to joint position targets
+        # Map actions in [-1, 1] to joint position targets (see action_map in __init__).
+        # Targets are in ENCODER space -- what the servo believes its angle is.
         self.actions = torch.clamp(self.actions, -1.0, 1.0)
-        normalized_action_01 = (self.actions + 1.0) * 0.5
-        raw_targets = self.joint_limits_min + normalized_action_01 * self.joint_range
+        raw_targets = self.actions_to_targets(self.actions)
 
         # Actuator delay simulation: push new target into buffer, read delayed target
         if self.max_action_delay > 0:
@@ -355,13 +438,22 @@ class BipedEnv(DirectRLEnv):
         else:
             self.targets = raw_targets
 
+    def actions_to_targets(self, actions: torch.Tensor) -> torch.Tensor:
+        """Policy action in [-1, 1] -> joint target in encoder space. Mirrored by export_onnx."""
+        if self.action_map == "centered":
+            span = torch.where(actions >= 0.0, self.action_span_pos, self.action_span_neg)
+            return self.default_joint_pos + actions * span
+        return self.joint_limits_min + (actions + 1.0) * 0.5 * self.joint_range
+
     def _apply_action(self):
         # Action smoothing filter: EMA on PD position targets
         self.filtered_targets = (
             self.action_filter_alpha * self.targets
             + (1.0 - self.action_filter_alpha) * self.filtered_targets
         )
-        self.robot.set_joint_position_target(self.filtered_targets)
+        # The filtered target is in encoder space. A servo with mount offset d drives its
+        # encoder there, so the TRUE joint goes to target - d (see mount_offset in __init__).
+        self.robot.set_joint_position_target(self.filtered_targets - self.mount_offset)
 
     def render(self) -> np.ndarray | None:
         if self.render_mode != "rgb_array" or self.video_camera is None:
@@ -437,16 +529,21 @@ class BipedEnv(DirectRLEnv):
 
         # Per-episode sensor biases. Unlike the observation noise model (resampled every step,
         # so it averages out over the history stack), these are CONSTANT within an episode --
-        # which is what makes them hard, and what real hardware actually does. An MPU-6050 has
-        # a run-to-run accel/gyro null offset, and each servo's encoder zero carries an
-        # assembly error that never changes while the robot is powered.
+        # which is what makes them hard, and what real hardware actually does: an IMU has a
+        # run-to-run accel/gyro null offset. (Per-servo zero error is the mount offset below,
+        # a per-robot constant applied to the command path too.)
         # Applied to the observation copies only; self.* stay ground truth for the rewards.
+        # A misaligned board measures every vector in its own rotated frame. The bias is in
+        # that same sensor frame, so it goes on after the rotation.
+        if self.imu_misalign_max_rad > 0.0:
+            _rot = lambda v: torch.bmm(self.imu_rot, v.unsqueeze(-1)).squeeze(-1)
+            imu_acc_obs, imu_gyro_obs, gravity_obs = _rot(imu_acc_obs), _rot(imu_gyro_obs), _rot(gravity_obs)
         if self.imu_accel_bias_range > 0.0:
             imu_acc_obs = imu_acc_obs + self.imu_accel_bias
         if self.imu_gyro_bias_range > 0.0:
             imu_gyro_obs = imu_gyro_obs + self.imu_gyro_bias
-        if self.encoder_offset_range > 0.0:
-            joint_pos_obs = joint_pos_obs + self.encoder_offset
+        # Encoder reads the true angle plus the mount offset (same d the command path removes).
+        joint_pos_obs = joint_pos_obs + self.mount_offset
 
         # Encoder quantisation, applied after the offset because the servo digitises the
         # angle it actually sees, offset included.
@@ -658,14 +755,31 @@ class BipedEnv(DirectRLEnv):
         # 17. step_length (w=0.0 default, set in config)
         r_step_length = rewards.step_length(touchdown, stride_dist, self.commands, min_speed_command_threshold=0.1)
 
-        # 17. swing_foot_height (w=0.0 default)
-        # max_height 0.04 -> 0.09. The reward clamps at (max_height - min_height), and the
-        # policy was sitting at 82% of the old 0.02 cap -- lifting the foot to 3.65 cm and then
-        # stopping, because beyond 4 cm there was no gradient at all. Foot clearance and knee
-        # flexion are geometrically coupled (you cannot raise the foot without shortening the
-        # leg), so capping clearance caps knee bend. This is the root of the stiff, straight-leg
-        # gait. min_height stays 0.02 as a dead zone so foot scuffs earn nothing.
-        r_swing_foot_height = rewards.swing_foot_height(feet_pos, feet_in_contact, min_height=0.02, max_height=0.09)
+        # 17. swing_foot_height: clearance above the foot's own resting height, command-gated.
+        # Datum: the foot-link origin sits ~3.6 cm above the sole, so measuring raw world Z
+        # paid a flat-but-unloaded foot ~0.025/step to do nothing (the standing jitter).
+        # The resting height is learned from in-contact feet, and the terrain origin is
+        # subtracted so patch elevation cannot be farmed either.
+        foot_z = feet_pos[:, :, 2]
+        fresh = ~self.foot_ground_init
+        if fresh.any():                       # first step after reset: both feet = ground
+            self.foot_ground_z[fresh] = foot_z[fresh]
+            self.foot_ground_init[fresh] = True
+        self.foot_ground_z = torch.where(feet_in_contact, foot_z, self.foot_ground_z)
+        clearance = foot_z - self.foot_ground_z
+        r_swing_foot_height = rewards.swing_foot_height(
+            clearance, feet_in_contact, self.commands,
+            min_clearance=float(getattr(self.cfg, "swing_min_clearance", 0.01)),
+            max_clearance=float(getattr(self.cfg, "swing_max_clearance", 0.07)),
+            min_speed_command_threshold=0.05,
+        )
+        # diagnostics: peak clearance per completed swing, contact share per foot
+        swinging = ~feet_in_contact
+        self.swing_peak = torch.where(swinging, torch.maximum(self.swing_peak, clearance), self.swing_peak)
+        self.swing_peak_sum += (self.swing_peak * touchdown.float()).sum(dim=1)
+        self.swing_count += touchdown.float().sum(dim=1)
+        self.swing_peak = torch.where(touchdown, torch.zeros_like(self.swing_peak), self.swing_peak)
+        self.contact_steps += feet_in_contact.float()
         
         # 18: Gait phase contact — reward feet in sync with clock to enforce alternation
         r_gait_phase_contact = rewards.gait_phase_contact(
@@ -676,12 +790,26 @@ class BipedEnv(DirectRLEnv):
         r_torso_centering = rewards.torso_centering_reward(self.robot.data.root_pos_w, feet_pos)
 
         # 19b: COM support centering (true mass-weighted COM vs. contacting feet centroid)
-        r_com_support_centering = rewards.com_support_centering_reward(
+        com_offset = rewards.com_support_offset(
             self.robot.data.body_com_pose_w,
             self.robot.data.default_mass.to(self.device),
             feet_pos,
             feet_in_contact,
         )
+        com_dist = rewards.com_support_distance(
+            self.robot.data.body_com_pose_w,
+            self.robot.data.default_mass.to(self.device),
+            feet_pos,
+            feet_in_contact,
+            foot_margin=float(getattr(self.cfg, "com_foot_margin", 0.03)),
+        )
+        r_com_support_centering = rewards.com_support_centering_reward(
+            com_dist, std=float(getattr(self.cfg, "com_centering_std", 0.04)))
+        diag = self.gait_diagnostics(com_offset, com_dist)
+        for k, v in diag.items():
+            valid = ~torch.isnan(v)
+            self.diag_sums[k] += torch.where(valid, v, torch.zeros_like(v))
+            self.diag_counts[k] += valid.float()
 
         # 19: Knee bend during swing on touchdown
         r_knee_bend_touchdown = rewards.knee_bend_on_touchdown(touchdown, self.knee_bend_max, min_bend=0.2, max_bend=1.0)
@@ -799,7 +927,13 @@ class BipedEnv(DirectRLEnv):
         # assigned in _get_observations and therefore one step stale at this point.
         _abs_tau = self.robot.data.applied_torque.abs()
         self.torque_abs_sum += _abs_tau.mean(dim=1)
-        self.torque_sat_sum += (_abs_tau > 0.95 * self.actuator_effort_limit_ref).float().mean(dim=1)
+        if self.bam_actuators:
+            _act = self.bam_actuators[0]
+            self.torque_sat_sum += _act.duty_saturated.float().mean(dim=1)
+            self.tau_ext_abs_sum += _act.tau_ext.abs().mean(dim=1)
+            self.friction_abs_sum += _act.servo.tau_friction.abs().mean(dim=1)
+        else:
+            self.torque_sat_sum += (_abs_tau > 0.95 * self.actuator_effort_limit_ref).float().mean(dim=1)
         self.episode_step_count += 1.0
 
         # Unclamped body-frame lateral foot separation, for calibrating min_sep.
@@ -822,6 +956,55 @@ class BipedEnv(DirectRLEnv):
         if self.motion_ref is None or self.motion_time is None:
             return
         self.motion_time[env_ids] = torch.rand(len(env_ids), device=self.device) * self.motion_ref.duration
+
+    def gait_diagnostics(self, com_offset_xy: torch.Tensor,
+                         com_dist: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        """Per-env gait-quality numbers for this step (see the table in __init__).
+
+        com_ahead_m      CoM minus support centre, along the yaw-only heading (+ = ahead)
+        com_lateral_abs_m  |same, across the heading|
+        com_outside_mm   distance the CoM lies OUTSIDE the support polygon (0 = inside);
+                         this is what com_support_centering actually scores
+        lean_fwd_deg     base pitch, + = nose down. For pitch theta about body +Y (REP-103,
+                         + is nose-down), body X in world is (cos, 0, -sin), so projected
+                         gravity's x = x_b . (0,0,-1) = sin(theta).
+        toe_in_deg       mean of -q_hip_yaw over both legs. l_hip_yaw turns about +z, so +q
+                         swings the left toes toward +y (outward); r_hip_yaw turns about -z,
+                         so +q swings the right toes toward -y (outward). Toe-in is -q for
+                         both, which is also why the mirror sign is +1.
+
+        vel_err_moving_ms / yaw_err_moving_rads are the HONEST command-following numbers:
+        raw error in physical units, over commanded-to-move envs only. Reward_Terms
+        /track_*_exp cannot answer "does it follow commands": it is an exp kernel averaged
+        over all envs, and a standing env scores ~1.0 for free. At rel_standing_envs 0.25
+        that inflated the headline ~22% -- run C scored ABOVE the walking DC run on
+        track_lin_vel_xy_exp while actually tracking slightly worse.
+        """
+        q = self.robot.data.root_quat_w
+        yaw = torch.atan2(2.0 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]),
+                          1.0 - 2.0 * (q[:, 2] * q[:, 2] + q[:, 3] * q[:, 3]))
+        fwd = torch.stack([torch.cos(yaw), torch.sin(yaw)], dim=-1)
+        left = torch.stack([-torch.sin(yaw), torch.cos(yaw)], dim=-1)
+        g = self.robot.data.projected_gravity_b
+
+        # Honest tracking error, moving envs only. nan for standing envs so the episodic
+        # mean ignores them entirely rather than averaging in a free 0.
+        moving = torch.norm(self.commands[:, :2], dim=1) > 0.05
+        turning = self.commands[:, 2].abs() > 0.05
+        vel_err = torch.norm(self.commands[:, :2] - self.robot.data.root_lin_vel_b[:, :2], dim=1)
+        yaw_err = (self.commands[:, 2] - self.robot.data.root_ang_vel_b[:, 2]).abs()
+        nan = torch.full_like(vel_err, float("nan"))
+        if com_dist is None:                      # callers that only want the angles
+            com_dist = torch.zeros_like(vel_err)
+        return {
+            "com_ahead_m": (com_offset_xy * fwd).sum(dim=-1),
+            "com_lateral_abs_m": (com_offset_xy * left).sum(dim=-1).abs(),
+            "com_outside_mm": com_dist * 1000.0,
+            "lean_fwd_deg": torch.rad2deg(torch.asin(g[:, 0].clamp(-1.0, 1.0))),
+            "toe_in_deg": torch.rad2deg(-self.robot.data.joint_pos[:, self.hip_yaw_lr].mean(dim=1)),
+            "vel_err_moving_ms": torch.where(moving, vel_err, nan),
+            "yaw_err_moving_rads": torch.where(turning, yaw_err, nan),
+        }
 
     def _tilt_exceeded(self) -> torch.Tensor:
         """Shared tilt-past-limit test for the termination AND its reward penalty.
@@ -909,7 +1092,29 @@ class BipedEnv(DirectRLEnv):
         _steps = self.episode_step_count[env_ids].clamp(min=1.0)
         extras_term["Torque/mean_abs"] = torch.mean(self.torque_abs_sum[env_ids] / _steps).item()
         extras_term["Torque/frac_saturated"] = torch.mean(self.torque_sat_sum[env_ids] / _steps).item()
+        if self.bam_actuators:
+            extras_term["Actuator/mean_abs_tau_ext"] = torch.mean(self.tau_ext_abs_sum[env_ids] / _steps).item()
+            extras_term["Actuator/mean_abs_friction"] = torch.mean(self.friction_abs_sum[env_ids] / _steps).item()
         extras_term["Diagnostics/foot_sep_body_m"] = torch.mean(self.foot_sep_sum[env_ids] / _steps).item()
+        for k, v in self.diag_sums.items():
+            # Average over the steps this key was valid, not over every step: the
+            # *_moving_* keys are undefined while an env is commanded to stand.
+            cnt = self.diag_counts[k][env_ids]
+            per_env = v[env_ids] / cnt.clamp(min=1.0)
+            if cnt.sum() > 0:
+                extras_term[f"Diagnostics/{k}"] = per_env[cnt > 0].mean().item()
+            v[env_ids] = 0.0
+            self.diag_counts[k][env_ids] = 0.0
+        _swings = self.swing_count[env_ids]
+        if _swings.sum() > 0:
+            extras_term["Diagnostics/swing_clearance_mm"] = (
+                1000.0 * self.swing_peak_sum[env_ids].sum() / _swings.sum()).item()
+        _cf = self.contact_steps[env_ids] / _steps.unsqueeze(-1)
+        extras_term["Diagnostics/contact_asym"] = torch.mean((_cf[:, 0] - _cf[:, 1]).abs()).item()
+        self.swing_peak[env_ids] = 0.0
+        self.swing_peak_sum[env_ids] = 0.0
+        self.swing_count[env_ids] = 0.0
+        self.contact_steps[env_ids] = 0.0
 
         # Whole-run scalars for mass / COM drift. com_drift_max_m is the one that matters: with
         # a correct (non-accumulating) randomizer it should sit flat near the configured range;
@@ -924,6 +1129,8 @@ class BipedEnv(DirectRLEnv):
 
         self.torque_abs_sum[env_ids] = 0.0
         self.torque_sat_sum[env_ids] = 0.0
+        self.tau_ext_abs_sum[env_ids] = 0.0
+        self.friction_abs_sum[env_ids] = 0.0
         self.foot_sep_sum[env_ids] = 0.0
         self.episode_step_count[env_ids] = 0.0
 
@@ -946,8 +1153,10 @@ class BipedEnv(DirectRLEnv):
         # Reset gait phase to random uniform [0, 2π]
         self.gait_phase[env_ids] = torch.rand(len(env_ids), device=self.device) * 2.0 * math.pi
 
-        # Reset action filter to current joint positions to avoid a large transient
-        self.filtered_targets[env_ids] = self.robot.data.joint_pos[env_ids]
+        # Reset action filter to the current ENCODER reading (filtered_targets live in encoder
+        # space; _apply_action subtracts mount_offset), so the commanded true target equals
+        # the true joint position and there is no reset transient.
+        self.filtered_targets[env_ids] = self.robot.data.joint_pos[env_ids] + self.mount_offset[env_ids]
 
         # Reset delay buffer and sample new per-env delay
         self.action_delay_buffer[env_ids] = 0.0
@@ -981,14 +1190,12 @@ class BipedEnv(DirectRLEnv):
             self.imu_gyro_bias[env_ids] = (
                 torch.empty(_n, 3, device=self.device).uniform_(-1.0, 1.0) * self.imu_gyro_bias_range
             )
-        if self.encoder_offset_range > 0.0:
-            self.encoder_offset[env_ids] = (
-                torch.empty(_n, self.num_joints, device=self.device).uniform_(-1.0, 1.0)
-                * self.encoder_offset_range
-            )
+        # (mount_offset is a per-robot constant drawn once in __init__, not redrawn here.)
 
         # Reset feet contact history to True.
         self.feet_in_contact_prev[env_ids] = True
+        # Swing datum re-seeds from the post-reset foot height on the next reward step.
+        self.foot_ground_init[env_ids] = False
 
         # Reset last feet indices to 1 (Left) so Right foot (0) is valid first
         self.last_feet_indices[env_ids] = 1
@@ -1033,7 +1240,30 @@ class BipedEnv(DirectRLEnv):
         init_scale = min(1.0, step / max(1.0, float(self.cfg.curriculum_init_ramp_steps)))
         return {"dr": dr_scale, "cmd": cmd_scale, "init": init_scale}
 
+    def _apply_schedules(self) -> None:
+        """Linear ramps that are independent of the DR curriculum switch.
+
+        Both are in common_step_counter units (control steps), like the DR curriculum. A ramp
+        of 0 jumps straight to the end value.
+          * stand-still fraction: no stillness reward is used; standing is taught purely by
+            how often a zero command is drawn (reference: 2% -> 25%).
+          * action_rate_l2 weight: the main sim2real smoothness regulariser, started small so
+            it doesn't freeze early exploration.
+        """
+        step = float(self.common_step_counter)
+        if getattr(self.cfg, "standing_envs_end", None) is not None:
+            f = min(1.0, step / max(1.0, float(self.cfg.standing_envs_ramp_steps)))
+            rel = self.cfg.standing_envs_start + (self.cfg.standing_envs_end - self.cfg.standing_envs_start) * f
+            self.command_generator.rel_standing_envs = rel
+            self.extras.setdefault("log", {})["Curriculum/rel_standing_envs"] = rel
+        if getattr(self.cfg, "action_rate_weight_end", None) is not None:
+            f = min(1.0, step / max(1.0, float(self.cfg.action_rate_ramp_steps)))
+            w = self.cfg.action_rate_weight_start + (self.cfg.action_rate_weight_end - self.cfg.action_rate_weight_start) * f
+            self.cfg.rewards["action_rate_l2"] = w
+            self.extras.setdefault("log", {})["Curriculum/action_rate_weight"] = w
+
     def _apply_curriculum(self) -> None:
+        self._apply_schedules()
         if not getattr(self.cfg, "curriculum_enabled", False):
             return
         scales = self._get_curriculum_scales()
@@ -1097,17 +1327,18 @@ class BipedEnv(DirectRLEnv):
         if cmd != self._curriculum_last_cmd_scale:
             self._curriculum_last_cmd_scale = cmd
             start_lo, start_hi = self.cfg.curriculum_cmd_start_lin_vel_x
-            full_lo,  full_hi  = self.cfg.curriculum_cmd_full_lin_vel_x
+            full = self._cmd_full_ranges
+            full_lo, full_hi = full.get("lin_vel_x", self.cfg.curriculum_cmd_full_lin_vel_x)
             new_vx = (
                 start_lo + (full_lo - start_lo) * cmd,
                 start_hi + (full_hi - start_hi) * cmd,
             )
-            lat = 0.3 * cmd
-            yaw = 0.3 * cmd
+            vy_lo, vy_hi = full.get("lin_vel_y", (-0.3, 0.3))
+            wz_lo, wz_hi = full.get("ang_vel_z", (-0.3, 0.3))
             self.command_generator.update_ranges({
                 "lin_vel_x": new_vx,
-                "lin_vel_y": (-lat, lat),
-                "ang_vel_z": (-yaw, yaw),
+                "lin_vel_y": (vy_lo * cmd, vy_hi * cmd),
+                "ang_vel_z": (wz_lo * cmd, wz_hi * cmd),
             })
 
         if init != self._curriculum_last_init_scale:

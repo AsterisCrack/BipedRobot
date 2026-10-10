@@ -47,6 +47,7 @@ from torch_rl_algorithms.algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
 from src.isaaclab.common import BaseIsaacLabWrapper
+from src.isaaclab.env_config import build_env_cfg, describe as describe_env_cfg
 from envs.isaaclab.biped_env import BipedEnv
 from envs.isaaclab.biped_env_cfg import BipedEnvCfg as BipedRobotEnvCfg
 from envs.isaaclab.biped_env_cfg import BipedRobotV2EnvCfg
@@ -79,57 +80,14 @@ def play():
 
     config = Config(args_cli.config_path)
     
-    # Initialize Isaac Lab Environment
-    # terrain flags must reach __post_init__ via the constructor — setting them
-    # after construction is too late because __post_init__ already ran with defaults.
-    env_cfg = BipedEnvCfg(
-        use_rough_terrain=getattr(config.train, "use_rough_terrain", False),
-        use_terrain_curriculum=getattr(config.train, "use_terrain_curriculum", False),
-    )
-    env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else 1
+    # Same builder as train.py, with pushes and physics DR off: playback runs the NOMINAL
+    # robot through the identical observation/actuation pipeline (action map, servo model,
+    # sensor lag, noise). The old hand-copied block here ignored most of those, so play was
+    # evaluating a different env from the one the policy trained in.
+    env_cfg = build_env_cfg(config, BipedEnvCfg, training=False,
+                            num_envs=args_cli.num_envs if args_cli.num_envs is not None else 1)
+    print("[play] env contract:", describe_env_cfg(env_cfg))
 
-    if hasattr(config.train, "history_size"):
-        env_cfg.history_size = config.train.history_size
-    if hasattr(config.train, "use_history"):
-        env_cfg.use_history = config.train.use_history
-        
-    # Apply env_config from yaml
-    if hasattr(config.train, "env_config"):
-        env_conf = config.train.env_config
-        
-        # Update commands
-        if hasattr(env_conf, "commands") and env_conf.commands:
-            # Handle Pydantic model or dict
-            cmds = env_conf.commands
-            if hasattr(cmds, "model_dump"):
-                cmds = cmds.model_dump()
-            
-            if "base_velocity" in cmds:
-                if "ranges" in cmds["base_velocity"]:
-                    ranges = cmds["base_velocity"]["ranges"]
-                    # Update ranges in env_cfg
-                    # env_cfg.commands is a dict
-                    if "lin_vel_x" in ranges:
-                        env_cfg.commands["base_velocity"]["ranges"]["lin_vel_x"] = tuple(ranges["lin_vel_x"])
-                    if "lin_vel_y" in ranges:
-                        env_cfg.commands["base_velocity"]["ranges"]["lin_vel_y"] = tuple(ranges["lin_vel_y"])
-                    if "ang_vel_z" in ranges:
-                        env_cfg.commands["base_velocity"]["ranges"]["ang_vel_z"] = tuple(ranges["ang_vel_z"])
-                        
-        # Update rewards weights if needed (for logging/debugging)
-        if hasattr(env_conf, "reward_weights") and env_conf.reward_weights:
-            weights = env_conf.reward_weights
-            if hasattr(weights, "model_dump"):
-                weights = weights.model_dump()
-            env_cfg.rewards.update(weights)
-        if hasattr(config.train, "actor_obs"):
-            env_cfg.observation_type = config.train.actor_obs
-        
-        if hasattr(config.train, "critic_obs"):
-            # If critic_obs is privileged, we enable privileged info
-            # Otherwise (normal or basic), we disable it so it uses the same obs as actor
-            env_cfg.critic_has_privileged_info = (config.train.critic_obs == "privileged")
-            
     env = BipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video or args_cli.headless else None)
     wrapped_env = IsaacLabWrapper(env, config)
     

@@ -22,6 +22,11 @@ class UniformVelocityCommand:
         self.heading_control_stiffness = 0.5
         self.rel_standing_envs = 0.02
         self.rel_heading_envs = 1.0
+        # Turn-in-place bucket: vx = vy = 0 with a large |wz|. Under independent uniform
+        # sampling, "lin ~ 0, |ang| large" is ~2% of the data, so spinning on the spot is
+        # effectively never trained, and real-robot turning comes out slow and unstable.
+        self.rel_turn_in_place_envs = 0.0
+        self.turn_in_place_min_frac = 0.4   # |wz| drawn from [frac*max, max]
         self.ranges = {}
 
         if hasattr(cfg, "commands") and isinstance(cfg.commands, dict):
@@ -30,6 +35,8 @@ class UniformVelocityCommand:
             self.heading_control_stiffness = base_vel_cfg.get("heading_control_stiffness", self.heading_control_stiffness)
             self.rel_standing_envs = base_vel_cfg.get("rel_standing_envs", self.rel_standing_envs)
             self.rel_heading_envs = base_vel_cfg.get("rel_heading_envs", self.rel_heading_envs)
+            self.rel_turn_in_place_envs = base_vel_cfg.get("rel_turn_in_place_envs",
+                                                           self.rel_turn_in_place_envs)
             self.ranges = base_vel_cfg.get("ranges", {})
         
     def update_ranges(self, ranges: dict) -> None:
@@ -73,9 +80,23 @@ class UniformVelocityCommand:
         
         # Standing envs have zero command
         self.commands[env_ids[is_standing], :] = 0.0
-        
-        # Update heading mode state
-        self.in_heading_mode[env_ids] = is_heading & (~is_standing)
+
+        # Turn-in-place envs, disjoint from standing: no translation, a yaw rate drawn from
+        # the top of the range with a random sign.
+        is_turn = (torch.rand(len(env_ids), device=self.device) < self.rel_turn_in_place_envs) & (~is_standing)
+        if is_turn.any():
+            turn_ids = env_ids[is_turn]
+            wz_max = max(abs(float(r_z[0])), abs(float(r_z[1])))
+            mag = torch.empty(len(turn_ids), device=self.device).uniform_(
+                self.turn_in_place_min_frac * wz_max, wz_max)
+            sign = torch.where(torch.rand(len(turn_ids), device=self.device) < 0.5, -1.0, 1.0)
+            self.commands[turn_ids, 0] = 0.0
+            self.commands[turn_ids, 1] = 0.0
+            self.commands[turn_ids, 2] = mag * sign
+
+        # Heading mode rewrites wz every step from the heading error, so it would silently
+        # overwrite the turn bucket. Both standing and turning envs are excluded.
+        self.in_heading_mode[env_ids] = is_heading & (~is_standing) & (~is_turn)
         
         # Sample target heading
         self.heading_target[env_ids] = torch.empty(len(env_ids), device=self.device).uniform_(*r_head)
