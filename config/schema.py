@@ -125,7 +125,29 @@ class EnvConfig(BaseModel):
     imu_obs_delay_steps_range: List[int] = Field(default_factory=lambda: [0, 0])
     imu_accel_bias: float = 0.0
     imu_gyro_bias: float = 0.0
+    # Renamed to mount_offset_rad (now applied to the command path too). A non-zero value here
+    # raises in src/isaaclab/env_config.py rather than being silently ignored.
     encoder_offset_rad: float = 0.0
+    mount_offset_rad: float = 0.0
+    imu_misalignment_deg: float = 0.0
+
+    # Servo model and backlash (see actuator/ and envs/assets/robotV2/bam_actuator.py)
+    actuator: Optional[Dict[str, Any]] = None
+    backlash: Optional[Dict[str, Any]] = None
+    action_map: str = "absolute"
+
+    # Schedules (common_step_counter units). None leaves the env default alone.
+    standing_envs_start: float = 0.02
+    standing_envs_end: Optional[float] = None
+    standing_envs_ramp_steps: int = 0
+    action_rate_weight_start: float = -0.01
+    action_rate_weight_end: Optional[float] = None
+    action_rate_ramp_steps: int = 0
+
+    swing_min_clearance: float = 0.01
+    swing_max_clearance: float = 0.07
+    com_centering_std: float = 0.04
+    com_foot_margin: float = 0.03
 
     class Config:
         extra = "allow" # Allow extra fields to avoid validation errors for complex nested dicts

@@ -17,7 +17,7 @@ from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelCfg
 import isaaclab.terrains as terrain_gen
 from isaaclab.terrains import TerrainGeneratorCfg
 
-from .mdp.events import randomize_actuator_effort_limit, randomize_rigid_body_com_absolute
+from .mdp.events import randomize_bam_actuator, randomize_rigid_body_com_absolute
 from envs.assets.robot.biped_robot import BIPED_ROBOT_CFG as BIPED_ROBOT_V1_CFG
 from envs.assets.robot.biped_robot import JOINT_LIMITS as JOINT_LIMITS_V1
 from envs.assets.robotV2.biped_robot import BIPED_ROBOT_CFG as BIPED_ROBOT_V2_CFG
@@ -222,7 +222,30 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # history stack. Real hardware has a fixed null offset per power-cycle, which is harder.
     imu_accel_bias: float = 0.0      # m/s^2
     imu_gyro_bias: float = 0.0       # rad/s
-    encoder_offset_rad: float = 0.0  # rad, per joint
+    # Per-ROBOT constants, drawn once at startup (see BipedEnv.__init__):
+    mount_offset_rad: float = 0.0       # servo zero error, +-range, applied to obs AND command
+    imu_misalignment_deg: float = 0.0   # IMU board tilt, random axis, angle in [0, max]
+
+    # Action map: "centered" (a=0 -> default pose, a=+-1 -> limits) or "absolute" (legacy).
+    action_map: str = "absolute"
+
+    # Schedules, in common_step_counter units; None leaves the value alone.
+    standing_envs_start: float = 0.02
+    standing_envs_end: float | None = None
+    standing_envs_ramp_steps: int = 0
+    action_rate_weight_start: float = -0.01
+    action_rate_weight_end: float | None = None
+    action_rate_ramp_steps: int = 0
+
+    # swing_foot_height window, as clearance ABOVE the measured resting foot height [m]
+    swing_min_clearance: float = 0.01
+    swing_max_clearance: float = 0.07
+
+    # com_support_centering: reward = exp(-0.5 (d/std)^2) where d is the distance the CoM
+    # lies OUTSIDE the support polygon (0 when inside). com_foot_margin is the foot's own
+    # half-extent, so a CoM over any part of a planted foot reads 0.
+    com_centering_std: float = 0.04
+    com_foot_margin: float = 0.03
     # TODO: Changes made: action max delay 2 -> 0, commented new randomizations, removed history, lowered mlp size, removed symmetry
 
     # Randomization
@@ -285,7 +308,10 @@ class BipedEnvCfg(DirectRLEnvCfg):
         "projected_gravity": 0.01,
         "commands": 0.0,
         "joint_pos": 0.0015,    # rad, ~1 encoder LSB of jitter on top of the quantisation
-        "joint_vel": 0.05,      # rad/s -- PLACEHOLDER, set from tools/speed_register_check.py
+        # rad/s. The reference robot uses +-0.25 here against +-0.001 on joint_pos: the
+        # firmware's velocity estimate is the one genuinely bad servo channel. Refine with
+        # tools/speed_register_check.py once real data exists.
+        "joint_vel": 0.25,
         "previous_actions": 0.0,
         "gait_clock": 0.0,
     }
@@ -411,15 +437,19 @@ class BipedEnvCfg(DirectRLEnvCfg):
                 "operation": "scale",
             },
         ),
-        # Randomize actuator gains
-        "randomize_actuator_gains": EventTerm(
-            func="isaaclab.envs.mdp:randomize_actuator_gains",
-            mode="reset",
+        # Servo population for the BAM actuator: per-robot supply voltage, per-servo friction
+        # scale and backlash. Replaces randomize_actuator_gains and randomize_effort_limit --
+        # under BAM there are no PD gains to scale and the torque ceiling follows from vin and
+        # duty. The params here are overwritten from config.yaml's `actuator`/`backlash`
+        # blocks by src/isaaclab/env_config.py.
+        "randomize_bam_actuator": EventTerm(
+            func=randomize_bam_actuator,
+            mode="startup",
             params={
-                "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-                "stiffness_distribution_params": (0.7, 1.3),  # widened from (0.8, 1.2)
-                "damping_distribution_params": (0.7, 1.3),
-                "operation": "scale",
+                "asset_cfg": SceneEntityCfg("robot"),
+                "vin_range": (11.1, 12.6),
+                "friction_scale_range": (0.9, 1.1),
+                "lash_range_rad": None,
             },
         ),
         # Joint friction (stiction) and armature (reflected rotor inertia).
@@ -441,8 +471,10 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="startup",
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
-                "friction_distribution_params": (0.5, 1.5),    # nominal 0.2 -> 0.10 .. 0.30
-                "armature_distribution_params": (0.85, 1.15),  # nominal 0.04 -> 0.034 .. 0.046
+                # No friction here: the BAM kernel owns all servo friction and forces the PhysX
+                # joint friction to 0 (scaling a 0 is a no-op anyway). Friction spread is
+                # randomize_bam_actuator's friction_scale_range.
+                "armature_distribution_params": (0.85, 1.15),  # about BAM's identified armature
                 "operation": "scale",
             },
         ),
@@ -465,20 +497,6 @@ class BipedEnvCfg(DirectRLEnvCfg):
                 # means foot-strike never has any rebound to reject.
                 "restitution_range": (0.0, 0.3),
                 "num_buckets": 64,
-            },
-        ),
-        # Effort limit randomization: battery sag, unit-to-unit variation and thermal derating
-        # all move the STS3215's usable torque. Now that effort_limit is the binding constraint
-        # (0.98 N-m continuous rather than the old 3.0 stall figure), uncertainty in it matters
-        # far more than it used to. randomize_actuator_gains only covers kp/kd, so this needs a
-        # custom term -- see envs/isaaclab/mdp/events.py.
-        "randomize_effort_limit": EventTerm(
-            func=randomize_actuator_effort_limit,
-            mode="reset",
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "distribution_params": (0.7, 1.15),  # widened from (0.8, 1.1)
-                "operation": "scale",
             },
         ),
         # COM offset randomization: curriculum-scaled via curriculum_dr_events.
@@ -550,9 +568,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
         if not self.enable_perturbations:
             self.events.pop("push_robot", None)
         if not self.enable_physics_randomization:
-            for key in ["randomize_mass", "randomize_actuator_gains", "randomize_friction",
-                        "randomize_com", "randomize_payload", "randomize_effort_limit",
-                        "randomize_joint_params"]:
+            for key in ["randomize_mass", "randomize_friction", "randomize_com",
+                        "randomize_payload", "randomize_joint_params", "randomize_bam_actuator"]:
                 self.events.pop(key, None)
 
         if self.use_rough_terrain:

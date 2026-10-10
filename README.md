@@ -64,6 +64,13 @@ BipedRobot/
 │   ├── final/                     # Production configs (sac, ddpg, d4pg, mpo)
 │   └── isaac/                     # Isaac Lab-specific configs
 │
+├── actuator/                       # STS3215 servo model (BAM) + system identification
+│   ├── bam_kernel.py               # The servo model, batched torch, shared by both sims
+│   ├── validate.py                 # Score a SysID session; plot recorded vs fitted
+│   ├── replay.py                   # Replay recordings through MuJoCo / Isaac vs hardware
+│   ├── rig.py                      # Pendulum rig -> the equivalent point pendulum
+│   └── params/                     # Identified parameters (m1..m6)
+│
 ├── envs/
 │   ├── mujoco/                    # MuJoCo environment
 │   │   ├── mujoco_env.py          # MujocoEnv - main Gymnasium environment
@@ -278,6 +285,34 @@ rewards:
 ```
 
 See the [robot-motion-reference](robot-motion-reference/) submodule for the FBX conversion pipeline.
+
+---
+
+## Servo Model
+
+The policy trains against an identified model of the actual Feetech STS3215 servos -
+Rhoban's [BAM](https://github.com/Rhoban/bam) (DC motor + non-linear friction + the
+firmware's P-only control law), ported to batched torch so Isaac and MuJoCo run the same
+kernel.
+
+Validated 2026-10-09 against 48 bench recordings of a real servo on a pendulum rig:
+
+| | torque-on MAE vs hardware |
+|---|---|
+| BAM reference | 5.53 mrad |
+| MuJoCo | 5.53 mrad |
+| Isaac / PhysX | 5.53 mrad |
+
+against a 10 mrad published hold-out, with the two simulators agreeing to 0.06 mrad. The
+active parameters are `actuator/params/sts3215_12v/m6.json`, selected in
+`config.yaml` under `env_config.actuator`.
+
+One known gap: with torque **off** the real gearbox holds its position and the model lets
+the joint fall, so stiction is underestimated. It does not affect tracking, but it does
+affect backdriven behaviour.
+
+See [`actuator/README.md`](actuator/README.md) for the full identification - method,
+figures, every parameter, and the measured speed/torque envelope.
 
 ---
 

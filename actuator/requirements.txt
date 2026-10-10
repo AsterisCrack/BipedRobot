@@ -1,0 +1,13 @@
+# Tooling for actuator/: identification, validation and parity tests.
+#
+# Training does NOT need any of this -- envs/ only imports actuator/bam_kernel.py, which
+# depends on torch alone. Install these into whichever environment runs the fits:
+#
+#     pip install -r actuator/requirements.txt
+#
+# BAM is pinned to the commit the kernel was ported from and verified against
+# (actuator/parity/test_kernel_vs_bam.py). Bump it only after re-running that test.
+better-actuator-models @ git+https://github.com/Rhoban/bam.git@e9a619d56da5236206f4de6ceec2c1ee1b497b5c
+optuna
+matplotlib
+pytest

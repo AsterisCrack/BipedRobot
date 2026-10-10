@@ -50,6 +50,7 @@ from torch_rl_algorithms.algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
 from src.isaaclab.common import BaseIsaacLabWrapper
+from src.isaaclab.env_config import build_env_cfg, describe as describe_env_cfg
 from envs.isaaclab.biped_env import BipedEnv
 from envs.isaaclab.biped_env_cfg import BipedEnvCfg as BipedRobotEnvCfg
 from envs.isaaclab.biped_env_cfg import BipedRobotV2EnvCfg
@@ -95,148 +96,10 @@ def train():
 
     config = Config(args_cli.config_path)
     
-    # Initialize Isaac Lab Environment
-    # terrain flags must reach __post_init__ via the constructor — setting them
-    # after construction is too late because __post_init__ already ran with defaults.
-    # The DR gates below are in the same boat: __post_init__ pops the randomization events,
-    # so assigning them further down (where the other env_config keys are handled) would be
-    # read too late and the flags would silently do nothing.
-    _env_conf = getattr(config.train, "env_config", None)
-    env_cfg = BipedEnvCfg(
-        use_rough_terrain=getattr(config.train, "use_rough_terrain", False),
-        use_terrain_curriculum=getattr(config.train, "use_terrain_curriculum", False),
-        enable_perturbations=getattr(_env_conf, "enable_perturbations", True),
-        enable_physics_randomization=getattr(_env_conf, "enable_physics_randomization", True),
-    )
-
-    # Override config values if needed based on train_config
-    if hasattr(config.train, "use_history"):
-        env_cfg.use_history = config.train.use_history
-
-    if hasattr(config.train, "history_size"):
-        env_cfg.history_size = config.train.history_size
-        
-    if hasattr(config.train, "actor_obs"):
-        env_cfg.observation_type = config.train.actor_obs
-        
-    if hasattr(config.train, "critic_obs"):
-        # If critic_obs is privileged, we enable privileged info
-        # Otherwise (normal or basic), we disable it so it uses the same obs as actor
-        env_cfg.critic_has_privileged_info = (config.train.critic_obs == "privileged")
-        
-    # Override num_envs if provided in CLI
-    if args_cli.num_envs is not None:
-        env_cfg.scene.num_envs = args_cli.num_envs
-        
-    # Apply EnvConfig from yaml
-    if config.train.env_config:
-        env_conf = config.train.env_config
-        
-        # Mirroring
-        if hasattr(env_cfg, "enable_mirroring"):
-            env_cfg.enable_mirroring = env_conf.enable_mirroring
-        
-        # Rewards
-        if env_conf.reward_weights and hasattr(env_cfg, "rewards"):
-            env_cfg.rewards.update(env_conf.reward_weights)
-            
-        # Reward Scale
-        if hasattr(env_conf, "reward_scale"):
-            env_cfg.reward_scale = env_conf.reward_scale
-
-        # Animation (imitation)
-        if hasattr(env_conf, "animation") and env_conf.animation:
-            anim = env_conf.animation
-            if hasattr(anim, "model_dump"):
-                anim = anim.model_dump()
-            if "npz_path" in anim:
-                env_cfg.animation_npz_path = anim["npz_path"]
-            if "loop" in anim:
-                env_cfg.animation_loop = anim["loop"]
-            if "random_start" in anim:
-                env_cfg.animation_random_start = anim["random_start"]
-            if "speed" in anim:
-                env_cfg.animation_speed = anim["speed"]
-            if "pos_std" in anim:
-                env_cfg.animation_pos_std = anim["pos_std"]
-            if "vel_std" in anim:
-                env_cfg.animation_vel_std = anim["vel_std"]
-            
-        # Commands (Target velocities)
-        # Check if commands are defined in env_config (as dict) or as fields
-        if hasattr(env_conf, "commands") and env_conf.commands:
-             # If commands is a dict (from config.yaml structure)
-             cmds = env_conf.commands
-             if hasattr(cmds, "model_dump"):
-                 cmds = cmds.model_dump()
-             
-             if "base_velocity" in cmds and "ranges" in cmds["base_velocity"]:
-                 ranges = cmds["base_velocity"]["ranges"]
-                 if "lin_vel_x" in ranges:
-                     env_cfg.commands["base_velocity"]["ranges"]["lin_vel_x"] = tuple(ranges["lin_vel_x"])
-                 if "lin_vel_y" in ranges:
-                     env_cfg.commands["base_velocity"]["ranges"]["lin_vel_y"] = tuple(ranges["lin_vel_y"])
-                 if "ang_vel_z" in ranges:
-                     env_cfg.commands["base_velocity"]["ranges"]["ang_vel_z"] = tuple(ranges["ang_vel_z"])
-
-        # Mirroring Indices
-        if hasattr(env_conf, "mirror_joint_indices") and env_conf.mirror_joint_indices:
-            env_cfg.mirror_joint_indices = env_conf.mirror_joint_indices
-            env_cfg.mirror_action_indices = env_conf.mirror_joint_indices
-
-        # Curriculum
-        for _field in ("curriculum_enabled", "curriculum_dr_start_steps", "curriculum_dr_full_steps",
-                       "curriculum_cmd_ramp_steps", "curriculum_init_ramp_steps", "curriculum_dr_events",
-                       "action_delay_steps_range", "servo_obs_delay_steps", "imu_obs_delay_steps_range",
-                       "imu_accel_bias", "imu_gyro_bias", "encoder_offset_rad"):
-            if hasattr(env_conf, _field):
-                setattr(env_cfg, _field, getattr(env_conf, _field))
-
-        # Randomization & Events
-        # enable_perturbations / enable_physics_randomization are NOT set here -- they are
-        # passed to the BipedEnvCfg constructor above, because __post_init__ consumes them.
-        if hasattr(env_conf, "push_interval_s"):
-            env_cfg.push_interval_s = env_conf.push_interval_s
-        if hasattr(env_conf, "push_vel_range"):
-            env_cfg.push_vel_range = env_conf.push_vel_range
-            
-        # Events
-        if hasattr(env_conf, "events") and env_conf.events:
-            events_dict = env_conf.events
-            if hasattr(events_dict, "model_dump"):
-                events_dict = events_dict.model_dump()
-                
-            for key, val in events_dict.items():
-                if key in env_cfg.events:
-                    # Update params if they exist
-                    if "params" in val:
-                        env_cfg.events[key].params.update(val["params"])
-                    # Update other fields if needed (e.g. interval_range_s)
-                    if "interval_range_s" in val:
-                        env_cfg.events[key].interval_range_s = tuple(val["interval_range_s"])
-
-        # Noise
-        if hasattr(env_conf, "observation_noise_std") and env_conf.observation_noise_std:
-            obs_noise = env_conf.observation_noise_std
-            if hasattr(obs_noise, "model_dump"):
-                obs_noise = obs_noise.model_dump()
-            unknown = set(obs_noise) - set(env_cfg.observation_noise_std)
-            if unknown:
-                raise ValueError(
-                    f"unknown observation_noise_std channels: {sorted(unknown)}; "
-                    f"expected a subset of {sorted(env_cfg.observation_noise_std)}")
-            env_cfg.observation_noise_std = {**env_cfg.observation_noise_std, **obs_noise}
-
-
-        if hasattr(env_conf, "action_noise_model") and env_conf.action_noise_model:
-            act_noise = env_conf.action_noise_model
-            if hasattr(act_noise, "model_dump"):
-                act_noise = act_noise.model_dump()
-            if env_cfg.action_noise_model and env_cfg.action_noise_model.noise_cfg:
-                if "mean" in act_noise:
-                    env_cfg.action_noise_model.noise_cfg.mean = act_noise["mean"]
-                if "std" in act_noise:
-                    env_cfg.action_noise_model.noise_cfg.std = act_noise["std"]
+    # Initialize Isaac Lab Environment. All config.yaml -> BipedEnvCfg mapping lives in
+    # src/isaaclab/env_config.py, shared with play.py, so the two cannot drift apart again.
+    env_cfg = build_env_cfg(config, BipedEnvCfg, training=True, num_envs=args_cli.num_envs)
+    print("[train] env contract:", describe_env_cfg(env_cfg))
 
     # Set seeds
     seed = args_cli.seed if args_cli.seed is not None else config.train.seed

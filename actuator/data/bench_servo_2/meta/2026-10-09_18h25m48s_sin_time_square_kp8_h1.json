@@ -1,0 +1,24 @@
+{
+  "trajectory": "sin_time_square",
+  "kp": 8,
+  "hole": 1,
+  "load": {
+    "hole_m": 0.1,
+    "inertia_kg_m2": 0.003024323176722768,
+    "first_moment_kg_m": 0.03009572487433609,
+    "mass": 0.29948937424512556,
+    "length": 0.10049012573549068,
+    "arm_mass": 0.0,
+    "static_torque_nm": 0.295138240338908
+  },
+  "servo_id": 6,
+  "zero_steps": 1545,
+  "rate_hz": 250.0,
+  "n": 1494,
+  "gaps": 1,
+  "aborted": false,
+  "achieved_hz": 248.9,
+  "mean_volts": 11.46,
+  "temp_start": 34.0,
+  "temp_end": 34.0
+}

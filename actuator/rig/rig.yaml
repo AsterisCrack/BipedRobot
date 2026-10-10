@@ -1,0 +1,61 @@
+# Pendulum test rig description — PUT YOUR NUMBERS HERE.
+#
+# Consumed by actuator/rig.py, which converts the real arm into the equivalent
+# point pendulum BAM's log format expects. Run it after editing:
+#
+#     python -m actuator.rig --config actuator/rig/rig.yaml
+#
+# It prints one (mass, length) pair per hole and writes actuator/rig/loads.json,
+# which the Jetson SysID page reads so the numbers land in every recording's
+# metadata automatically.
+
+arm:
+  # Bare arm, NO payload. Export from Fusion with the URDF origin ON the servo
+  # rotation axis -- that saves a parallel-axis step and removes a sign trap.
+  urdf: pendulum_arm.urdf
+
+  # The link to read <inertial> from. Leave null to use the first link that has one.
+  link: null
+
+  # Rotation axis in the URDF link frame, through the origin.
+  # For a Fusion export with the servo axis along Z this is [0, 0, 1].
+  axis: [0.0, 0.0, 1.0]
+
+  # Weighed mass of the PRINTED arm, kg (kitchen scale, include screws/horn if
+  # they are part of what you weighed and modelled).
+  #
+  # If you already set the Fusion material density so CAD mass matches reality,
+  # this will agree with the URDF and nothing is rescaled. If it differs, rig.py
+  # scales the inertia tensor by measured/CAD and says so -- correct only if the
+  # density error is uniform, which holds for constant infill but not for
+  # unmodelled steel inserts.
+  measured_mass_kg: null   # density set in Fusion to match the print; CAD mass is authoritative
+
+payload:
+  # Weighed mass of the single weight you move between holes, kg.
+  mass_kg: 0.28017   # 280.17 g (kitchen scale, 2026-10-08)
+
+  # Treated as a point mass at the hole radius. Its own inertia about its centre
+  # is ~0.6% of the parallel-axis term for a compact 250 g weight at 150 mm, so
+  # this is well below the noise floor. If you modelled it in Fusion instead,
+  # export one URDF per hole and point `arm.urdf` at each in turn with
+  # payload.mass_kg set to 0.
+  inertia_kg_m2: 0.0
+
+  # Hole radii from the rotation axis, metres. One recording set per entry.
+  # Measure on the actual print if you care about the last percent.
+  holes_m: [0.050, 0.100, 0.150]
+
+servo:
+  # Supply voltage at the servo under test, volts. This is the robot's pack
+  # voltage, NOT the 7.4 V the merged BAM Feetech params were fitted at.
+  vin: 12.0
+
+  # Firmware position P gain. Must match what the servo actually has in register
+  # 0x15 during the recording. The protocol sweeps this; these are the values the
+  # SysID page will offer, and one of them gets held out for validation.
+  kp_sweep: [4, 8, 16, 32]
+
+  # BAM models a P-only loop. The servo's D term must be zero during recording,
+  # and on the robot too if the identified model is to describe what you deploy.
+  require_d_zero: true
