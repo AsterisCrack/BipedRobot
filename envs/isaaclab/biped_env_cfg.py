@@ -192,8 +192,23 @@ class BipedEnvCfg(DirectRLEnvCfg):
     animation_speed: float = 1.0
     animation_pos_std: float = 0.5
     animation_vel_std: float = 1.0
-    
+
+    # Gait-table imitation (Gait Studio npz). None = off, and the speed-proportional gait clock
+    # below stays in charge. With a table the clock is fixed-period (the table's) and holds
+    # while the command is below reference_stand_threshold.
+    reference_npz_path: str | None = None
+    reference_stand_threshold: float = 0.05
+    reference_rsi_prob: float = 0.8          # fraction of resets that start on the reference
+    reference_rsi_joint_noise: float = 0.05  # rad, uniform, clamped to the action limits
+    reference_std: dict = {
+        "joint_pos": 0.15, "joint_vel": 1.5, "foot_pos": 0.02,
+        "orientation": 0.08, "lin_vel": 0.1, "ang_vel": 0.3,
+    }
+
     # Observations
+    # IMU acceleration = mean over the control step (see biped_env.StepAveragedImu). False is the
+    # old Isaac Lab behaviour (motion part 4x too large); only for evaluating old checkpoints.
+    imu_step_averaged: bool = True
     observation_type = "normal" # Options: "normal", "basic"
     policy_has_privileged_info = False
     critic_has_privileged_info = True

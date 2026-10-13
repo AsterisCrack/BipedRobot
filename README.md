@@ -36,7 +36,7 @@ Everything was written from scratch: the RL algorithms, the neural network backb
 
 ```bash
 # Clone with submodules
-git clone --recurse-submodules <repo-url>
+git clone --recurse-submodules https://github.com/AsterisCrack/BipedRobot
 cd BipedRobot
 
 # Install dependencies

@@ -73,7 +73,10 @@ class BamActuator(ActuatorBase):
         self.servo = BamServo(
             self.params, self._num_envs, self.num_joints, dt,
             kp=cfg.kp_fw, vin=sum(cfg.vin_range) / 2.0,
-            backlash=cfg.backlash_enabled, impulse_cap=cfg.backlash_impulse_cap,
+            # The re-engagement knock can't exceed what the motor can push: 6.0 was sized for the
+            # uncapped 6.3 N*m fit, and stayed at 2x the 2.94 N*m capped stall after the cap.
+            backlash=cfg.backlash_enabled,
+            impulse_cap=min(cfg.backlash_impulse_cap, self.params.stall_torque),
             device=self._device,
         )
         self.servo.kernel.torque_scale[:] = cfg.torque_scale
@@ -220,6 +223,11 @@ class BamActuatorCfg(ActuatorBaseCfg):
 
     Applied by raising R (see apply_stall_cap), so no-load speed is preserved. It is NOT a
     duty-ceiling scale -- that would slow the servo as well as weaken it."""
+
+    kp_fw_range: tuple[float, float] | None = None
+    """Per-robot draw of the firmware P used IN SIM (startup DR), to cover uncertainty in the
+    servo model's stiffness. None = always kp_fw. The robot still runs P = kp_fw. See
+    randomize_bam_actuator."""
 
     tau_ext_source: str = "observer"
     """'observer' (default, lagged dynamics observer) or 'gravity' (PhysX gravity only, for debugging)."""

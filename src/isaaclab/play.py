@@ -16,7 +16,12 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default="BipedRobot", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint to resume training.")
-parser.add_argument("--config_path", type=str, default="config/config.yaml", help="Path to training config")
+parser.add_argument("--config_path", type=str, default=None,
+                    help="Training config. Default: the checkpoint dir's config.yaml (the run's own), "
+                         "else config/config.yaml")
+parser.add_argument("--pushes", action="store_true",
+                    help="Keep the training pushes (events.push_robot) on during playback, to watch "
+                         "push recovery. Off by default: play runs the nominal, unperturbed robot.")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -69,7 +74,13 @@ class IsaacLabWrapper(BaseIsaacLabWrapper):
         return self._process_obs(obs), rew, terminated, truncated, info
 
 def play():
-    # Load config
+    # Load config. Without --config_path, use the run's own config so a gait-table checkpoint
+    # gets its reference block (fixed-period clock) instead of config/config.yaml's.
+    if args_cli.config_path is None:
+        run_cfg = (os.path.join(os.path.dirname(os.path.abspath(args_cli.checkpoint)), "config.yaml")
+                   if args_cli.checkpoint else None)
+        args_cli.config_path = run_cfg if run_cfg and os.path.exists(run_cfg) else "config/config.yaml"
+    print(f"[play] task={args_cli.task}  config={args_cli.config_path}")
     if not os.path.exists(args_cli.config_path):
         rel_path = os.path.join(os.path.dirname(__file__), "../../../", args_cli.config_path)
         if os.path.exists(rel_path):
@@ -85,7 +96,8 @@ def play():
     # sensor lag, noise). The old hand-copied block here ignored most of those, so play was
     # evaluating a different env from the one the policy trained in.
     env_cfg = build_env_cfg(config, BipedEnvCfg, training=False,
-                            num_envs=args_cli.num_envs if args_cli.num_envs is not None else 1)
+                            num_envs=args_cli.num_envs if args_cli.num_envs is not None else 1,
+                            pushes=args_cli.pushes)
     print("[play] env contract:", describe_env_cfg(env_cfg))
 
     env = BipedEnv(cfg=env_cfg, render_mode="rgb_array" if args_cli.video or args_cli.headless else None)

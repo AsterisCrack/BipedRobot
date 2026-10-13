@@ -435,3 +435,16 @@ def dof_pos_l2(joint_pos: torch.Tensor, default_pos: torch.Tensor) -> torch.Tens
     Unlike action_l2, this operates in joint-space so it correctly targets the neutral pose
     regardless of whether joint limits are symmetric around zero."""
     return torch.sum(torch.square(joint_pos - default_pos), dim=1)
+
+
+@torch.jit.script
+def imitation_mse_exp(value: torch.Tensor, ref: torch.Tensor, std: float) -> torch.Tensor:
+    """exp(-mean((value - ref)^2) / std^2) over the last dim: 1.0 on the reference, decays with error."""
+    return torch.exp(-torch.mean(torch.square(value - ref), dim=-1) / (std ** 2))
+
+
+@torch.jit.script
+def imitation_contact_match(feet_in_contact: torch.Tensor, ref_contact: torch.Tensor) -> torch.Tensor:
+    """Fraction of feet whose contact state matches the reference (ref_contact > 0.5 means stance)."""
+    in_contact = feet_in_contact.to(torch.float32) > 0.5
+    return torch.mean((in_contact == (ref_contact > 0.5)).to(torch.float32), dim=-1)

@@ -108,6 +108,26 @@ _DEFAULT_CMD_RANGES = {
     "ang_vel_z": (-0.3,  0.3),
 }
 
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+
+def gait_clock_from_config(env_config) -> tuple[float | None, float]:
+    """(period [s], stand_threshold) of the gait table named in env_config.reference.
+
+    period is None when no table is configured: the clock then stays speed-proportional.
+    With a table the clock is fixed-period and holds while the command is below the threshold,
+    exactly like BipedEnv._advance_gait_phase, so sim-to-sim sees the phase the policy trained on.
+    """
+    ref = getattr(env_config, "reference", None) or {}
+    if hasattr(ref, "model_dump"):
+        ref = ref.model_dump()
+    path = ref.get("npz_path")
+    if not path:
+        return None, 0.05
+    full = path if os.path.isabs(path) else os.path.join(_PROJECT_ROOT, path)
+    with np.load(full, allow_pickle=False) as z:
+        return float(z["period"]), float(ref.get("stand_threshold", 0.05))
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -235,7 +255,9 @@ class BipedEnvV2(BaseEnv):
         self._prev_jvel         = np.zeros(12, dtype=np.float32)
         self._foot_ground_z: np.ndarray | None = None
         self._last_physics_acc  = np.zeros(3, dtype=np.float64)
+        self.imu_acc_dt         = STEP_DT
         self.gait_phase         = 0.0
+        self.gait_period, self.gait_stand_threshold = gait_clock_from_config(self.config)
 
         # Gait tracking buffers
         self._in_contact        = np.zeros(2, dtype=bool)    # [right, left]
@@ -436,7 +458,7 @@ class BipedEnvV2(BaseEnv):
         qpos = self._qpos()
         qvel = self._qvel()
 
-        # IMU linear acceleration: use last 5ms physics substep to match Isaac Lab ImuCfg (instantaneous).
+        # IMU linear acceleration: mean over the 20 ms control step, matching BipedEnv's StepAveragedImu.
         # specific_force = a_world - g_world, rotated to body frame.
         a_world   = self._last_physics_acc
         lin_acc_b = (R_wb @ (a_world - np.array([0.0, 0.0, -9.81]))).astype(np.float32)
@@ -738,11 +760,18 @@ class BipedEnvV2(BaseEnv):
         self._prev_qvel[:] = self._qvel().copy()
         self._prev_jvel[:] = self._jvel().copy()
 
-        # Advance gait phase (matches _get_observations in biped_env.py)
+        # Advance gait phase (matches biped_env.py: fixed-period with a table, else speed-proportional)
         v_cmd = float(np.linalg.norm(self.commands[:2]))
-        self.gait_phase = (
-            self.gait_phase + STEP_DT * 2.0 * math.pi * GAIT_CLOCK_FREQ * v_cmd
-        ) % (2.0 * math.pi)
+        if self.gait_period is not None:
+            thr = self.gait_stand_threshold
+            moving = v_cmd >= thr or abs(float(self.commands[2])) >= thr
+            self.gait_phase = (
+                self.gait_phase + (STEP_DT * 2.0 * math.pi / self.gait_period if moving else 0.0)
+            ) % (2.0 * math.pi)
+        else:
+            self.gait_phase = (
+                self.gait_phase + STEP_DT * 2.0 * math.pi * GAIT_CLOCK_FREQ * v_cmd
+            ) % (2.0 * math.pi)
 
         # DECIMATION substeps at 200 Hz. Like Isaac, the EMA filter AND the servo model run
         # EVERY substep (Isaac calls _apply_action and the actuator per substep). Doing them
@@ -753,10 +782,13 @@ class BipedEnvV2(BaseEnv):
                 ACTION_FILTER_ALPHA * targets + (1.0 - ACTION_FILTER_ALPHA) * self.filtered_targets
             )
             self.data.ctrl[self._act_ids] = self._servo_torque(self.filtered_targets)
-            if k == DECIMATION - 1:
+            if k == 0:
                 _v_imu_before = self._v_imu_world()
             mujoco.mj_step(self.model, self.data)
-        self._last_physics_acc = (self._v_imu_world() - _v_imu_before) / PHYSICS_DT
+        # Mean acceleration over the control step, as BipedEnv's StepAveragedImu reports it.
+        # imu_acc_dt = PHYSICS_DT reproduces the old Isaac Imu (20 ms velocity change over a 5 ms
+        # dt, i.e. 4x), only for evaluating checkpoints trained before that fix.
+        self._last_physics_acc = (self._v_imu_world() - _v_imu_before) / self.imu_acc_dt
         # NOTE: no qvel clamp. Isaac Lab doesn't clamp joint velocity, and overwriting qvel
         # mid-episode injects or removes energy that MuJoCo's integrator never accounts for.
         # The speed ceiling is physical: BAM's back-EMF drives motor torque to zero near
@@ -764,10 +796,13 @@ class BipedEnvV2(BaseEnv):
 
         self._update_gait()
 
-        reward     = self._compute_reward(action)
+        reward     = self._compute_reward(action)   # action_rate uses prev_actions = a_{t-1}
         terminated = self._is_terminated()
 
-        obs = self._build_obs()
+        # The next observation carries THIS step's action, as in BipedEnv and on the Jetson.
+        # Updating it after _build_obs left the policy seeing a_{t-2} while action_rate
+        # penalised a_t - a_{t-1}, a difference it could never observe.
         self.prev_actions[:] = action.copy()
+        obs = self._build_obs()
 
         return obs, reward, terminated, False, {}

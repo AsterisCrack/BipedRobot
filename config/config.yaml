@@ -145,15 +145,19 @@ train:
       mean: 0.0
       std: 0.01
 
-    # Actuator delay. [1,3] was tested and measurably hurt; reference repo uses 0.
-    action_delay_steps_range: [0, 0]
+    # Actuator delay, in 50 Hz control steps, drawn per env at reset. The old "[1,3] hurt" test
+    # was confounded (massless links, actuator 3x too strong; TODO.md). [0, 0] left the policy
+    # with almost no latency margin: in MuJoCo, +40 ms of actuation delay made it shake and fall,
+    # and with the stiffer real servo +20 ms was enough, which is what the Jetson had (2026-10-12).
+    action_delay_steps_range: [0, 2]
 
     # Sensor lag (observation side), in 50 Hz control steps.
     # Servo encoders report one step stale, same for every env.
     servo_obs_delay_steps: 1
     # IMU (accel + gyro + projected gravity) lags 0-1 steps, drawn per-env at reset and held
     # for the episode, so the policy must be robust to an unknown but fixed lag.
-    imu_obs_delay_steps_range: [0, 1]
+    # [1, 2]: the BNO055 NDOF fusion output plus the I2C reader thread add ~10-25 ms, never 0.
+    imu_obs_delay_steps_range: [1, 2]
 
     # Per-episode CONSTANT sensor biases, drawn uniformly in +-range at each reset. These are
     # deliberately different from observation_noise_std: that resamples every step, so across
@@ -184,9 +188,21 @@ train:
     actuator:
       params_file: actuator/params/sts3215_12v/m6.json
       kp_fw: 32                     # firmware P register; must match the Jetson's config/robot.yaml
+      # Sim-only startup DR of the firmware P (per robot): the stall cap halves the model's
+      # small-signal stiffness (17 vs 37 N*m/rad uncapped), and the bench validated the uncapped
+      # fit, so the real servo is likely stiffer than the capped model. [32, 70] spans both. The
+      # robot still runs P = kp_fw. See randomize_bam_actuator.
+      kp_fw_range: [32, 70]
       vin_range: [11.1, 12.6]       # ASSUMED 3S pack -- set to the real battery's range.
                                     # The SysID bench measured 11.49 V at the servo.
-      friction_scale_range: [0.9, 1.1]
+      # 2026-10-10: widened from [0.9, 1.1]. The identified m6 model has a measured
+      # 4.4 mrad mean / 14.4 mrad p95 residual against our own hardware on smooth
+      # trajectories (actuator/README.md, "Results"); replaying the old +-10% range
+      # through the same 48 recordings only spans a 2.0 mrad mean / 5.0 mrad p95 --
+      # about half what the real servo actually does. vin_range below already covers
+      # it generously on its own (9.8 mrad mean), so this is a modest top-up, not a
+      # primary fix for the gap (see the frequency-dependent tail note just below).
+      friction_scale_range: [0.8, 1.2]
       torque_scale: 1.0             # TORQUE_LIMIT/1000 on the servos (audit: tools/servo_registers.py)
       # Clamp the duty-limited stall to the DATASHEET. The fit implies 6.33 N*m at 12 V
       # (~2x the datasheet), and a policy trained on it learned a forward lean held by torque
@@ -205,7 +221,7 @@ train:
       enabled: true
       lash_deg_range: [0.5, 2.5]
       mujoco_lash_deg: 1.5
-      impulse_cap: 6.0              # N*m cap on the re-engagement knock, ~ 12 V stall torque
+      impulse_cap: 2.94              # N*m cap on the re-engagement knock = the capped stall (clamped to it in bam_actuator)
 
     # ---- Action map and schedules (Target C) -------------------------------------------
     # centered: a=0 is the standing pose, a=+-1 reach each joint limit. The legacy "absolute"
@@ -258,10 +274,13 @@ train:
     # Curriculum — randomize_com and randomize_payload scale from 0→100% over dr_full_steps
     curriculum_enabled: true
     curriculum_dr_start_steps: 0        # start DR from step 0
-    curriculum_dr_full_steps:  40000    # reach full COM/payload DR at 40k steps
+    curriculum_dr_full_steps:  12000    # reach full COM/payload DR at 40k steps
     curriculum_cmd_ramp_steps:  0       # full command range from the start
     curriculum_init_ramp_steps: 0       # full init range from the start
-    curriculum_dr_events: ["randomize_com", "randomize_payload"]
+    # "action_delay" and "servo_stiffness" are ramped in code (BipedEnv._dr_ramp): both at full
+    # width from step 0 made walking too hard to discover (the 2026-10-12 run learned to stand).
+    # They start at 0 delay / P = 32 and reach [0, 2] / kp_fw_range at curriculum_dr_full_steps.
+    curriculum_dr_events: ["randomize_com", "randomize_payload", "action_delay", "servo_stiffness"]
 
 model:
   actor_config:

@@ -1,0 +1,328 @@
+train:
+  seed: 42
+  steps: 500000
+  worker_groups: 1
+  workers_per_group: 1
+  use_history: True
+  history_size: 5
+  normalize_obs: True
+  symmetry_augmentation: True
+  actor_obs: "normal"
+  critic_obs: "privileged"
+  use_rough_terrain: false
+  use_terrain_curriculum: false  # terrain is domain randomization, not a progressive curriculum
+  log_dir: "runs"
+  checkpoint_path: "checkpoints/"
+  model_name: "BipedV2_SAC_gaitref"
+  overwrite_model: true
+  model: "sac"
+
+  test_environment: False
+  epoch_steps: 1000
+  save_steps: 3000
+  test_episodes: 2
+  show_progress: true
+  replace_checkpoint: true
+
+  env_config:
+    reward_scale: 1.0
+    reward_weights:
+      # Primary locomotion
+      track_lin_vel_xy_exp: 2.0
+      track_ang_vel_z_exp: 1.5          # was 0.5 — stronger yaw tracking for symmetric turns
+
+      # Stability
+      # Softened -5.0 -> -2.0. This term was effectively dead until 2026-09-25 (it compared a
+      # one-step-stale IMU copy against a different threshold, so it missed the step that
+      # actually terminated). Fixing it made a full-strength -5.0 signal live for the first
+      # time, which punishes the falls that walking attempts cause. Restore toward -5.0 once
+      # walking is stable again.
+      termination_penalty: -0.2
+      flat_orientation_l2: -2.0         # was -1.5 — stronger tilt penalty
+      lin_vel_z_l2: -2
+      ang_vel_xy_l2: -0.05             # was -0.15 — damp pitch/roll oscillation (flowy body)
+      angular_momentum: -0.02
+      upright: 0.5
+
+      # Smoothness
+      # action_rate_l2 is now SCHEDULED (action_rate_weight_* below): this value is only the
+      # starting point.
+      action_rate_l2: -0.01
+      dof_torques_l2: -0.001   # was -0.0001 — 10× to penalise oscillatory PD torques
+
+      dof_pos_limits: -1.0
+
+      # Gait shaping — keep only symmetry/alternation signals, remove energy-encouraging terms
+      # Re-enabled at 0.5 (last attempt was 1.2 and destabilised). Three separate defects that
+      # made the earlier attempt unwinnable are now fixed: feet indices were INVERTED so it
+      # rewarded the wrong stance leg; the phase clock was mirrored with sign +1 when it is
+      # antisymmetric; and gait_clock_base_freq demanded a 0.33 m stride (see biped_env_cfg).
+      # Standing with both feet down scores 0.5 here, perfect alternation 1.0, so the real
+      # incentive to alternate is 0.5*weight per step. Speed-gated, so standing envs are exempt.
+      gait_phase_contact: 0.0
+      feet_air_time: 0.0               # removed — was encouraging big hops; gait_phase_contact handles timing
+      # 0.15 -> 1.5, alongside widening the clearance window to 0.09 in biped_env.
+      # Break-even analysis: bending the knee to ~0.6 rad for clearance costs ~0.024/step in
+      # joint_deviation_knee + dof_pos_l2, while the clearance reward at weight 0.15 paid only
+      # ~0.0075/step. Lifting was a NET LOSS, so the policy correctly refused to do it. Weight
+      # must exceed ~0.5 just to break even; 1.5 gives a 3x margin.
+      # (The old "was encouraging unnecessary foot lifting" note predates the 4 cm cap.)
+      swing_foot_height: 0.0
+      feet_slide: -0.1                 # flat foot contact (keep)
+      step_length: 0.0
+      knee_bend_touchdown: 0.0
+
+      # Contact & joint quality
+      undesired_contacts: -0.5
+      joint_deviation_hip: 0.0
+      joint_deviation_hip_pitch: 0.0   # was -0.05 — slight increase for lean prevention
+      joint_deviation_ankle_roll: 0.0
+      # Every V2 default joint pos is 0.0 and the knee limit is [-120deg, +5deg], so these
+      # deviation terms were literally enforcing a straight leg / flat foot.
+      joint_deviation_ankle_pitch: 0.0  # was -0.2 — heel-strike to toe-off needs ankle range
+      joint_deviation_knee: 0.0           # was -0.15 — directly penalised the knee bend we want
+      torso_centering: 0.0
+      # Raised 0.1 -> 0.5 when the term was FIXED (2026-10-03). It used exp(-1.0*dist^2) with
+      # dist in metres, which was flat across the whole robot (5 cm off still scored 0.9975),
+      # so nothing resisted leaning ahead of the feet. Length scale is com_centering_std below.
+      com_support_centering: 0.0
+      ankle_torques_l2: -0.003
+      # dof_pos_l2 is L2 (0.5*theta^2) vs joint_deviation_knee's L1 (0.15*|theta|): they match
+      # at ~0.3 rad but L2 dominates at the 0.5-0.8 rad bend we want (0.32 vs 0.12 at 0.8).
+      # Reduced rather than zeroed: action 0 maps to the joint-limit midpoint (knee -57deg),
+      # so some joint-space anchor is still wanted.
+      dof_acc_l2: -1.0e-06
+      # Cut -0.5 -> -0.05. This pulls all 12 joints toward their defaults, and every V2 default
+      # is 0.0 -- i.e. a fully straight, zero-abduction leg. Direct evidence it dominates:
+      # Diagnostics/foot_sep_body_m decays from 0.07 to 0.0433, which is EXACTLY the URDF hip
+      # spacing (2 * 0.021672), meaning the policy drives hip_roll to zero and parks at neutral.
+      # An earlier cut to -0.05 was reverted, but that was on broken COM/mass physics.
+      dof_pos_l2: 0.0
+      # base_height_l2: penalise crouching (<0.29m) and tiptoe (>0.29m)
+      base_height_l2: 0 #-5.0
+      # foot_separation: V2 natural spacing is only 4.3 cm; require 7 cm minimum
+      foot_separation: 0.0
+      # action_l2 DISABLED: action=0 maps to tiptoe+crouch+lean due to asymmetric joint limits
+      action_l2: 0.0
+
+      # Reference tracking (no motion reference loaded)
+      track_joint_pos_exp: 0.0
+      track_joint_vel_exp: 0.0
+
+      # Gait-table imitation (Gait Studio table, see env_config.reference below). The table now
+      # provides foot clearance, stance width, posture and contact timing, so the hand-written
+      # gait terms above are zeroed. Velocity tracking and every stability/smoothness term stay.
+      imitation_joint_pos: 1.5
+      imitation_foot_pos: 1.0
+      imitation_contact: 0.5
+      imitation_orientation: 0.5
+      imitation_lin_vel: 0.3
+      imitation_ang_vel: 0.2
+      imitation_joint_vel: 0.1
+
+    # Gait-table imitation. With a table the gait clock is fixed-period (the table's) and holds
+    # while |cmd| < stand_threshold; the deploy runtime must do the same (export_onnx writes
+    # gait_clock into deploy_config.json). Bake: python -m gait_studio.bake in robot_motion_reference/.
+    # RSI starts rsi_prob of resets mid-gait on the table (training only; play starts from default).
+    reference:
+      npz_path: robot_motion_reference/processed/gait_table.npz
+      stand_threshold: 0.05
+      rsi_prob: 0.8
+      rsi_joint_noise: 0.05
+      std: {joint_pos: 0.15, joint_vel: 1.5, foot_pos: 0.02, orientation: 0.08, lin_vel: 0.1, ang_vel: 0.3}
+
+    commands:
+      base_velocity:
+        resampling_time_range: [4.0, 8.0]
+        heading_control_stiffness: 0.5
+        # Heading mode turns at error*0.5 clamped to this. Without it, ang_vel_z's +-1.2 (sized for
+        # turn-in-place) made most moving envs turn at ~1 rad/s for the first seconds of each command.
+        heading_max_ang_vel: 0.5
+        rel_standing_envs: 0.02      # starting value; scheduled by standing_envs_* below
+        rel_heading_envs: 1.0
+        # vx = vy = 0 with |wz| in [0.4*max, max]. Uniform sampling makes spin-on-the-spot
+        # ~2% of data, so it is otherwise never trained.
+        rel_turn_in_place_envs: 0.15
+        ranges:
+          lin_vel_x: [-0.2, 0.2]       # = bake grid (Gait Studio command_ranges)
+          lin_vel_y: [-0.15, 0.15]
+          ang_vel_z: [-1.2, 1.2]
+          heading: [-3.14159, 3.14159]
+
+    # Per-channel observation noise std, in each channel's own units. The previous single
+    # scalar (0.05 across all 50 dims) was sized for the IMU and was therefore 0.05 rad =
+    # 2.9 deg on joint positions whose real encoder LSB is 0.088 deg — it also noised the
+    # command, the previous actions and the gait clock, none of which are sensors.
+    observation_noise_std:
+      imu_acc: 0.0             # m/s^2
+      gyro: 0.00                # rad/s
+      projected_gravity: 0.00
+      commands: 0.0             # not a sensor
+      joint_pos: 0.000         # rad, ~1 encoder LSB
+      joint_vel: 0.0          # rad/s — reference uses +-0.25 vs +-0.001 on joint_pos; refine from
+                                # tools/speed_register_check.py once real data exists
+      previous_actions: 0.0     # not a sensor
+      gait_clock: 0.0           # generated
+    # Round joint_pos and joint_vel onto the STS3215's 4096-counts/rev grid, so the policy
+    # sees the same resolution floor in sim as the servo gives on hardware.
+    quantize_joint_obs: true
+    action_noise_model:
+      mean: 0.0
+      std: 0.00
+
+    # Actuator delay. [1,3] was tested and measurably hurt; reference repo uses 0.
+    action_delay_steps_range: [0, 0]
+
+    # Sensor lag (observation side), in 50 Hz control steps.
+    # Servo encoders report one step stale, same for every env.
+    servo_obs_delay_steps: 1
+    # IMU (accel + gyro + projected gravity) lags 0-1 steps, drawn per-env at reset and held
+    # for the episode, so the policy must be robust to an unknown but fixed lag.
+    imu_obs_delay_steps_range: [0, 1]
+
+    # Per-episode CONSTANT sensor biases, drawn uniformly in +-range at each reset. These are
+    # deliberately different from observation_noise_std: that resamples every step, so across
+    # a 5-frame history stack it largely averages out. A real MPU-6050 has a fixed null offset
+    # per power-cycle and each servo's encoder zero carries a fixed assembly error, so the
+    # policy has to stay upright with a consistently WRONG reading -- a much harder ask, and the
+    # one that actually bites on hardware.
+    imu_accel_bias: 0.0        # m/s^2, ~2% of g
+    imu_gyro_bias: 0.00        # rad/s, ~1% of walking gyro amplitude
+    # Per-ROBOT constants, drawn once at startup (not per episode -- assembly doesn't change):
+    # mount_offset_rad is per-servo zero error, applied to the observation AND the command
+    # (the servo drives its own offset encoder, so the true joint ends up displaced). It
+    # replaces encoder_offset_rad, which was observation-only and redrawn every reset.
+    mount_offset_rad: 0.00   # ~1 deg; STS3215 resolution is 0.088 deg, so this is assembly error
+    imu_misalignment_deg: 0  # residual IMU board tilt, random axis, angle in [0, 6] deg
+
+    # ---- Servo model (TODO_SIM2REAL.md, Target A) ---------------------------------------
+    # params_file is the ONE place the servo identification lives. It is a BAM params JSON;
+    # `python -m bam.fit --output <file>` writes exactly this format, so switching to our own
+    # fit is a path change. Source: BAM PR #20's 12 V STS3215 fit (actuator/params/).
+    #
+    # VALIDATED 2026-10-09 against 48 bench recordings of our own servo (actuator/README.md,
+    # "Results"): m6 tracks our hardware at 5.5 mrad MAE with torque on, against a 10 mrad
+    # published hold-out, and MuJoCo and Isaac reproduce that to 0.06 mrad. m5 scored 0.09
+    # mrad better, which is noise, and has three friction terms pinned at ~0. Keep m6.
+    # Known gap: with torque OFF the real gearbox holds position and the model lets the
+    # joint fall -- stiction is underestimated. Irrelevant to tracking, wrong for impacts.
+    actuator:
+      params_file: actuator/params/sts3215_12v/m6.json
+      kp_fw: 32                     # firmware P register; must match the Jetson's config/robot.yaml
+      vin_range: [11.1, 12.0]       # ASSUMED 3S pack -- set to the real battery's range.
+                                    # The SysID bench measured 11.49 V at the servo.
+      # 2026-10-10: widened from [0.9, 1.1]. The identified m6 model has a measured
+      # 4.4 mrad mean / 14.4 mrad p95 residual against our own hardware on smooth
+      # trajectories (actuator/README.md, "Results"); replaying the old +-10% range
+      # through the same 48 recordings only spans a 2.0 mrad mean / 5.0 mrad p95 --
+      # about half what the real servo actually does. vin_range below already covers
+      # it generously on its own (9.8 mrad mean), so this is a modest top-up, not a
+      # primary fix for the gap (see the frequency-dependent tail note just below).
+      friction_scale_range: [1, 1]
+      torque_scale: 1.0             # TORQUE_LIMIT/1000 on the servos (audit: tools/servo_registers.py)
+      # Clamp the duty-limited stall to the DATASHEET. The fit implies 6.33 N*m at 12 V
+      # (~2x the datasheet), and a policy trained on it learned a forward lean held by torque
+      # the real servo can't sustain. null = trust the params.
+      # Our SysID does NOT settle this: the heaviest rig load was 0.433 N*m, ~15% of the
+      # datasheet stall, so nothing in that data constrains behaviour near stall. Keeping the
+      # cap is the conservative read. Applied by raising R, so no-load speed is unaffected.
+      stall_torque_cap_nm: 2.94
+      tau_ext_source: observer      # or "gravity" to debug the external-torque estimate
+
+    # ---- Backlash (Target B) -----------------------------------------------------------
+    # Total gear play per joint, drawn per servo at startup. Isaac uses the lost-motion model
+    # in actuator/bam_kernel.py; the MuJoCo eval env uses a fixed value with a real passive hinge.
+    # Replace the range with the 12-joint screen's measurements when you have them.
+    backlash:
+      enabled: true
+      lash_deg_range: [0, 0]
+      mujoco_lash_deg: 0
+      impulse_cap: 2.94              # N*m cap on the re-engagement knock = the capped stall (clamped to it in bam_actuator)
+
+    # ---- Action map and schedules (Target C) -------------------------------------------
+    # centered: a=0 is the standing pose, a=+-1 reach each joint limit. The legacy "absolute"
+    # map put a=0 at the limit-box midpoint (knee -57.5 deg). CHANGING THIS INVALIDATES EVERY
+    # EXISTING CHECKPOINT AND BUNDLE -- export_onnx records it, and the Jetson refuses a mismatch.
+    action_map: centered
+    # Ramps in common_step_counter units (control steps), the same unit as curriculum_dr_*.
+    standing_envs_start: 0.10      # gait table: the standing reference needs samples from step 0
+    # 0.25 -> 0.10. Standing is taught by the spawn mix (no stillness reward), but at 0.25
+    # a quarter of every batch was commanded to hold still, which (a) costs that much
+    # walking experience and (b) silently inflated track_lin_vel_xy_exp ~22%, since a
+    # standing env scores ~1.0 on an exp kernel for free. Run C scored 46.6 there against
+    # the walking DC run's 38.1 while tracking slightly WORSE once standing envs were
+    # stripped out. The DC run used 0.02. Diagnostics/vel_err_moving_ms now reports the
+    # honest number so this cannot hide again.
+    standing_envs_end: 0.10
+    standing_envs_ramp_steps: 30000
+    action_rate_weight_start: -0.01
+    # -0.3 -> -0.05. At -0.3 this was the largest single term in the budget (-18.2 weighted,
+    # vs the DC-motor run's -2.0) while swing_foot_height paid +0.06: the policy was paid far
+    # more to hold still than to lift a foot. The B_ar005 ablation set exactly this value and
+    # was the only one of four that improved the gait (episode score 1158 vs 699).
+    action_rate_weight_end: -0.05
+    action_rate_ramp_steps: 30000
+    # swing_foot_height pays clearance ABOVE the measured resting foot height (printed at startup)
+    # Dead zone REMOVED 2026-10-03. It was 0.01 while the measured peak swing clearance was
+    # 0.0063, so clamp(clearance - min, 0) was zero for most swings: the term had no gradient
+    # at the operating point and weight 1.5 multiplied nothing. The 0.01 existed to stop an
+    # unloaded foot resting flat on the floor from earning reward, and the per-foot touchdown
+    # datum (same date) already makes that structurally impossible -- a grounded foot reads
+    # clearance 0 by construction. Keeping both was double protection that killed the signal.
+    swing_min_clearance: 0.0
+    swing_max_clearance: 0.07
+    # com_support_centering now scores the distance the CoM lies OUTSIDE the support
+    # POLYGON (0 when inside), not its distance from the support CENTRE. Measuring from the
+    # centre taxed the weight transfer that begins every step: shifting onto one foot to
+    # unload the other is ~half a stance width off-centre but perfectly stable, and it cost
+    # ~0.09/step against a ~0.045/step swing reward. Two rounds of retuning the centre-based
+    # form (isotropic 0.04, then anisotropic 0.12/0.04) left foot lift at ~6 mm both times.
+    com_centering_std: 0.04
+    com_foot_margin: 0.03           # foot half-extent; CoM over a planted foot reads 0
+
+    # Domain randomization master switches. These MUST be set explicitly: the schema defaults
+    # are false, and biped_env_cfg.__post_init__ now actually honours them (the gate used to be
+    # commented out, so DR ran at full strength while the config claimed it was off).
+    # Set either to false to genuinely disable that group — useful for A/B debugging.
+    enable_perturbations: false          # push_robot
+    enable_physics_randomization: false  # mass / friction / com / payload / joint armature / BAM servo population
+
+    # Curriculum — randomize_com and randomize_payload scale from 0→100% over dr_full_steps
+    curriculum_enabled: true
+    curriculum_dr_start_steps: 0        # start DR from step 0
+    curriculum_dr_full_steps:  40000    # reach full COM/payload DR at 40k steps
+    curriculum_cmd_ramp_steps:  0       # full command range from the start
+    curriculum_init_ramp_steps: 0       # full init range from the start
+    curriculum_dr_events: ["randomize_com", "randomize_payload"]
+
+model:
+  actor_config:
+    network_type: mlp
+    hidden_sizes: [1024, 512, 256]
+  critic_config:
+    network_type: mlp
+    hidden_sizes: [1024, 512, 256]
+
+  target_coeff: 0.01
+  actor_lr: 3.0e-4
+  critic_lr: 3.0e-4
+  lr_scheduler:
+    scheduler_type: "none"
+
+exploration:
+  scale: 0.3
+  min_scale: 0.05
+  decay_rate: 1.0e-7
+  start_steps: 4096
+  # Note: SAC temperature (alpha) is now auto-tuned via Lagrangian optimization.
+  # The exploration noise above controls the initial random action phase only.
+
+buffer:
+  size: 1000000
+  return_steps: 5 #1
+  batch_iterations: 10 #4
+  batch_size: 2048
+  discount_factor: 0.99
+  steps_before_batches: 4096
+  steps_between_batches: 4
+  seed: 42

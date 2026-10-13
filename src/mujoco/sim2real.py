@@ -68,8 +68,9 @@ def _parse_args():
     p = argparse.ArgumentParser(description="MuJoCo sim-to-real inference for BipedRobotV2")
     p.add_argument("--checkpoint",   type=str,   default=None,
                    help="Path to .pt checkpoint file.")
-    p.add_argument("--config_path",  type=str,   default="config/config.yaml",
-                   help="Training config YAML.")
+    p.add_argument("--config_path",  type=str,   default=None,
+                   help="Training config YAML. Default: the checkpoint dir's config.yaml "
+                        "(the run's own), else config/config.yaml.")
     p.add_argument("--task",         type=str,   default="BipedRobotV2")
     p.add_argument("--seed",         type=int,   default=42)
     p.add_argument("--headless",     action="store_true", default=False,
@@ -80,6 +81,9 @@ def _parse_args():
     p.add_argument("--vx",  type=float, default=None, help="Fixed vx command (m/s).")
     p.add_argument("--vy",  type=float, default=None, help="Fixed vy command (m/s).")
     p.add_argument("--wz",  type=float, default=None, help="Fixed wz command (rad/s).")
+    p.add_argument("--legacy-imu", action="store_true",
+                   help="Feed the old Isaac accelerometer (motion part 4x too large). Only for "
+                        "checkpoints trained before the StepAveragedImu fix (2026-10-11).")
     return p.parse_args()
 
 
@@ -197,6 +201,13 @@ def main():
 
     # ------------------------------------------------------------------ config
     cfg_path = args.config_path
+    if cfg_path is None:
+        # The run's own config: a gait-table run needs its reference block (fixed-period clock),
+        # which config/config.yaml does not have.
+        run_cfg = os.path.join(os.path.dirname(os.path.abspath(args.checkpoint)), "config.yaml") \
+            if args.checkpoint else None
+        cfg_path = run_cfg if run_cfg and os.path.exists(run_cfg) else "config/config.yaml"
+        print(f"[sim2real] config: {cfg_path}")
     if not os.path.exists(cfg_path):
         cfg_path = os.path.join(_ROOT, cfg_path)
     if not os.path.exists(cfg_path):
@@ -227,6 +238,11 @@ def main():
         env_config=env_conf,
         seed=args.seed,
     )
+
+    if args.legacy_imu:
+        from envs.mujoco.biped_env_v2 import PHYSICS_DT
+        env.imu_acc_dt = PHYSICS_DT
+        print("[sim2real] legacy IMU: accelerometer motion term x4, as old Isaac checkpoints were trained")
 
     # ------------------------------------------------------------------ model
     ModelClass = _model_class(config)

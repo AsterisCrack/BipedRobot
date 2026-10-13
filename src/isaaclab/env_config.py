@@ -17,7 +17,7 @@ policy never saw.
 
 Rules:
   * training=True applies everything.
-  * training=False (play/eval) applies everything EXCEPT pushes and physics DR, so
+  * training=False (play/eval) applies everything EXCEPT pushes, physics DR and action noise, so
     playback runs the nominal robot through the identical observation/actuation pipeline.
   * An unknown key in a nested block raises, rather than being ignored. Ignored keys are
     exactly how the command settings went dead.
@@ -43,11 +43,12 @@ def _check_keys(block: str, given: dict, allowed: set[str]) -> None:
 
 
 _COMMAND_KEYS = {"resampling_time_range", "heading_control_stiffness", "rel_standing_envs",
-                 "rel_heading_envs", "rel_turn_in_place_envs", "ranges"}
+                 "rel_heading_envs", "rel_turn_in_place_envs", "heading_max_ang_vel", "ranges"}
 _RANGE_KEYS = {"lin_vel_x", "lin_vel_y", "ang_vel_z", "heading"}
-_ACTUATOR_KEYS = {"params_file", "kp_fw", "vin_range", "friction_scale_range", "torque_scale",
+_ACTUATOR_KEYS = {"params_file", "kp_fw", "kp_fw_range", "vin_range", "friction_scale_range", "torque_scale",
                   "tau_ext_source", "stall_torque_cap_nm"}
 _BACKLASH_KEYS = {"enabled", "lash_deg_range", "impulse_cap", "mujoco_lash_deg"}
+_REFERENCE_KEYS = {"npz_path", "stand_threshold", "rsi_prob", "rsi_joint_noise", "std"}
 
 # Plain scalar/list fields copied verbatim when present.
 _SCALAR_FIELDS = (
@@ -60,19 +61,24 @@ _SCALAR_FIELDS = (
     "action_rate_weight_start", "action_rate_weight_end", "action_rate_ramp_steps",
     "swing_min_clearance", "swing_max_clearance",
     "com_centering_std", "com_foot_margin",
-    "push_interval_s", "push_vel_range", "reward_scale",
+    "reward_scale",
 )
 
 
-def build_env_cfg(config, env_cfg_cls, *, training: bool, num_envs: int | None = None):
-    """Construct and fully configure a BipedEnvCfg from a loaded utils.Config."""
+def build_env_cfg(config, env_cfg_cls, *, training: bool, num_envs: int | None = None,
+                  pushes: bool | None = None):
+    """Construct and fully configure a BipedEnvCfg from a loaded utils.Config.
+
+    pushes=None follows `training` (on in training if the config enables them, off in play);
+    True/False forces them, e.g. to watch push recovery in play."""
     env_conf = getattr(config.train, "env_config", None)
     # These flags are consumed by __post_init__ (the DR gate pops events there), so they
     # must go through the constructor. Assigning them afterwards would be too late.
     env_cfg = env_cfg_cls(
         use_rough_terrain=getattr(config.train, "use_rough_terrain", False),
         use_terrain_curriculum=getattr(config.train, "use_terrain_curriculum", False),
-        enable_perturbations=training and bool(getattr(env_conf, "enable_perturbations", True)),
+        enable_perturbations=(training if pushes is None else pushes)
+                             and bool(getattr(env_conf, "enable_perturbations", True)),
         enable_physics_randomization=training and bool(
             getattr(env_conf, "enable_physics_randomization", True)),
     )
@@ -90,6 +96,9 @@ def build_env_cfg(config, env_cfg_cls, *, training: bool, num_envs: int | None =
 
     if env_conf is not None:
         apply_env_config(env_cfg, env_conf, training=training)
+    if not training:
+        # Action noise is exploration-style DR. The robot executes the policy's action exactly.
+        env_cfg.action_noise_model = None
     return env_cfg
 
 
@@ -111,6 +120,7 @@ def apply_env_config(env_cfg, env_conf, *, training: bool) -> None:
                          "observation -- see BipedEnv.__init__")
 
     _apply_animation(env_cfg, env_conf)
+    _apply_reference(env_cfg, env_conf, training=training)
     _apply_commands(env_cfg, env_conf)
     _apply_actuator(env_cfg, env_conf)
     _apply_noise(env_cfg, env_conf)
@@ -135,6 +145,28 @@ def _apply_animation(env_cfg, env_conf) -> None:
                      ("pos_std", "animation_pos_std"), ("vel_std", "animation_vel_std")):
         if src in anim:
             setattr(env_cfg, dst, anim[src])
+
+
+def _apply_reference(env_cfg, env_conf, *, training: bool) -> None:
+    """env_config.reference -> reference_* fields. The gait clock is a policy input, so the table
+    reaches train and play identically (both go through build_env_cfg). RSI is training-only:
+    playback starts from the default pose, like the real robot."""
+    ref = _as_dict(getattr(env_conf, "reference", None))
+    if not ref:
+        return
+    _check_keys("reference", ref, _REFERENCE_KEYS)
+    for src, dst in (("npz_path", "reference_npz_path"), ("stand_threshold", "reference_stand_threshold"),
+                     ("rsi_prob", "reference_rsi_prob"), ("rsi_joint_noise", "reference_rsi_joint_noise")):
+        if src in ref:
+            setattr(env_cfg, dst, ref[src])
+    std = ref.get("std") or {}
+    unknown = set(std) - set(env_cfg.reference_std)
+    if unknown:
+        raise ValueError(f"env_config.reference.std: unknown key(s) {sorted(unknown)}; "
+                         f"allowed {sorted(env_cfg.reference_std)}")
+    env_cfg.reference_std = {**env_cfg.reference_std, **std}
+    if not training:
+        env_cfg.reference_rsi_prob = 0.0
 
 
 def _apply_commands(env_cfg, env_conf) -> None:
@@ -223,7 +255,7 @@ def describe(env_cfg) -> dict[str, Any]:
     for name, c in (getattr(env_cfg.scene.robot, "actuators", {}) or {}).items():
         if hasattr(c, "params_file"):
             out[f"actuator.{name}"] = {k: getattr(c, k) for k in
-                                       ("params_file", "kp_fw", "vin_range", "friction_scale_range",
+                                       ("params_file", "kp_fw", "kp_fw_range", "vin_range", "friction_scale_range",
                                         "torque_scale", "stall_torque_cap_nm", "tau_ext_source",
                                         "backlash_enabled",
                                         "backlash_nominal_rad")}

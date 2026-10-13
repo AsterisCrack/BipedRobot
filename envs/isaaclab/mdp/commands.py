@@ -27,6 +27,10 @@ class UniformVelocityCommand:
         # effectively never trained, and real-robot turning comes out slow and unstable.
         self.rel_turn_in_place_envs = 0.0
         self.turn_in_place_min_frac = 0.4   # |wz| drawn from [frac*max, max]
+        # Yaw-rate ceiling for heading mode. None = the ang_vel_z range. Heading mode turns at
+        # error * stiffness, so with a wide ang_vel_z range (+-1.2 for turn-in-place) most moving
+        # envs would spend the first seconds of every command turning at the limit.
+        self.heading_max_ang_vel = None
         self.ranges = {}
 
         if hasattr(cfg, "commands") and isinstance(cfg.commands, dict):
@@ -37,6 +41,7 @@ class UniformVelocityCommand:
             self.rel_heading_envs = base_vel_cfg.get("rel_heading_envs", self.rel_heading_envs)
             self.rel_turn_in_place_envs = base_vel_cfg.get("rel_turn_in_place_envs",
                                                            self.rel_turn_in_place_envs)
+            self.heading_max_ang_vel = base_vel_cfg.get("heading_max_ang_vel", self.heading_max_ang_vel)
             self.ranges = base_vel_cfg.get("ranges", {})
         
     def update_ranges(self, ranges: dict) -> None:
@@ -113,6 +118,16 @@ class UniformVelocityCommand:
             self.resample(resample_env_ids)
             
         # 3. Heading Control Logic
+        self.apply_heading(base_quat)
+        return self.commands
+
+    def apply_heading(self, base_quat):
+        """Overwrite wz of heading-mode envs from their heading error.
+
+        Also call this right after resampling: resample() draws wz uniformly over the whole
+        ang_vel_z range, and until the next compute() a freshly reset env (and the reference
+        state it is initialised on) would see that draw instead of its heading-control rate.
+        """
         if torch.any(self.in_heading_mode):
             q = base_quat
             w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
@@ -125,9 +140,10 @@ class UniformVelocityCommand:
             # so those envs get no yaw reward and no gradient while still paying the stability
             # penalties. Upstream Isaac Lab clamps this the same way.
             r_z = self.ranges.get("ang_vel_z", (-1.0, 1.0))
-            target_ang_vel_z = torch.clamp(
-                heading_error * self.heading_control_stiffness, min=float(r_z[0]), max=float(r_z[1])
-            )
+            lo, hi = float(r_z[0]), float(r_z[1])
+            if self.heading_max_ang_vel is not None:
+                lo, hi = max(lo, -float(self.heading_max_ang_vel)), min(hi, float(self.heading_max_ang_vel))
+            target_ang_vel_z = torch.clamp(heading_error * self.heading_control_stiffness, min=lo, max=hi)
 
             # Apply to commands
             self.commands[self.in_heading_mode, 2] = target_ang_vel_z[self.in_heading_mode]

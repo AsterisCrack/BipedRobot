@@ -100,6 +100,9 @@ class EnvConfig(BaseModel):
 
     # Randomization & Events
     enable_perturbations: bool = False
+    # IGNORED. Never wired to anything: the real push is events.push_robot in biped_env_cfg
+    # (interval 1-5 s, +-0.4 m/s x). Set it via `events: {push_robot: {interval_range_s, params}}`.
+    # Kept only so run configs saved with these keys still load.
     push_interval_s: float = 15.0
     push_vel_range: float = 1.0
     
@@ -135,6 +138,9 @@ class EnvConfig(BaseModel):
     actuator: Optional[Dict[str, Any]] = None
     backlash: Optional[Dict[str, Any]] = None
     action_map: str = "absolute"
+
+    # Gait-table imitation (see utils/motion_reference.py GaitTableReference). None = off.
+    reference: Optional[Dict[str, Any]] = None
 
     # Schedules (common_step_counter units). None leaves the env default alone.
     standing_envs_start: float = 0.02

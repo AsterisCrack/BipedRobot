@@ -18,7 +18,28 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from .biped_env_cfg import BipedEnvCfg
 from . import rewards
 from .mdp.commands import UniformVelocityCommand
-from utils.motion_reference import MotionReference, MotionReferenceConfig
+from utils.motion_reference import GaitTableReference, MotionReference, MotionReferenceConfig
+
+
+class StepAveragedImu(Imu):
+    """Imu whose linear/angular acceleration is the mean over the time since its last recompute.
+
+    Isaac Lab's Imu divides the velocity change since its LAST RECOMPUTE by the LAST physics dt.
+    With lazy sensor updates (the scene default) the buffers are only recomputed when read, i.e.
+    once per control step, so the motion part of lin_acc_b came out `decimation` times too large
+    (4x at 200 Hz physics / 50 Hz control) and the policy trained on an accelerometer that neither
+    MuJoCo nor the robot's BNO055 reproduces. Dividing by the real elapsed time gives the average
+    over the control step, which is also closer to the BNO055's internally filtered output.
+    """
+
+    def _update_buffers_impl(self, env_ids):
+        elapsed = (self._timestamp - self._timestamp_last_update)[env_ids]
+        dt = self._dt
+        self._dt = elapsed.clamp(min=self._sim_physics_dt).unsqueeze(-1)
+        try:
+            super()._update_buffers_impl(env_ids)
+        finally:
+            self._dt = dt
 
 
 class BipedEnv(DirectRLEnv):
@@ -358,14 +379,39 @@ class BipedEnv(DirectRLEnv):
             self.motion_time = torch.zeros(self.num_envs, device=self.device)
             if self.cfg.animation_random_start:
                 self._randomize_motion_time(torch.arange(self.num_envs, device=self.device))
-        
+
+        # Gait-table imitation (Gait Studio). With a table the gait clock is fixed-period
+        # (the table's) and holds while standing, instead of speed-proportional.
+        self.gait_ref = None
+        self.ref_frame = None   # last sampled reference, for debugging / visualisation
+        if self.cfg.reference_npz_path:
+            self.gait_ref = GaitTableReference(
+                self.cfg.reference_npz_path, self.device,
+                root_dir=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
+            )
+            self.gait_ref.bind_to_robot(self.robot.joint_names)
+            self._ref_std = dict(self.cfg.reference_std)
+            g = self.gait_ref
+            print(f"[biped_env] gait table: grid vx{tuple(round(v, 3) for v in (g.grid[0][0].item(), g.grid[0][-1].item()))} "
+                  f"vy{tuple(round(v, 3) for v in (g.grid[1][0].item(), g.grid[1][-1].item()))} "
+                  f"wz{tuple(round(v, 3) for v in (g.grid[2][0].item(), g.grid[2][-1].item()))}, "
+                  f"{g.n_frames} frames, period {g.period:.3f}s, style {g.style_digest}")
+            for axis, key in zip(g.grid, ("lin_vel_x", "lin_vel_y", "ang_vel_z")):
+                lo, hi = self._cmd_full_ranges.get(key, (0.0, 0.0))
+                if lo < axis[0].item() - 1e-6 or hi > axis[-1].item() + 1e-6:
+                    print(f"[biped_env] WARNING: command range {key}=({lo}, {hi}) exceeds the table grid "
+                          f"({axis[0].item():.3f}, {axis[-1].item():.3f}); commands outside get the edge reference")
+
     def _setup_scene(self):
         self.robot = self.scene.articulations["robot"]
         
         self.contact_sensor = ContactSensor(self.scene.sensors["contact_forces"].cfg)
         self.scene.sensors["contact_sensor"] = self.contact_sensor
 
-        self.imu_sensor = Imu(self.scene.sensors["imu"].cfg)
+        # imu_step_averaged=False reproduces the old 4x accelerometer, only for evaluating
+        # checkpoints trained before the fix.
+        imu_cls = StepAveragedImu if getattr(self.cfg, "imu_step_averaged", True) else Imu
+        self.imu_sensor = imu_cls(self.scene.sensors["imu"].cfg)
         self.scene.sensors["imu_sensor"] = self.imu_sensor
 
         # Video camera — InteractiveScene already instantiated it; just keep a reference.
@@ -445,6 +491,13 @@ class BipedEnv(DirectRLEnv):
             return self.default_joint_pos + actions * span
         return self.joint_limits_min + (actions + 1.0) * 0.5 * self.joint_range
 
+    def targets_to_actions(self, targets: torch.Tensor) -> torch.Tensor:
+        """Inverse of actions_to_targets (encoder-space joint target -> action in [-1, 1])."""
+        if self.action_map == "centered":
+            span = torch.where(targets >= self.default_joint_pos, self.action_span_pos, self.action_span_neg)
+            return torch.clamp((targets - self.default_joint_pos) / span, -1.0, 1.0)
+        return torch.clamp(2.0 * (targets - self.joint_limits_min) / self.joint_range - 1.0, -1.0, 1.0)
+
     def _apply_action(self):
         # Action smoothing filter: EMA on PD position targets
         self.filtered_targets = (
@@ -471,9 +524,9 @@ class BipedEnv(DirectRLEnv):
             return np.zeros((cfg.height, cfg.width, 3), dtype=np.uint8)
 
     def step(self, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        # previous_actions is advanced at the end of _get_rewards, inside super().step(), so the
+        # observation built afterwards carries this step's action (see there).
         obs, rew, terminated, truncated, info = super().step(actions)
-        self.previous_previous_actions = self.previous_actions.clone()
-        self.previous_actions = self.actions.clone()
 
         if self.sim.has_gui():
             self._update_visualization()
@@ -551,11 +604,14 @@ class BipedEnv(DirectRLEnv):
             joint_pos_obs = torch.round(joint_pos_obs / self.encoder_step_rad) * self.encoder_step_rad
             joint_vel_obs = torch.round(joint_vel_obs / self.encoder_step_rad) * self.encoder_step_rad
 
-        # Gait phase clock: advance proportional to commanded XY speed
-        v_cmd_norm = torch.norm(self.commands[:, :2], dim=1)
-        self.gait_phase = (
-            self.gait_phase + self.step_dt * 2.0 * math.pi * self.gait_clock_freq * v_cmd_norm
-        ) % (2.0 * math.pi)
+        # Gait phase clock: advance proportional to commanded XY speed. With a gait table the
+        # clock is advanced in _get_rewards instead (fixed period), so the reward and the next
+        # observation see the same phase.
+        if self.gait_ref is None:
+            v_cmd_norm = torch.norm(self.commands[:, :2], dim=1)
+            self.gait_phase = (
+                self.gait_phase + self.step_dt * 2.0 * math.pi * self.gait_clock_freq * v_cmd_norm
+            ) % (2.0 * math.pi)
         phase_obs = torch.stack([torch.sin(self.gait_phase), torch.cos(self.gait_phase)], dim=-1)
 
         # Proprioceptive observations (48 base + 2 phase = 50)
@@ -620,7 +676,12 @@ class BipedEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         total_reward = torch.zeros(self.num_envs, device=self.device)
-        
+
+        # With a gait table, advance the clock first: the reward then compares the post-step
+        # state with the reference at the post-step phase, and the next observation shows it.
+        if self.gait_ref is not None:
+            self._advance_gait_phase()
+
         # --- Prepare Data ---
         feet_pos = self.robot.data.body_pos_w[:, self.feet_indices]
         
@@ -804,7 +865,7 @@ class BipedEnv(DirectRLEnv):
             foot_margin=float(getattr(self.cfg, "com_foot_margin", 0.03)),
         )
         r_com_support_centering = rewards.com_support_centering_reward(
-            com_dist, std=float(getattr(self.cfg, "com_centering_std", 0.04)))
+            com_dist, std=max(float(getattr(self.cfg, "com_centering_std", 0.04)), 1e-3))
         diag = self.gait_diagnostics(com_offset, com_dist)
         for k, v in diag.items():
             valid = ~torch.isnan(v)
@@ -911,6 +972,10 @@ class BipedEnv(DirectRLEnv):
             "angular_momentum": r_angular_momentum * self.cfg.rewards.get("angular_momentum", 0.0),
         }
         
+        if self.gait_ref is not None:
+            for name, term in self._imitation_terms(feet_pos, feet_in_contact).items():
+                reward_terms[name] = term * self.cfg.rewards.get(name, 0.0)
+
         # Weighted sum
         total_reward = torch.sum(torch.stack(list(reward_terms.values())), dim=0)
         
@@ -949,8 +1014,102 @@ class BipedEnv(DirectRLEnv):
 
         if self.motion_time is not None:
             self.motion_time += self.step_dt
-        
+
+        # Advance the action history HERE, after action_rate_l2 has used a_{t-1} and before
+        # _reset_idx / _get_observations run. The next observation then carries a_t, which is
+        # what the Jetson feeds and what next step's action_rate penalty is measured against.
+        # (It used to be advanced in step(), after the observation was built, so the policy saw
+        # a_{t-2} and could never observe the difference it was penalised for.) Reset envs are
+        # re-seeded by _reset_idx, which runs after this.
+        self.previous_previous_actions = self.previous_actions.clone()
+        self.previous_actions = self.actions.clone()
+
         return total_reward
+
+    # ------------------------------------------------------------------ gait-table imitation
+    def _reference_standing(self) -> torch.Tensor:
+        """Envs whose command is below the table's stand threshold: stand frame, clock held."""
+        thr = self.cfg.reference_stand_threshold
+        return (torch.norm(self.commands[:, :2], dim=1) < thr) & (self.commands[:, 2].abs() < thr)
+
+    def _advance_gait_phase(self) -> None:
+        moving = (~self._reference_standing()).float()
+        self.gait_phase = (self.gait_phase + moving * self.step_dt * 2.0 * math.pi / self.gait_ref.period) % (2.0 * math.pi)
+
+    def _imitation_terms(self, feet_pos: torch.Tensor, feet_in_contact: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Seven imitation terms against the table at (command, phase). Unweighted, in [0, 1].
+
+        Reads robot.data directly: the self.joint_pos etc. caches are refreshed in
+        _get_observations, so they are one step stale here. Env foot order is [right, left]; the
+        table's is [left, right]."""
+        g, d, std = self.gait_ref, self.robot.data, self._ref_std
+        ref = g.sample(self.commands, self.gait_phase / (2.0 * math.pi), self._reference_standing())
+        self.ref_frame = ref
+
+        rel = (feet_pos - d.root_pos_w.unsqueeze(1))[:, [1, 0]]                      # [N, 2, 3] world, [left, right]
+        quat = d.root_quat_w.unsqueeze(1).expand(-1, 2, -1).reshape(-1, 4)
+        feet_b = math_utils.quat_apply_inverse(quat, rel.reshape(-1, 3)).reshape(self.num_envs, 6)
+
+        return {
+            "imitation_joint_pos": rewards.imitation_mse_exp(d.joint_pos, g.joint_field(ref, "joint_pos"), std["joint_pos"]),
+            "imitation_joint_vel": rewards.imitation_mse_exp(d.joint_vel, g.joint_field(ref, "joint_vel"), std["joint_vel"]),
+            "imitation_foot_pos": rewards.imitation_mse_exp(feet_b, g.field(ref, "foot_pos_b"), std["foot_pos"]),
+            "imitation_contact": rewards.imitation_contact_match(feet_in_contact[:, [1, 0]], g.field(ref, "contact")),
+            "imitation_orientation": rewards.imitation_mse_exp(d.projected_gravity_b, g.field(ref, "projected_gravity"), std["orientation"]),
+            "imitation_lin_vel": rewards.imitation_mse_exp(d.root_lin_vel_b, g.field(ref, "base_lin_vel_b"), std["lin_vel"]),
+            "imitation_ang_vel": rewards.imitation_mse_exp(d.root_ang_vel_b, g.field(ref, "base_ang_vel_b"), std["ang_vel"]),
+        }
+
+    def _reference_state_init(self, env_ids: torch.Tensor) -> None:
+        """Reference state initialisation: start a fraction of resets mid-gait on the table.
+
+        Must run after _resample_commands (needs the new command and the random phase drawn
+        in _reset_idx). Keeps the position and yaw the reset event drew; takes joints, base
+        height, roll/pitch and velocities from the reference.
+
+        BAM servo state is NOT touched here: its reset is deferred and the first motor() call
+        seeds q_smooth, the command-delay ring and the back-EMF state from the pose and
+        velocity written below, so joints must be written before that call (they are).
+        """
+        prob = float(self.cfg.reference_rsi_prob)
+        if prob <= 0.0:
+            return
+        ids = env_ids[torch.rand(len(env_ids), device=self.device) < prob]
+        n = len(ids)
+        if n == 0:
+            return
+        g = self.gait_ref
+        ref = g.sample(self.commands[ids], self.gait_phase[ids] / (2.0 * math.pi), self._reference_standing()[ids])
+
+        noise = (torch.rand(n, self.num_joints, device=self.device) * 2.0 - 1.0) * self.cfg.reference_rsi_joint_noise
+        q = torch.clamp(g.joint_field(ref, "joint_pos") + noise, self.joint_limits_min, self.joint_limits_max)
+        qd = g.joint_field(ref, "joint_vel")
+        self.robot.write_joint_state_to_sim(q, qd, env_ids=ids)
+
+        # Base: keep xy/yaw from the reset event; roll/pitch from the reference gravity vector.
+        # For R = Rz(yaw) Ry(pitch) Rx(roll), R^T (0, 0, -1) = (sin p, -sin r cos p, -cos r cos p).
+        _, _, yaw = math_utils.euler_xyz_from_quat(self.robot.data.root_quat_w[ids])
+        gb = g.field(ref, "projected_gravity")
+        pitch = torch.asin(gb[:, 0].clamp(-1.0, 1.0))
+        roll = torch.atan2(-gb[:, 1], -gb[:, 2])
+        quat = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
+        pos = self.robot.data.root_pos_w[ids].clone()
+        pos[:, 2] = self.scene.env_origins[ids, 2] + g.field(ref, "base_height")[:, 0] + 0.005
+        self.robot.write_root_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=ids)
+        lin_w = math_utils.quat_apply(quat, g.field(ref, "base_lin_vel_b"))
+        ang_w = math_utils.quat_apply(quat, g.field(ref, "base_ang_vel_b"))
+        self.robot.write_root_velocity_to_sim(torch.cat([lin_w, ang_w], dim=-1), env_ids=ids)
+
+        # Re-seed what _reset_idx derived from the pre-RSI pose. q / qd are what was written.
+        # Encoder space: the first commanded target must equal the pose or the slew limiter
+        # walks the joints away from it.
+        self.filtered_targets[ids] = q + self.mount_offset[ids]
+        self.action_delay_buffer[ids] = self.filtered_targets[ids].unsqueeze(1)
+        self.servo_obs_buffer[ids] = torch.cat([q, qd], dim=-1).unsqueeze(1)
+        a_ref = self.targets_to_actions(self.filtered_targets[ids])
+        self.previous_actions[ids] = a_ref
+        self.previous_previous_actions[ids] = a_ref
+        self.feet_in_contact_prev[ids] = g.field(ref, "contact")[:, [1, 0]] > 0.5
 
     def _randomize_motion_time(self, env_ids: torch.Tensor) -> None:
         if self.motion_ref is None or self.motion_time is None:
@@ -1161,10 +1320,28 @@ class BipedEnv(DirectRLEnv):
         # Reset delay buffer and sample new per-env delay
         self.action_delay_buffer[env_ids] = 0.0
         if self.max_action_delay > 0:
-            delay_range = getattr(self.cfg, 'action_delay_steps_range', [0, 0])
+            lo, hi = getattr(self.cfg, 'action_delay_steps_range', [0, 0])
+            hi_now = int(lo) + int(round((int(hi) - int(lo)) * self._dr_ramp("action_delay")))
             self.action_delay[env_ids] = torch.randint(
-                delay_range[0], delay_range[1] + 1, (len(env_ids),), device=self.device
+                int(lo), hi_now + 1, (len(env_ids),), device=self.device
             )
+
+        # Servo-stiffness DR: per-episode firmware P IN SIM. The stall cap is applied by raising
+        # R, which halves the model's small-signal stiffness (17 vs 37 N*m/rad), and the bench
+        # validated the uncapped fit, so the real servo is likely stiffer than the capped model.
+        # One value per robot (the model error is systematic). The robot still runs P = kp_fw.
+        # Ramped by the curriculum ("servo_stiffness"): drawn from scratch at full width, this and
+        # the action delay together made walking too hard to discover (2026-10-12 run stood still).
+        if self.bam_actuators and getattr(self.cfg, "enable_physics_randomization", False):
+            for act in self.bam_actuators:
+                rng = getattr(act.cfg, "kp_fw_range", None)
+                if not rng:
+                    continue
+                k = act.servo.kernel
+                lo, hi = float(rng[0]), float(rng[1])
+                hi_now = lo + (hi - lo) * self._dr_ramp("servo_stiffness")
+                k.kp[env_ids] = torch.empty(len(env_ids), 1, device=k.kp.device, dtype=k.kp.dtype).uniform_(
+                    lo, hi_now).expand(len(env_ids), k.num_joints)
 
         # Seed the servo lag buffer with the post-reset encoder reading in every slot, so a
         # freshly reset env doesn't observe pre-reset joint state for its first few steps.
@@ -1231,14 +1408,34 @@ class BipedEnv(DirectRLEnv):
         # Resample commands
         self._resample_commands(env_ids)
 
+        # Last: RSI needs the new commands and phase, and re-seeds the buffers written above.
+        if self.gait_ref is not None:
+            self._reference_state_init(env_ids)
+
     def _get_curriculum_scales(self) -> dict[str, float]:
         step = float(self.common_step_counter)
         dr_start = float(self.cfg.curriculum_dr_start_steps)
         dr_full  = float(self.cfg.curriculum_dr_full_steps)
         dr_scale = max(0.0, min(1.0, (step - dr_start) / max(1.0, dr_full - dr_start)))
-        cmd_scale  = min(1.0, step / max(1.0, float(self.cfg.curriculum_cmd_ramp_steps)))
-        init_scale = min(1.0, step / max(1.0, float(self.cfg.curriculum_init_ramp_steps)))
+        # A ramp of 0 means "full from the start". step / max(1, 0) is 0 at step 0, so the first
+        # reset used to get the curriculum START range (vx 0-0.2, no vy/wz) instead.
+        _ramp = lambda n: 1.0 if float(n) <= 0.0 else min(1.0, step / float(n))
+        cmd_scale  = _ramp(self.cfg.curriculum_cmd_ramp_steps)
+        init_scale = _ramp(self.cfg.curriculum_init_ramp_steps)
         return {"dr": dr_scale, "cmd": cmd_scale, "init": init_scale}
+
+    def _dr_ramp(self, name: str) -> float:
+        """Curriculum scale (0..1) for a DR term ramped in code, e.g. "action_delay".
+
+        Same rule as the event-based terms: ramped when the curriculum is on and `name` is in
+        curriculum_dr_events (or that list is empty); otherwise 1.0, i.e. full width from step 0.
+        """
+        if not getattr(self.cfg, "curriculum_enabled", False):
+            return 1.0
+        listed = getattr(self.cfg, "curriculum_dr_events", [])
+        if listed and name not in listed:
+            return 1.0
+        return self._get_curriculum_scales()["dr"]
 
     def _apply_schedules(self) -> None:
         """Linear ramps that are independent of the DR curriculum switch.
@@ -1353,6 +1550,12 @@ class BipedEnv(DirectRLEnv):
         if "log" not in self.extras:
             self.extras["log"] = {}
         self.extras["log"]["Curriculum/dr_scale"]   = dr
+        lo, hi = getattr(self.cfg, "action_delay_steps_range", [0, 0])
+        self.extras["log"]["Curriculum/action_delay_max_steps"] = (
+            int(lo) + int(round((int(hi) - int(lo)) * self._dr_ramp("action_delay"))))
+        if self.bam_actuators and getattr(self.bam_actuators[0].cfg, "kp_fw_range", None):
+            klo, khi = self.bam_actuators[0].cfg.kp_fw_range
+            self.extras["log"]["Curriculum/servo_kp_max"] = klo + (khi - klo) * self._dr_ramp("servo_stiffness")
         self.extras["log"]["Curriculum/cmd_scale"]  = cmd
         self.extras["log"]["Curriculum/init_scale"] = init
 
@@ -1427,4 +1630,7 @@ class BipedEnv(DirectRLEnv):
 
     def _resample_commands(self, env_ids: torch.Tensor):
         self.command_generator.reset(env_ids)
+        # Heading-mode yaw from the post-reset heading now, not at the next step: the first
+        # observation and the RSI reference are built from this command.
+        self.command_generator.apply_heading(self.robot.data.root_quat_w)
 

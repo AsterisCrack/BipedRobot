@@ -46,6 +46,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from datetime import datetime, timezone
 
 import numpy as np
@@ -313,6 +314,80 @@ def _load_policy_contract(ckpt_dir: str, explicit_cfg: str | None, explicit_map:
     return contract
 
 
+def _scan_block(path: str, block: str) -> dict:
+    """Parse ONE block of a run's config.yaml in isolation.
+
+    The trainer writes the file with pydantic enum tags that yaml.safe_load rejects, so the whole
+    file cannot be parsed; a plain block (reference, commands) can. Indentation-aware: the block
+    is every following line indented deeper than the `<block>:` line. Returns {} if absent.
+    """
+    import yaml
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    start, indent = None, 0
+    for i, raw in enumerate(lines):
+        if raw.split("#", 1)[0].strip() == f"{block}:":
+            start, indent = i, len(raw) - len(raw.lstrip())
+            break
+    if start is None:
+        return {}
+    body = []
+    for raw in lines[start + 1:]:
+        if raw.strip() and not raw.lstrip().startswith("#") and len(raw) - len(raw.lstrip()) <= indent:
+            break
+        body.append(raw)
+    return yaml.safe_load(textwrap.dedent("\n".join(body))) or {}
+
+
+def _run_config(ckpt_dir: str, explicit_cfg: str | None) -> str | None:
+    """The config the checkpoint was trained with. Never the repo's current config.yaml."""
+    for p in (explicit_cfg, os.path.join(ckpt_dir, "config.yaml")):
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
+def _load_gait_clock(ckpt_dir: str, explicit_cfg: str | None, ckpt_path: str, speed_freq: float) -> dict:
+    """Gait clock the policy was trained with. With a gait table the clock is fixed-period and
+    holds while standing; a runtime that advances it speed-proportionally would feed the policy a
+    phase it never saw."""
+    cfg = _run_config(ckpt_dir, explicit_cfg)
+    ref = _scan_block(cfg, "reference") if cfg else {}
+    if not ref.get("npz_path"):
+        return {"mode": "speed_proportional", "freq": speed_freq}
+    table = ref["npz_path"]
+    full = table if os.path.isabs(table) else os.path.join(_PROJECT_ROOT, table)
+    if not os.path.exists(full):
+        raise RuntimeError(f"run was trained on gait table {table!r} but {full} is missing; the "
+                           f"period (clock rate) cannot be exported without it")
+    z = np.load(full, allow_pickle=False)
+    if os.path.getmtime(full) > os.path.getmtime(ckpt_path):
+        print(f"[export] WARNING: {table} was re-baked after this checkpoint was written; the exported "
+              f"period ({float(z['period']):.3f} s) may differ from the one the policy trained on",
+              file=sys.stderr)
+    return {"mode": "fixed_period", "period": float(z["period"]),
+            "stand_threshold": float(ref.get("stand_threshold", 0.05)),
+            "table": table, "style_digest": str(z["style_digest"]),
+            "phase_convention": str(z["phase_convention"])}
+
+
+_LEGACY_COMMAND_RANGES = {"lin_vel_x": [-0.3, 0.5], "lin_vel_y": [-0.3, 0.3], "ang_vel_z": [-0.3, 0.3]}
+
+
+def _load_command_ranges(ckpt_dir: str, explicit_cfg: str | None) -> dict:
+    """Command ranges the policy was trained on, so the runtime clamps joystick input to them."""
+    cfg = _run_config(ckpt_dir, explicit_cfg)
+    ranges = ((_scan_block(cfg, "commands").get("base_velocity") or {}).get("ranges") or {}) if cfg else {}
+    out = {k: [float(v) for v in ranges[k]] for k in ("lin_vel_x", "lin_vel_y", "ang_vel_z") if k in ranges}
+    missing = [k for k in _LEGACY_COMMAND_RANGES if k not in out]
+    if missing:
+        print(f"[export] WARNING: command ranges for {missing} not found in the run config; using the "
+              f"legacy defaults {_LEGACY_COMMAND_RANGES}", file=sys.stderr)
+        for k in missing:
+            out[k] = _LEGACY_COMMAND_RANGES[k]
+    return out
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--checkpoint", type=str, default=None,
@@ -368,6 +443,9 @@ def main() -> int:
     history_size = _load_history_size(ckpt_dir, args.config_path)
     contract = _load_policy_contract(ckpt_dir, args.config_path, args.action_map)
     print(f"[export] action_map = {contract['action_map']}, actuator = {contract['actuator']}")
+    gait_clock = _load_gait_clock(ckpt_dir, args.config_path, ckpt_path, env["gait_clock_freq"])
+    command_ranges = _load_command_ranges(ckpt_dir, args.config_path)
+    print(f"[export] gait_clock = {gait_clock}, command_ranges = {command_ranges}")
     proprio_dim = in_dim // history_size
 
     # -- stage-1 normalizer ---------------------------------------------------
@@ -435,8 +513,10 @@ def main() -> int:
                 ref = model(torch.from_numpy(x)).numpy()
             got = sess.run(["action"], {"obs": x})[0]
             worst = max(worst, float(np.abs(ref - got).max()))
-        if worst > 1e-5:
-            failures.append(f"ONNX vs PyTorch max abs diff {worst:.3e} > 1e-5")
+        # float32 through a ~1.9M-parameter MLP: ORT and PyTorch differ by accumulation order,
+        # ~1e-5 on a [-1, 1] output. A real export bug (wrong normaliser, missing tanh) is >1e-2.
+        if worst > 1e-4:
+            failures.append(f"ONNX vs PyTorch max abs diff {worst:.3e} > 1e-4")
         else:
             print(f"[export] ONNX vs PyTorch over 100 random inputs: max diff {worst:.3e} OK")
         if not (np.abs(got) <= 1.0 + 1e-6).all():
@@ -454,7 +534,10 @@ def main() -> int:
     deploy = {
         # v2 adds action_map and actuator. A runtime that predates them must refuse v2 bundles
         # rather than silently applying the v1 (absolute) map to a centered policy.
-        "format_version": 2,
+        # v3 = a fixed-period gait_clock (table-trained policy). A runtime that only knows
+        # gait_clock_freq would clock the policy wrongly, so it must refuse v3 as well. Bundles
+        # without a table stay v2.
+        "format_version": 3 if gait_clock["mode"] == "fixed_period" else 2,
         "action_map": contract["action_map"],
         "actuator": contract["actuator"],
         "obs_dim": in_dim,
@@ -474,12 +557,9 @@ def main() -> int:
         "action_filter_applications_per_step": env["decimation"],
         "step_dt": step_dt,
         "control_hz": round(1.0 / step_dt),
-        "gait_clock_freq": env["gait_clock_freq"],
-        "command_ranges": {
-            "lin_vel_x": [-0.3, 0.5],
-            "lin_vel_y": [-0.3, 0.3],
-            "ang_vel_z": [-0.3, 0.3],
-        },
+        "gait_clock": gait_clock,
+        "gait_clock_freq": env["gait_clock_freq"],   # legacy runtimes; ignored when gait_clock.mode is fixed_period
+        "command_ranges": command_ranges,
         "tilt_fault_rad": 0.784,  # matches biped_env._tilt_exceeded
         "notes": {
             "normalizer": "stage 1 (obs_mean/obs_var) applied by runtime; "

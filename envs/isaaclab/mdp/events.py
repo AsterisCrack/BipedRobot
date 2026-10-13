@@ -130,6 +130,8 @@ def randomize_bam_actuator(
     This replaces randomize_actuator_gains and randomize_effort_limit. Under BAM there are no
     PD gains to scale, and the torque ceiling falls out of vin and duty rather than being a
     free parameter (the reference implementation turned kp/kd DR off for the same reason).
+    (Servo-stiffness DR, kp_fw_range, is drawn per episode by BipedEnv._reset_idx so it can
+    follow the curriculum.)
     """
     asset = env.scene[asset_cfg.name]
     if env_ids is None:
