@@ -7,7 +7,7 @@ from torch_rl_algorithms.algorithms.utils import RunningMeanStd
 import envs.isaaclab
 
 class BaseIsaacLabWrapper:
-    def __init__(self, env, config=None):
+    def __init__(self, env, config=None, symmetric_obs_stats=False):
         self.env = env
         # gymnasium wrappers (e.g. RecordVideo) don't forward Isaac Lab specific
         # attributes, so read them from the innermost unwrapped env.
@@ -17,6 +17,23 @@ class BaseIsaacLabWrapper:
         self.config = config
         self.normalize_obs = False
         self._eval_mode = False   # when True, scaler statistics are frozen (play/eval only)
+
+        # Symmetric stage-1 statistics. The replay's mirror augmentation mirrors the already
+        # NORMALISED obs (perm * sign), which equals the normalised mirrored raw obs only if the
+        # scaler satisfies mean_i = s_i * mean_p(i) and var_i = var_p(i). Real-only stats do not
+        # (e.g. critic foot forces: R/L sigma ratio 1.3-1.6 -> mirrored samples mis-scaled by up
+        # to 0.6 sigma). So, when on, each scaler is updated with the real raw batch AND its raw
+        # mirror (equal counts), which makes the pair relations exact for a linear perm/sign
+        # mirror. Only the statistics change; the observations returned are the same real ones.
+        self._mirror_raw_obs = None
+        if symmetric_obs_stats:
+            mirror_fn = getattr(base_env, "mirror_obs", None)
+            if mirror_fn is None:
+                print("[WARN] symmetric_obs_stats requested but the unwrapped env has no mirror_obs(); "
+                      "stage-1 observation statistics stay real-sample-only (mirror augmentation will "
+                      "be slightly mis-scaled).")
+            else:
+                self._mirror_raw_obs = mirror_fn
 
         if config and hasattr(config.train, "normalize_obs"):
              self.normalize_obs = config.train.normalize_obs
@@ -83,15 +100,27 @@ class BaseIsaacLabWrapper:
         # Normalize if enabled
         if self.normalize_obs:
             if isinstance(new_obs, dict):
+                # Raw-space mirror, computed BEFORE any key is normalised in place below.
+                mirrored = None
+                if self._mirror_raw_obs is not None and not self._eval_mode:
+                    mirrored = self._mirror_raw_obs(
+                        {k: v for k, v in new_obs.items() if k in ("actor", "critic") and k in self.obs_scalers})
                 for k, v in new_obs.items():
                     if k in self.obs_scalers:
                         if not self._eval_mode:   # freeze stats during play/eval
-                            self.obs_scalers[k].update(v)
+                            if mirrored is not None and k in mirrored:
+                                self.obs_scalers[k].update(torch.cat([v, mirrored[k]], dim=0))
+                            else:
+                                self.obs_scalers[k].update(v)
                         new_obs[k] = self.obs_scalers[k].normalize(v)
             else:
                  if "default" in self.obs_scalers:
                      if not self._eval_mode:
-                         self.obs_scalers["default"].update(new_obs)
+                         if self._mirror_raw_obs is not None:
+                             m = self._mirror_raw_obs({"actor": new_obs})["actor"]
+                             self.obs_scalers["default"].update(torch.cat([new_obs, m], dim=0))
+                         else:
+                             self.obs_scalers["default"].update(new_obs)
                      new_obs = self.obs_scalers["default"].normalize(new_obs)
             
         return new_obs

@@ -28,6 +28,7 @@ from envs.mujoco.base_env import BaseEnv
 from envs.utils.randomizer import Randomizer
 from envs.isaaclab.rewards import rewards as R
 from utils import NoConfig
+from utils.motion_reference import CadenceGrid
 
 # ---------------------------------------------------------------------------
 # Joint layout — MUST match Isaac Lab BipedRobotV2EnvCfg (L,R interleaved)
@@ -65,6 +66,16 @@ JLIM_MAX = np.array([
 ], dtype=np.float32)
 
 JRANGE = JLIM_MAX - JLIM_MIN
+
+# Reward-weight keys _compute_reward implements (tests/test_reward_sign_guard.py checks this against
+# the source). Only these are sign-checked in __init__.
+_MUJOCO_REWARD_KEYS = frozenset({
+    "track_lin_vel_xy_exp", "track_ang_vel_z_exp", "termination_penalty", "lin_vel_z_l2",
+    "ang_vel_xy_l2", "flat_orientation_l2", "action_rate_l2", "dof_torques_l2", "dof_acc_l2",
+    "dof_pos_limits", "feet_air_time", "feet_slide", "swing_foot_height", "gait_phase_contact",
+    "knee_bend_touchdown", "joint_deviation_hip", "joint_deviation_ankle_roll",
+    "joint_deviation_ankle_pitch", "joint_deviation_knee", "ankle_torques_l2", "torso_centering",
+})
 
 # Sub-index groups (into the 12-joint vector) for reward functions
 HIP_IDX         = [0, 1, 2, 3]  # yaw + roll (Isaac Lab V2 hip_joint_names, pitch excluded)
@@ -111,22 +122,34 @@ _DEFAULT_CMD_RANGES = {
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-def gait_clock_from_config(env_config) -> tuple[float | None, float]:
-    """(period [s], stand_threshold) of the gait table named in env_config.reference.
+def gait_clock_from_config(env_config) -> tuple[CadenceGrid | None, float]:
+    """(clock, stand_threshold) of the gait table named in env_config.reference, else of
+    env_config.gait_clock_* when gait_clock_mode is fixed_period (same rule, no table).
 
-    period is None when no table is configured: the clock then stays speed-proportional.
-    With a table the clock is fixed-period and holds while the command is below the threshold,
-    exactly like BipedEnv._advance_gait_phase, so sim-to-sim sees the phase the policy trained on.
+    clock gives the gait frequency [cycles/s] for a command: the table's freq grid (v2 tables,
+    cadence follows the command) or a constant (v1 tables, fixed_period). It is None when neither
+    is configured: the clock then stays speed-proportional. The clock holds while the command is
+    below the threshold, exactly like BipedEnv._advance_gait_phase, so sim-to-sim sees the phase
+    the policy trained on.
     """
     ref = getattr(env_config, "reference", None) or {}
     if hasattr(ref, "model_dump"):
         ref = ref.model_dump()
     path = ref.get("npz_path")
     if not path:
+        mode = getattr(env_config, "gait_clock_mode", None) or "speed_proportional"
+        if mode == "fixed_period":
+            period = float(getattr(env_config, "gait_clock_period_s", 0.7))
+            if not (0.2 < period < 5.0):
+                raise ValueError(f"gait_clock_period_s {period!r} s is implausible (expected 0.2-5 s)")
+            constant = CadenceGrid([0.0], [0.0], [0.0], [[[1.0 / period]]])
+            return constant, float(getattr(env_config, "gait_clock_stand_threshold", 0.05))
+        if mode != "speed_proportional":
+            raise ValueError(f"gait_clock_mode {mode!r}: expected speed_proportional | fixed_period")
         return None, 0.05
     full = path if os.path.isabs(path) else os.path.join(_PROJECT_ROOT, path)
     with np.load(full, allow_pickle=False) as z:
-        return float(z["period"]), float(ref.get("stand_threshold", 0.05))
+        return CadenceGrid.from_npz(z), float(ref.get("stand_threshold", 0.05))
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +199,7 @@ class BipedEnvV2(BaseEnv):
         act_cfg = dict(getattr(self.config, "actuator", None) or {})
         lash_cfg = dict(getattr(self.config, "backlash", None) or {})
         self.action_map = getattr(self.config, "action_map", "absolute") or "absolute"
+        self._init_residual(self.config)
         self._lash_deg = (float(lash_cfg.get("mujoco_lash_deg", 0.0))
                           if lash_cfg.get("enabled", False) else 0.0)
         if self._lash_deg > 0.0:
@@ -244,8 +268,9 @@ class BipedEnvV2(BaseEnv):
             -1
         )
 
-        # Default joint positions (all zeros for V2)
-        self._default_joint_pos = np.zeros(12, dtype=np.float32)
+        # Default joint positions: all zeros for V2, the home pose for action_map residual
+        self._default_joint_pos = (self._residual_home.astype(np.float32) if self._residual_home is not None
+                                   else np.zeros(12, dtype=np.float32))
 
         # ---- State ---------------------------------------------------------
         self.commands           = np.zeros(3,  dtype=np.float32)
@@ -257,7 +282,7 @@ class BipedEnvV2(BaseEnv):
         self._last_physics_acc  = np.zeros(3, dtype=np.float64)
         self.imu_acc_dt         = STEP_DT
         self.gait_phase         = 0.0
-        self.gait_period, self.gait_stand_threshold = gait_clock_from_config(self.config)
+        self.gait_clock, self.gait_stand_threshold = gait_clock_from_config(self.config)
 
         # Gait tracking buffers
         self._in_contact        = np.zeros(2, dtype=bool)    # [right, left]
@@ -295,6 +320,11 @@ class BipedEnvV2(BaseEnv):
         self._reward_w: dict[str, float] = {}
         if hasattr(self.config, "reward_weights"):
             self._reward_w = dict(self.config.reward_weights)
+            # Same sign guard as the Isaac env (rewards.REWARD_WEIGHT_SIGN), restricted to the terms
+            # _compute_reward implements: checkpoint configs also carry Isaac-only weights this env
+            # ignores, and those must not block loading a policy for evaluation.
+            R.validate_reward_weight_signs(
+                self._reward_w, keys=_MUJOCO_REWARD_KEYS, where="BipedEnvV2 reward_weights")
         self._reward_scale: float = getattr(self.config, "reward_scale", 1.0)
 
         # Gymnasium spaces
@@ -364,8 +394,30 @@ class BipedEnvV2(BaseEnv):
             v = v + self._qvel()[self._lash_qvel_ids]
         return v
 
+    def _init_residual(self, config) -> None:
+        """action_map residual: home / scales from the SAME env_config keys Isaac reads
+        (action_home_deg, action_scale_rad, spawn_height_m), via utils.residual_action."""
+        from utils.residual_action import RESIDUAL_SPAWN_HEIGHT_M, check_residual_map, home_rad, scale_rad
+        self._residual_home = self._residual_scale = None
+        self._spawn_dz = 0.0
+        height = getattr(config, "spawn_height_m", None)
+        height = float(height) if isinstance(height, (int, float)) else None
+        if self.action_map == "residual":
+            home_cfg, scale_cfg = getattr(config, "action_home_deg", None), getattr(config, "action_scale_rad", None)
+            if not home_cfg or not scale_cfg:
+                raise ValueError("action_map 'residual' needs env_config.action_home_deg and action_scale_rad")
+            self._residual_home, self._residual_scale = home_rad(dict(home_cfg)), scale_rad(dict(scale_cfg))
+            check_residual_map(self._residual_home, self._residual_scale, JLIM_MIN, JLIM_MAX)
+            if height is None:
+                height = RESIDUAL_SPAWN_HEIGHT_M
+        if height is not None:
+            self._spawn_dz = height - 0.29      # shift from the XML spawn by the same drop Isaac applies
+
     def _actions_to_targets(self, action: np.ndarray) -> np.ndarray:
         """Same map as BipedEnv.actions_to_targets (Isaac) for the configured action_map."""
+        if self.action_map == "residual":
+            return np.clip(self._residual_home + self._residual_scale * np.clip(action, -1.0, 1.0),
+                           JLIM_MIN, JLIM_MAX)
         if self.action_map == "centered":
             span = np.where(action >= 0.0, JLIM_MAX - self._default_joint_pos,
                             self._default_joint_pos - JLIM_MIN)
@@ -717,6 +769,9 @@ class BipedEnvV2(BaseEnv):
 
         mujoco.mj_resetData(self.model, self.data)
         self._randomizer.randomize()
+        if self._residual_home is not None:
+            self.data.qpos[self._qpos_ids] = self._residual_home      # reset pose = home (lash hinges stay 0)
+        self.data.qpos[2] += self._spawn_dz
         mujoco.mj_forward(self.model, self.data)
 
         # Reset EMA filter to current joint positions (matches biped_env.py _reset_idx)
@@ -760,14 +815,14 @@ class BipedEnvV2(BaseEnv):
         self._prev_qvel[:] = self._qvel().copy()
         self._prev_jvel[:] = self._jvel().copy()
 
-        # Advance gait phase (matches biped_env.py: fixed-period with a table, else speed-proportional)
+        # Advance gait phase (matches biped_env.py: the table's freq(cmd) or a fixed period, held
+        # while standing; else speed-proportional)
         v_cmd = float(np.linalg.norm(self.commands[:2]))
-        if self.gait_period is not None:
+        if self.gait_clock is not None:
             thr = self.gait_stand_threshold
             moving = v_cmd >= thr or abs(float(self.commands[2])) >= thr
-            self.gait_phase = (
-                self.gait_phase + (STEP_DT * 2.0 * math.pi / self.gait_period if moving else 0.0)
-            ) % (2.0 * math.pi)
+            freq = self.gait_clock.frequency(self.commands[:3]) if moving else 0.0
+            self.gait_phase = (self.gait_phase + STEP_DT * 2.0 * math.pi * freq) % (2.0 * math.pi)
         else:
             self.gait_phase = (
                 self.gait_phase + STEP_DT * 2.0 * math.pi * GAIT_CLOCK_FREQ * v_cmd

@@ -28,6 +28,7 @@ for _p in (_PROJECT_ROOT, os.path.join(_PROJECT_ROOT, "torch_rl_algorithms")):
         sys.path.insert(0, _p)
 
 from torch_rl_algorithms.models.mlp import MLPActor          # noqa: E402
+from torch_rl_algorithms.models.equivariant import EquivariantActor, TABLE_KEYS  # noqa: E402
 from torch_rl_algorithms.algorithms.utils import MeanStd     # noqa: E402
 
 
@@ -63,10 +64,15 @@ def main() -> int:
         head_type="gaussian_multivariate",
     )
     actor_sd = {k[len("actor."):]: v for k, v in sd.items() if k.startswith("actor.")}
+    if all(k in actor_sd for k in TABLE_KEYS):
+        # train.equivariant_actor checkpoint: compare against the REAL wrapped actor (tables from the
+        # checkpoint buffers), not just the plain MLP, so the symmetrisation in the ONNX is checked too.
+        actor = EquivariantActor(actor, obs_dim=obs_dim, act_dim=act_dim)
+        print("[verify] checkpoint holds an equivariant actor: verifying against EquivariantActor")
     missing, unexpected = actor.load_state_dict(actor_sd, strict=False)
     # std_layer is loaded but unused on the deterministic path; nothing should be missing.
     if missing:
-        print(f"[verify] FAIL missing keys in MLPActor: {missing}", file=sys.stderr)
+        print(f"[verify] FAIL missing keys in {type(actor).__name__}: {missing}", file=sys.stderr)
         return 1
     actor.eval()
 

@@ -120,7 +120,11 @@ def main() -> None:
     err = (zero_t - env.default_joint_pos).abs().max().item()
     check(err < 1e-6, f"action map '{env.action_map}': a = 0 -> default pose (max err {err:.2e} rad)")
     one_t = env.actions_to_targets(torch.ones(n, J, device=env.device))
-    check((one_t - env.joint_limits_max).abs().max().item() < 1e-6, "a = +1 -> upper joint limits")
+    if env.action_map == "residual":
+        want = torch.minimum(env.default_joint_pos + env.action_scale, env.joint_limits_max)
+        check((one_t - want).abs().max().item() < 1e-6, "a = +1 -> min(home + scale, upper joint limit)")
+    else:
+        check((one_t - env.joint_limits_max).abs().max().item() < 1e-6, "a = +1 -> upper joint limits")
 
     # Stand still: zero command everywhere, no heading control, no resampling.
     gen = env.command_generator

@@ -203,6 +203,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     reference_std: dict = {
         "joint_pos": 0.15, "joint_vel": 1.5, "foot_pos": 0.02,
         "orientation": 0.08, "lin_vel": 0.1, "ang_vel": 0.3,
+        "foot_height": 0.004,   # imitation_foot_height: per-foot sole clearance vs the table, [m]
     }
 
     # Observations
@@ -222,6 +223,13 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # A miscalibrated clock makes gait_phase_contact unsatisfiable regardless of policy, which
     # is one of the reasons the earlier attempt to enable that reward failed.
     gait_clock_base_freq: float = 5.0  # => 1/(2*freq) = 0.10 m step length
+    # Clock mode when NO gait table is set (a table always uses its own fixed period):
+    #   speed_proportional: the rate above (gait frequency = freq * |v_xy| Hz).
+    #   fixed_period: constant rate 2*pi/gait_clock_period_s while moving, HELD while the command
+    #     is below gait_clock_stand_threshold in both |v_xy| and |wz| (same rule as the table clock).
+    gait_clock_mode: str = "speed_proportional"
+    gait_clock_period_s: float = 0.7
+    gait_clock_stand_threshold: float = 0.05
 
     # Action smoothing filter (EMA): target = alpha*raw + (1-alpha)*prev
     action_filter_alpha: float = 0.4
@@ -241,8 +249,16 @@ class BipedEnvCfg(DirectRLEnvCfg):
     mount_offset_rad: float = 0.0       # servo zero error, +-range, applied to obs AND command
     imu_misalignment_deg: float = 0.0   # IMU board tilt, random axis, angle in [0, max]
 
-    # Action map: "centered" (a=0 -> default pose, a=+-1 -> limits) or "absolute" (legacy).
+    # Action map: "centered" (a=0 -> default pose, a=+-1 -> limits), "absolute" (legacy) or
+    # "residual" (target = clamp(home + scale*a, limits)). "residual" takes its home pose
+    # (deg) and per-joint-type scale (rad) from these dicts, set by env_config.apply_env_config;
+    # the home is also written into the articulation's init_state, so it IS default_joint_pos.
+    # spawn_height_m: init base z (None = the asset's 0.29 m; residual defaults to 0.286).
     action_map: str = "absolute"
+    action_home_deg: dict | None = None
+    action_scale_rad: dict | None = None
+    spawn_height_m: float | None = None
+    target_base_height: float = 0.29     # base_height_l2 target; follows spawn_height_m
 
     # Schedules, in common_step_counter units; None leaves the value alone.
     standing_envs_start: float = 0.02
@@ -255,12 +271,92 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # swing_foot_height window, as clearance ABOVE the measured resting foot height [m]
     swing_min_clearance: float = 0.01
     swing_max_clearance: float = 0.07
+    # A foot whose CURRENT swing has lasted longer than this earns no swing_foot_height
+    # (stops the "hold one leg up" exploit). Uses the contact sensor's current_air_time.
+    swing_max_time_s: float = 0.5
+
+    # Height-aware contact flag for the REWARD terms imitation_contact and feet_slide only (the
+    # contact sensor, the clearance datum and every other consumer stay force-based): a foot
+    # counts as in contact if |F| > 1 N OR its clearance (the swing_foot_height datum quantity)
+    # is below this many metres. Closes the "drag the foot with < 1 N load" exploit. None / 0 =
+    # old behaviour (force only).
+    contact_height_thresh_m: float | None = None
+    # hard (default) = the bool flag above. soft = score c = max(force_flag, clamp(1 - clearance /
+    # contact_height_thresh_m, 0, 1)) in [0, 1]: feet_slide weights the planar speed by c and
+    # imitation_contact scores 1 - |c - table_contact| per foot (no cliff at the threshold). Needs
+    # contact_height_thresh_m > 0. (Diagnostics/dragged_foot_frac keeps the hard-threshold definition.)
+    contact_height_mode: str = "hard"
+
+    # imitation_foot_height and imitation_contact: per-foot values combined over the two feet by
+    # "mean" (default, old) or "min" (the worse foot decides: a limp stops keeping half the reward).
+    imitation_foot_agg: str = "mean"
+
+    # Velocity-tracking kernel width. *_std_rel = 0: fixed std (0.2 linear, 0.5 yaw), the old
+    # behaviour. > 0: per-env std = clamp(rel * |cmd|, min=*_std_min) (see rewards.py).
+    track_lin_std_rel: float = 0.0
+    track_lin_std_min: float = 0.07
+    track_ang_std_rel: float = 0.0
+    track_ang_std_min: float = 0.15
+    # Centre of the linear tracking kernel. command (default, old): the commanded velocity. reference: the
+    # gait table's base_lin_vel_b at the current (command, phase) (needs the table and track_lin_std_rel > 0),
+    # measured against the fresh robot.data velocity. The width stays clamp(rel * |cmd|, min) either way. The
+    # table's own sway (lateral std ~0.065 m/s) otherwise makes a perfect copy score 0.38 at vx 0.1 (standing 0.13).
+    track_lin_target: str = "command"
+
+    # feet_air_time: per_step = old (feet_air_time_positive_biped, paid every step while a foot
+    # is up in single stance); touchdown = paid once at landing =
+    # clamp(swing - feet_air_time_min_s, 0, feet_air_time_max_s - feet_air_time_min_s),
+    # single stance only, command-gated. The min is a dead zone for short flicker flights.
+    feet_air_time_mode: str = "per_step"
+    feet_air_time_min_s: float = 0.15
+    feet_air_time_max_s: float = 0.4
 
     # com_support_centering: reward = exp(-0.5 (d/std)^2) where d is the distance the CoM
     # lies OUTSIDE the support polygon (0 when inside). com_foot_margin is the foot's own
     # half-extent, so a CoM over any part of a planted foot reads 0.
     com_centering_std: float = 0.04
     com_foot_margin: float = 0.03
+
+    # foot_separation: origin_one_sided = old (penalise the LINK-ORIGIN lateral separation below
+    # min_sep 0.09, one-sided); sole_band = two-sided band on the SOLE-CENTRE lateral separation,
+    # penalty clamp((|sep - foot_sep_target_m| - foot_sep_tol_m) / foot_sep_scale_m, 0, 3)^2.
+    # foot_sole_offset_m = (x, lateral magnitude, z) of the sole centre in the foot link frame
+    # (ankle_pitch joint origin); the lateral sign (+left / -right) is applied by the reward.
+    foot_separation_mode: str = "origin_one_sided"
+    foot_sep_target_m: float = 0.095
+    foot_sep_tol_m: float = 0.025
+    foot_sep_scale_m: float = 0.02
+    foot_sole_offset_m: list = [0.0163, 0.0211, -0.0316]
+
+    # undesired_contacts: per-body clamp((|F| - thresh) / sat, 0, 1). Defaults = old behaviour.
+    undesired_contacts_sat_n: float = 20.0
+    undesired_contacts_thresh_n: float = 1.0
+
+    # leg_contact_l2 (weight in rewards, default 0): per-body clamp((|F| - thresh) / (sat - thresh), 0, 1)^2
+    # over the non-foot leg bodies (net force, includes the other leg) and the feet (net force
+    # minus the ground-plane filter force). See BipedEnv._leg_contact_forces.
+    leg_contact_thresh_n: float = 0.5
+    leg_contact_sat_n: float = 5.0
+
+    # foot_proximity (E21): TERRAIN-INDEPENDENT foot-to-foot gap. With use_rough_terrain the contact sensor has no
+    # filter prims (force_matrix_w is None), so undesired_contacts / leg_contact_l2 cannot tell floor force from
+    # other-foot force and leave the feet out: feet pressing together cost nothing (run gaitref_2026-10-22_07-18-30:
+    # 100% of steps at command 0, 13.8 N, -1.2 mm). This term is purely geometric: the horizontal-plane gap between the
+    # two foot SOLE rectangles (rewards.foot_footprint_gap), penalty clamp((margin - gap)/margin, 0, 2)^2.
+    # The footprint rectangle is centred on foot_sole_offset_m (above) with these half extents [x, y] (metres). Derived from
+    # the collision mesh r/l_foot_link_1.stl (robot_v2.xml, foot link frame): the whole mesh projects to x -28.7 .. +61.3 mm
+    # (90.0 mm) and |y| 2.0 .. 39.3 mm (37.3 mm) -> half extents (45.0, 18.6) mm. (The sole face alone is |y| 3.0 .. 39.2 mm,
+    # half 18.1; the foot is 1 mm wider per side above the sole chamfer, and 18.6 splits that so the gap matches MuJoCo
+    # within ~1 mm for both a flat foot, +0.9 mm, and a rolled one pressing on its sole edge, -1.0 mm.)
+    # tests/test_foot_proximity.py re-derives them from the MJCF and asserts this matches within 1 mm.
+    foot_sole_half_extents_m: list = [0.0450, 0.0186]
+    # Gap [m] below which the penalty starts. 6 mm: the gait table's own footprint gap over every cell the training command
+    # ranges select (the whole 16x12x16 grid) has min 6.4 mm / p1 11.4 mm / p5 17.1 mm (CHANGES.md, E21), so the reference
+    # gait is never penalised. Largest whole mm below the table minimum; tests/test_foot_proximity.py recomputes it.
+    foot_proximity_margin_m: float = 0.006
+    # Optional termination (counts as `died`, so termination_penalty applies): end the episode once the footprint gap has
+    # been <= 0 for this many seconds in a row. 0 = off. 0.25 is the suggested value if the penalty alone does not stop it.
+    foot_overlap_termination_s: float = 0.0
     # TODO: Changes made: action max delay 2 -> 0, commented new randomizations, removed history, lowered mlp size, removed symmetry
 
     # Randomization
@@ -282,11 +378,11 @@ class BipedEnvCfg(DirectRLEnvCfg):
     curriculum_dr_events: list = []
 
     # Target (full-curriculum) DR values — curriculum scales toward these
-    curriculum_dr_max_push_x: float = 0.4
-    curriculum_dr_max_push_y: float = 0.3
+    curriculum_dr_max_push_x: float = 0.2
+    curriculum_dr_max_push_y: float = 0.2
     # Mass is now a SCALE factor, not an additive kg offset, so this is centred on 1.0.
     # The old (-0.2, 0.4) was in kg and drove sub-0.2 kg leg links to zero mass.
-    curriculum_dr_mass_range: tuple = (0.75, 1.25)
+    curriculum_dr_mass_range: tuple = (0.9, 1.1)
     curriculum_dr_gains_range: tuple = (0.7, 1.3)
     curriculum_dr_friction_range: tuple = (0.3, 1.4)
     # NOTE: com and payload are the ONLY two names in curriculum_dr_events, so these two values
@@ -295,7 +391,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # (The reverse holds for mass/gains/friction/push: those are not in the list, so their
     # EventTerm params are live and these values are only documentation of the intended target.)
     curriculum_dr_com_range: float = 0.02      # was 0.01 — most ZMP-critical term at this scale
-    curriculum_dr_payload_max: float = 0.3     # was 0.15 — 18% of the 1.661 kg body
+    curriculum_dr_payload_max: float = 0.1     # was 0.15 — 18% of the 1.661 kg body
     # Command range limits
     curriculum_cmd_start_lin_vel_x: tuple = (0.0, 0.2)   # slow forward-only at start
     curriculum_cmd_full_lin_vel_x: tuple  = (-0.3, 0.5)  # full range at end
@@ -417,7 +513,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
         "push_robot": EventTerm(
             func="isaaclab.envs.mdp:push_by_setting_velocity",
             mode="interval",
-            interval_range_s=(1.0, 5.0),
+            interval_range_s=(3.0, 6.0),
             # Added yaw: every disturbance was previously a pure linear shove. A real knock --
             # a hand, a cable snag, an uneven foot strike -- almost always has a rotational
             # component, and recovering yaw mid-stride is a different skill from recovering a
@@ -425,7 +521,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             # NOTE: push_robot is NOT in curriculum_dr_events, so these params are live from
             # step 0 and curriculum_dr_max_push_x/y never reach the sim.
             params={"velocity_range": {
-                "x": (-0.4, 0.4), "y": (-0.3, 0.3), "yaw": (-0.6, 0.6),
+                "x": (-0.2, 0.2), "y": (-0.2, 0.2), "yaw": (-0.6, 0.6),
             }},
         ),
         # Physics Randomization
@@ -448,7 +544,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*_link_1"),
-                "mass_distribution_params": (0.75, 1.25),  # widened from (0.8, 1.2)
+                "mass_distribution_params": (0.85, 1.15),  # widened from (0.8, 1.2)
                 "operation": "scale",
             },
         ),
@@ -506,8 +602,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
                 # Widened (0.5, 1.3) -> (0.3, 1.4): 0.5 is still a reasonable floor. Wet tile
                 # or laminate is mu ~0.2-0.3, and that is exactly where a flat-footed biped
                 # slips. Training only down to 0.5 never sees a genuinely slippery surface.
-                "static_friction_range": (0.3, 1.4),
-                "dynamic_friction_range": (0.3, 1.4),
+                "static_friction_range": (0.5, 1.2),
+                "dynamic_friction_range": (0.5, 1.2),
                 # Was pinned at zero. Carpet/rubber/tile differ in bounce, and a hard zero also
                 # means foot-strike never has any rebound to reject.
                 "restitution_range": (0.0, 0.3),
@@ -539,7 +635,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-                "mass_distribution_params": (0.0, 0.15),
+                "mass_distribution_params": (0.0, 0.1),
                 "operation": "add",
             },
         ),

@@ -57,10 +57,18 @@ _SCALAR_FIELDS = (
     "action_delay_steps_range", "servo_obs_delay_steps", "imu_obs_delay_steps_range",
     "imu_accel_bias", "imu_gyro_bias", "mount_offset_rad", "imu_misalignment_deg",
     "quantize_joint_obs", "action_map",
+    "gait_clock_mode", "gait_clock_period_s", "gait_clock_stand_threshold",
     "standing_envs_start", "standing_envs_end", "standing_envs_ramp_steps",
     "action_rate_weight_start", "action_rate_weight_end", "action_rate_ramp_steps",
-    "swing_min_clearance", "swing_max_clearance",
+    "swing_min_clearance", "swing_max_clearance", "swing_max_time_s", "contact_height_thresh_m",
+    "contact_height_mode", "imitation_foot_agg",
+    "track_lin_std_rel", "track_lin_std_min", "track_ang_std_rel", "track_ang_std_min", "track_lin_target",
+    "feet_air_time_mode", "feet_air_time_min_s", "feet_air_time_max_s",
     "com_centering_std", "com_foot_margin",
+    "foot_separation_mode", "foot_sep_target_m", "foot_sep_tol_m", "foot_sep_scale_m",
+    "foot_sole_offset_m", "undesired_contacts_sat_n", "undesired_contacts_thresh_n",
+    "leg_contact_thresh_n", "leg_contact_sat_n",
+    "foot_sole_half_extents_m", "foot_proximity_margin_m", "foot_overlap_termination_s",
     "reward_scale",
 )
 
@@ -119,6 +127,7 @@ def apply_env_config(env_cfg, env_conf, *, training: bool) -> None:
                          "a per-robot constant applied to the command path as well as the "
                          "observation -- see BipedEnv.__init__")
 
+    _apply_action_home(env_cfg, env_conf)
     _apply_animation(env_cfg, env_conf)
     _apply_reference(env_cfg, env_conf, training=training)
     _apply_commands(env_cfg, env_conf)
@@ -136,6 +145,51 @@ def apply_env_config(env_cfg, env_conf, *, training: bool) -> None:
                 env_cfg.events[key].params.update(val["params"])
             if "interval_range_s" in val:
                 env_cfg.events[key].interval_range_s = tuple(val["interval_range_s"])
+
+
+def _apply_action_home(env_cfg, env_conf) -> None:
+    """action_map: residual -> home pose / scales / spawn height.
+
+    The home becomes the articulation's init_state joint_pos (so default_joint_pos, the reset
+    pose, joint_pos_rel and every deviation reward follow it) and the base spawns at
+    spawn_height_m. Nothing happens for centered/absolute unless spawn_height_m is given."""
+    from utils.residual_action import (JOINT_TYPES, RESIDUAL_SPAWN_HEIGHT_M, check_residual_map,
+                                       expand_by_type, home_rad, scale_rad)
+    action_map = getattr(env_conf, "action_map", None) or "absolute"
+    home_deg = _as_dict(getattr(env_conf, "action_home_deg", None))
+    scale = _as_dict(getattr(env_conf, "action_scale_rad", None))
+    height = getattr(env_conf, "spawn_height_m", None)
+    if action_map != "residual":
+        if home_deg or scale:
+            raise ValueError("env_config.action_home_deg / action_scale_rad only apply to "
+                             "action_map: residual")
+    else:
+        if not home_deg or not scale:
+            raise ValueError("action_map: residual needs env_config.action_home_deg and "
+                             "action_scale_rad (dicts keyed by joint type)")
+        home, sc = home_rad(home_deg), scale_rad(scale)
+        lim = env_cfg.joint_limits
+        check_residual_map(home, sc, [x[0] for x in lim], [x[1] for x in lim],
+                           getattr(env_cfg, "mirror_joint_perm", None),
+                           getattr(env_cfg, "mirror_joint_signs", None))
+        env_cfg.action_home_deg = {k: float(v) for k, v in home_deg.items()}
+        env_cfg.action_scale_rad = {k: float(v) for k, v in scale.items()}
+        # Same regex keys as the asset's init_state ("l_knee.*", ...), one per leg and type.
+        joint_pos = {}
+        for t, deg in zip(JOINT_TYPES, expand_by_type(home_deg, "action_home_deg")[::2]):
+            for side in ("l", "r"):
+                joint_pos[f"{side}_{t}.*"] = math.radians(deg)
+        robot = env_cfg.scene.robot
+        env_cfg.scene.robot = robot.replace(
+            init_state=robot.init_state.replace(joint_pos=joint_pos))
+        if height is None:
+            height = RESIDUAL_SPAWN_HEIGHT_M
+    if height is not None:
+        env_cfg.spawn_height_m = float(height)
+        env_cfg.target_base_height = float(height)       # base_height_l2 target follows the spawn
+        robot = env_cfg.scene.robot
+        env_cfg.scene.robot = robot.replace(
+            init_state=robot.init_state.replace(pos=(0.0, 0.0, float(height))))
 
 
 def _apply_animation(env_cfg, env_conf) -> None:
@@ -248,7 +302,7 @@ def describe(env_cfg) -> dict[str, Any]:
     bv = env_cfg.commands["base_velocity"]
     out = {k: bv.get(k) for k in sorted(_COMMAND_KEYS - {"ranges"})}
     out["ranges"] = dict(bv.get("ranges", {}))
-    for field in ("action_map", "mount_offset_rad", "imu_misalignment_deg", "servo_obs_delay_steps",
+    for field in ("action_map", "action_home_deg", "action_scale_rad", "spawn_height_m", "mount_offset_rad", "imu_misalignment_deg", "servo_obs_delay_steps",
                   "imu_obs_delay_steps_range", "action_delay_steps_range", "quantize_joint_obs",
                   "enable_perturbations", "enable_physics_randomization"):
         out[field] = getattr(env_cfg, field, None)

@@ -120,9 +120,9 @@ train:
       imitation_ang_vel: 0.2
       imitation_joint_vel: 0.1
 
-    # Gait-table imitation. With a table the gait clock is fixed-period (the table's) and holds
-    # while |cmd| < stand_threshold; the deploy runtime must do the same (export_onnx writes
-    # gait_clock into deploy_config.json). Bake: python -m gait_studio.bake in robot_motion_reference/.
+    # Gait-table imitation. With a table the gait clock runs at the table's rate (v1: one period;
+    # v2: freq(cmd), trilinear in the command) and holds while |cmd| < stand_threshold; the deploy
+    # runtime must do the same (export_onnx writes gait_clock into deploy_config.json; v2 = bundle v5). Bake: python -m gait_studio.bake in robot_motion_reference/.
     # RSI starts rsi_prob of resets mid-gait on the table (training only; play starts from default).
     reference:
       npz_path: robot_motion_reference/processed/gait_table.npz

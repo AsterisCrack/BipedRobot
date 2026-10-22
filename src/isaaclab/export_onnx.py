@@ -35,6 +35,13 @@ normalizers in series:
 
 Both are non-identity. Applying only one produces a policy that looks plausible and
 walks straight into the floor.
+
+EQUIVARIANT ACTOR (train.equivariant_actor)
+-------------------------------------------
+A checkpoint trained with the mirror-equivariant actor stores the plain actor as ``actor.net.*`` plus
+the mirror tables as ``actor.mirror_*`` buffers. The exported graph then contains the symmetrisation
+tanh(1/2 (f(s) + M_a f(M_s s))) (Gather + Mul + Add), so the bundle format and the Jetson runtime are
+unchanged: it still maps obs [1,250] -> action [1,12].
 """
 
 from __future__ import annotations
@@ -74,7 +81,7 @@ OBS_LAYOUT = {
     "imu_ang_vel_b": [3, 6],       # body-frame gyro, rad/s
     "projected_gravity_b": [6, 9], # UNIT gravity vector in body frame
     "commands": [9, 12],           # [v_x, v_y, w_z]
-    "joint_pos_rel": [12, 24],     # joint_pos - default_joint_pos (defaults are all 0)
+    "joint_pos_rel": [12, 24],     # joint_pos - default_joint_pos (0 except action_map residual: the home pose)
     "joint_vel": [24, 36],         # rad/s
     "previous_actions": [36, 48],  # last clipped action, [-1, 1]
     "gait_phase": [48, 50],        # [sin(phi), cos(phi)]
@@ -186,40 +193,84 @@ class DeterministicActor(nn.Module):
         self.net = nn.Sequential(*layers)
         self.mean_layer = nn.Linear(hidden_sizes[-1], act_dim)
 
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+    def pre_tanh(self, obs: torch.Tensor) -> torch.Tensor:
         x = (obs - self.norm_mean) / self.norm_std
-        return torch.tanh(self.mean_layer(self.net(x)))
+        return self.mean_layer(self.net(x))
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.pre_tanh(obs))
 
 
-def build_actor_from_state_dict(sd: dict) -> tuple[DeterministicActor, int, int, list[int]]:
+class EquivariantDeterministicActor(nn.Module):
+    """Deterministic path of torch_rl_algorithms' EquivariantActor (train.equivariant_actor):
+
+        tanh( 1/2 ( f(s) + M_a f(M_s s) ) )        f = pre-tanh mean of the plain actor
+
+    The mirror tables are buffers (obs index/sign over the full history stack, action index/sign), so the
+    symmetrisation is part of the ONNX graph (Gather + Mul + Add); the Jetson runtime is unchanged. The
+    std head is not needed on the deterministic path.
+    """
+
+    def __init__(self, base: DeterministicActor, obs_perm, obs_sign, act_perm, act_sign):
+        super().__init__()
+        self.base = base
+        self.register_buffer("obs_perm", torch.as_tensor(obs_perm, dtype=torch.long).clone())
+        self.register_buffer("obs_sign", torch.as_tensor(obs_sign, dtype=torch.float32).clone())
+        self.register_buffer("act_perm", torch.as_tensor(act_perm, dtype=torch.long).clone())
+        self.register_buffer("act_sign", torch.as_tensor(act_sign, dtype=torch.float32).clone())
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        mirrored = obs.index_select(-1, self.obs_perm) * self.obs_sign
+        mu_m = self.base.pre_tanh(mirrored)
+        mu_m = mu_m.index_select(-1, self.act_perm) * self.act_sign
+        return torch.tanh(0.5 * (self.base.pre_tanh(obs) + mu_m))
+
+
+def build_actor_from_state_dict(sd: dict) -> tuple[nn.Module, int, int, list[int]]:
     """Rebuild the actor using only tensor shapes from the checkpoint.
 
     Deriving dims from the config is what broke the old exporter (it assumed a
     52-dim proprio frame). The checkpoint is authoritative.
+
+    A checkpoint trained with train.equivariant_actor stores the plain actor under `actor.net.*` plus the
+    mirror tables as `actor.mirror_*` buffers; that case returns an EquivariantDeterministicActor.
     """
-    # Torso Linears live at actor.torso.net.{0,2,4}.weight (odd indices are ELU).
+    equivariant = "actor.mirror_obs_perm" in sd
+    pfx = "actor.net." if equivariant else "actor."
+    # Torso Linears live at <pfx>torso.net.{0,2,4}.weight (odd indices are ELU).
     linear_ids = sorted(
-        int(k.split(".")[3])
+        int(k.split(".")[len(pfx.split(".")) + 1])
         for k in sd
-        if k.startswith("actor.torso.net.") and k.endswith(".weight")
+        if k.startswith(pfx + "torso.net.") and k.endswith(".weight")
     )
     if not linear_ids:
-        raise KeyError("no actor.torso.net.*.weight tensors in checkpoint")
+        raise KeyError(f"no {pfx}torso.net.*.weight tensors in checkpoint")
 
-    hidden = [int(sd[f"actor.torso.net.{i}.weight"].shape[0]) for i in linear_ids]
-    in_dim = int(sd[f"actor.torso.net.{linear_ids[0]}.weight"].shape[1])
-    act_dim = int(sd["actor.mean_layer.0.weight"].shape[0])
+    hidden = [int(sd[f"{pfx}torso.net.{i}.weight"].shape[0]) for i in linear_ids]
+    in_dim = int(sd[f"{pfx}torso.net.{linear_ids[0]}.weight"].shape[1])
+    act_dim = int(sd[f"{pfx}mean_layer.0.weight"].shape[0])
 
-    model = DeterministicActor(hidden, in_dim, act_dim)
+    base = DeterministicActor(hidden, in_dim, act_dim)
 
     with torch.no_grad():
-        model.norm_mean.copy_(sd["actor.torso.observation_normalizer._mean"].flatten())
-        model.norm_std.copy_(sd["actor.torso.observation_normalizer._std"].flatten())
+        base.norm_mean.copy_(sd[f"{pfx}torso.observation_normalizer._mean"].flatten())
+        base.norm_std.copy_(sd[f"{pfx}torso.observation_normalizer._std"].flatten())
         for dst, src in enumerate(linear_ids):
-            model.net[dst * 2].weight.copy_(sd[f"actor.torso.net.{src}.weight"])
-            model.net[dst * 2].bias.copy_(sd[f"actor.torso.net.{src}.bias"])
-        model.mean_layer.weight.copy_(sd["actor.mean_layer.0.weight"])
-        model.mean_layer.bias.copy_(sd["actor.mean_layer.0.bias"])
+            base.net[dst * 2].weight.copy_(sd[f"{pfx}torso.net.{src}.weight"])
+            base.net[dst * 2].bias.copy_(sd[f"{pfx}torso.net.{src}.bias"])
+        base.mean_layer.weight.copy_(sd[f"{pfx}mean_layer.0.weight"])
+        base.mean_layer.bias.copy_(sd[f"{pfx}mean_layer.0.bias"])
+
+    model: nn.Module = base
+    if equivariant:
+        tables = [sd[f"actor.{k}"].cpu() for k in ("mirror_obs_perm", "mirror_obs_sign", "mirror_act_perm", "mirror_act_sign")]
+        if tables[0].numel() != in_dim or tables[2].numel() != act_dim:
+            raise ValueError(f"mirror tables have obs/action length {tables[0].numel()}/{tables[2].numel()}, "
+                             f"actor is {in_dim} -> {act_dim}")
+        for name, (perm, sign) in (("observation", tables[0:2]), ("action", tables[2:4])):
+            if not (torch.equal(perm[perm], torch.arange(perm.numel())) and torch.equal(sign * sign[perm], torch.ones_like(sign))):
+                raise ValueError(f"{name} mirror table in the checkpoint is not an involution")
+        model = EquivariantDeterministicActor(base, *tables)
 
     model.eval()
     return model, in_dim, act_dim, hidden
@@ -295,10 +346,26 @@ def _load_policy_contract(ckpt_dir: str, explicit_cfg: str | None, explicit_map:
                 f"no config.yaml beside the checkpoint ({ckpt_dir}); pass --action_map "
                 f"absolute|centered explicitly. Guessing would silently mis-map every action.")
         found["action_map"] = "absolute"    # runs from before the key existed
-    if found["action_map"] not in ("absolute", "centered"):
+    if found["action_map"] not in ("absolute", "centered", "residual"):
         raise RuntimeError(f"unknown action_map {found['action_map']!r}")
 
     contract = {"action_map": found["action_map"], "actuator": None}
+    if found["action_map"] == "residual":
+        # Home pose + per-type scales the run TRAINED with (never the repo's current config).
+        if not paths:
+            raise RuntimeError("action_map residual needs the run's config.yaml for action_home_deg / "
+                               "action_scale_rad; none found beside the checkpoint")
+        if _PROJECT_ROOT not in sys.path:
+            sys.path.insert(0, _PROJECT_ROOT)
+        from utils.residual_action import check_residual_map, home_rad, scale_rad
+        home_deg, scale = _scan_dict(paths[0], "action_home_deg"), _scan_dict(paths[0], "action_scale_rad")
+        if not home_deg or not scale:
+            raise RuntimeError(f"{paths[0]}: action_map residual but action_home_deg / action_scale_rad missing")
+        home, sc = home_rad(home_deg), scale_rad(scale)
+        robot_py = os.path.join(_PROJECT_ROOT, "envs/assets/robotV2/biped_robot.py")
+        limits = np.radians(np.asarray(_literal_from_module(robot_py, "_JOINT_LIMITS_DEG"), dtype=np.float64))
+        check_residual_map(home, sc, limits[:, 0], limits[:, 1])
+        contract["residual"] = {"home_rad": [float(x) for x in home], "scale_rad": [float(x) for x in sc]}
     if "params_file" in found:
         pf = found["params_file"]
         full = pf if os.path.isabs(pf) else os.path.join(_PROJECT_ROOT, pf)
@@ -339,6 +406,31 @@ def _scan_block(path: str, block: str) -> dict:
     return yaml.safe_load(textwrap.dedent("\n".join(body))) or {}
 
 
+def _scan_dict(path: str, key: str) -> dict:
+    """A dict-valued key of the run's config.yaml, block style (`key:` + indented lines) or
+    inline flow style (`key: {a: 1}`)."""
+    import yaml
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            s = raw.split("#", 1)[0].strip()
+            if s.startswith(key + ":") and s[len(key) + 1:].strip():
+                return yaml.safe_load(s[len(key) + 1:]) or {}
+    return _scan_block(path, key)
+
+
+def _format_version(contract: dict, gait_clock: dict) -> int:
+    """v5 = cadence-grid gait clock (table v2: the clock rate depends on the command); a runtime
+    that predates it would run the clock at one rate, so it must refuse v5. v5 may also carry
+    the residual map. v4 = residual action map (home pose in default_joint_pos +
+    action_scale_rad); a runtime that predates it would treat the action as centered/absolute,
+    so it must refuse v4. Otherwise unchanged: v3 for a fixed-period gait clock, else v2."""
+    if gait_clock["mode"] == "cadence_grid":
+        return 5
+    if contract["action_map"] == "residual":
+        return 4
+    return 3 if gait_clock["mode"] == "fixed_period" else 2
+
+
 def _run_config(ckpt_dir: str, explicit_cfg: str | None) -> str | None:
     """The config the checkpoint was trained with. Never the repo's current config.yaml."""
     for p in (explicit_cfg, os.path.join(ckpt_dir, "config.yaml")):
@@ -347,13 +439,33 @@ def _run_config(ckpt_dir: str, explicit_cfg: str | None) -> str | None:
     return None
 
 
+def _scan_scalar(path: str, key: str):
+    """Value of the first `<key>: value` line in a run's config.yaml (None if absent). Line-based
+    for the same reason as _scan_block: the whole file does not parse under safe_load."""
+    import re
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            m = re.match(rf"^\s+{re.escape(key)}:\s*([^\s#]+)", raw)
+            if m:
+                return m.group(1).strip("'\"")
+    return None
+
+
 def _load_gait_clock(ckpt_dir: str, explicit_cfg: str | None, ckpt_path: str, speed_freq: float) -> dict:
-    """Gait clock the policy was trained with. With a gait table the clock is fixed-period and
-    holds while standing; a runtime that advances it speed-proportionally would feed the policy a
-    phase it never saw."""
+    """Gait clock the policy was trained with. With a gait table the clock holds while standing
+    and runs at the table's rate: one period (v1 tables, or a v2 table with a constant cadence)
+    or the v2 per-command freq grid (cadence_grid, trilinear in the command, clamped to the
+    grid). A runtime that advances it any other way would feed the policy a phase it never saw."""
     cfg = _run_config(ckpt_dir, explicit_cfg)
     ref = _scan_block(cfg, "reference") if cfg else {}
     if not ref.get("npz_path"):
+        # No table: env_config.gait_clock_mode picks the clock (absent in older runs = speed-proportional).
+        if cfg and _scan_scalar(cfg, "gait_clock_mode") == "fixed_period":
+            period = float(_scan_scalar(cfg, "gait_clock_period_s") or 0.7)
+            thr = float(_scan_scalar(cfg, "gait_clock_stand_threshold") or 0.05)
+            if not (0.2 < period < 5.0):
+                raise RuntimeError(f"gait_clock_period_s {period} s is outside the 0.2-5 s the Jetson accepts")
+            return {"mode": "fixed_period", "period": period, "stand_threshold": thr}
         return {"mode": "speed_proportional", "freq": speed_freq}
     table = ref["npz_path"]
     full = table if os.path.isabs(table) else os.path.join(_PROJECT_ROOT, table)
@@ -363,12 +475,24 @@ def _load_gait_clock(ckpt_dir: str, explicit_cfg: str | None, ckpt_path: str, sp
     z = np.load(full, allow_pickle=False)
     if os.path.getmtime(full) > os.path.getmtime(ckpt_path):
         print(f"[export] WARNING: {table} was re-baked after this checkpoint was written; the exported "
-              f"period ({float(z['period']):.3f} s) may differ from the one the policy trained on",
-              file=sys.stderr)
-    return {"mode": "fixed_period", "period": float(z["period"]),
-            "stand_threshold": float(ref.get("stand_threshold", 0.05)),
-            "table": table, "style_digest": str(z["style_digest"]),
-            "phase_convention": str(z["phase_convention"])}
+              f"clock may differ from the one the policy trained on", file=sys.stderr)
+    common = {"stand_threshold": float(ref.get("stand_threshold", 0.05)),
+              "table": table, "style_digest": str(z["style_digest"]),
+              "phase_convention": str(z["phase_convention"])}
+    freq = np.asarray(z["freq"], dtype=np.float64) if "freq" in z else None
+    if freq is None or np.ptp(freq) < 1e-9:
+        period = float(z["period"]) if freq is None else 1.0 / float(freq.flat[0])
+        return {"mode": "fixed_period", "period": period, **common}
+    if not (0.2 < freq.min() and freq.max() < 5.0):
+        raise RuntimeError(f"gait table {table}: clock frequency {freq.min():.3f}-{freq.max():.3f} Hz is outside "
+                           f"the 0.2-5 Hz the Jetson accepts")
+    return {"mode": "cadence_grid",
+            "grid_vx": [float(v) for v in z["grid_vx"]],
+            "grid_vy": [float(v) for v in z["grid_vy"]],
+            "grid_wz": [float(v) for v in z["grid_wz"]],
+            "freq": freq.round(6).tolist(),        # [nvx][nvy][nwz] cycles/s
+            "period": float(z["period"]),          # zero-command cycle, display only
+            **common}
 
 
 _LEGACY_COMMAND_RANGES = {"lin_vel_x": [-0.3, 0.5], "lin_vel_y": [-0.3, 0.3], "ang_vel_z": [-0.3, 0.3]}
@@ -397,7 +521,7 @@ def main() -> int:
     p.add_argument("--config_path", type=str, default=None,
                    help="Override config.yaml used for history_size.")
     p.add_argument("--opset", type=int, default=17)
-    p.add_argument("--action_map", choices=["absolute", "centered"], default=None,
+    p.add_argument("--action_map", choices=["absolute", "centered", "residual"], default=None,
                    help="Only needed when the checkpoint's run config.yaml is missing.")
     args = p.parse_args()
 
@@ -437,7 +561,8 @@ def main() -> int:
         return 1
 
     model, in_dim, act_dim, hidden = build_actor_from_state_dict(sd)
-    print(f"[export] actor: {in_dim} -> {hidden} -> {act_dim}")
+    equivariant = isinstance(model, EquivariantDeterministicActor)
+    print(f"[export] actor: {in_dim} -> {hidden} -> {act_dim}" + ("  (mirror-equivariant: symmetrisation baked into the graph)" if equivariant else ""))
 
     env = _gather_env_constants()
     history_size = _load_history_size(ckpt_dir, args.config_path)
@@ -537,7 +662,8 @@ def main() -> int:
         # v3 = a fixed-period gait_clock (table-trained policy). A runtime that only knows
         # gait_clock_freq would clock the policy wrongly, so it must refuse v3 as well. Bundles
         # without a table stay v2.
-        "format_version": 3 if gait_clock["mode"] == "fixed_period" else 2,
+        # v4 = residual action map, v5 = cadence-grid gait clock (see _format_version).
+        "format_version": _format_version(contract, gait_clock),
         "action_map": contract["action_map"],
         "actuator": contract["actuator"],
         "obs_dim": in_dim,
@@ -549,7 +675,11 @@ def main() -> int:
         "joint_names": JOINT_NAMES,
         "joint_limits_min": env["joint_limits_min"],
         "joint_limits_max": env["joint_limits_max"],
-        "default_joint_pos": [0.0] * act_dim,  # every V2 default is 0.0
+        # Every V2 default is 0.0 except the residual map's home pose (rad, policy order).
+        "default_joint_pos": (contract["residual"]["home_rad"] if contract["action_map"] == "residual"
+                              else [0.0] * act_dim),
+        **({"action_scale_rad": contract["residual"]["scale_rad"]}
+           if contract["action_map"] == "residual" else {}),
         "obs_mean": obs_mean.tolist(),
         "obs_var": obs_var.tolist(),
         "obs_epsilon": 1e-4,
@@ -558,7 +688,7 @@ def main() -> int:
         "step_dt": step_dt,
         "control_hz": round(1.0 / step_dt),
         "gait_clock": gait_clock,
-        "gait_clock_freq": env["gait_clock_freq"],   # legacy runtimes; ignored when gait_clock.mode is fixed_period
+        "gait_clock_freq": env["gait_clock_freq"],   # legacy runtimes; ignored unless gait_clock.mode is speed_proportional
         "command_ranges": command_ranges,
         "tilt_fault_rad": 0.784,  # matches biped_env._tilt_exceeded
         "notes": {
@@ -566,7 +696,10 @@ def main() -> int:
                           "stage 2 baked into policy.onnx",
             "action": "tanh already applied in-graph; clip to [-1,1]. action_map 'absolute': "
                       "target = min + (a+1)/2 * (max-min). 'centered': target = default + "
-                      "a * (max - default) for a >= 0, default + a * (default - min) for a < 0",
+                      "a * (max - default) for a >= 0, default + a * (default - min) for a < 0. "
+                      "'residual' (format 4): target = clip(default_joint_pos + action_scale_rad * a, "
+                      "min, max), default_joint_pos being the crouched home pose; joint_pos_rel = "
+                      "joint_pos - default_joint_pos, and arming ramps to that pose",
             "ema": "apply action_filter_applications_per_step times per control step",
         },
     }
@@ -581,6 +714,7 @@ def main() -> int:
             "exported_utc": datetime.now(timezone.utc).isoformat(),
             "git_sha": _git_sha(),
             "hidden_sizes": hidden,
+            "equivariant_actor": equivariant,
         }, fh, indent=2)
 
     size_mb = os.path.getsize(onnx_path) / 1e6

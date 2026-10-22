@@ -162,7 +162,13 @@ def train():
         print(f"[Video] Recording to {video_dir} every {args_cli.video_interval} steps, {args_cli.video_length} frames each.")
 
     # Wrap environment
-    wrapped_env = IsaacLabWrapper(env, config)
+    # With replay mirror augmentation on, make the stage-1 obs statistics mirror-symmetric (see
+    # BaseIsaacLabWrapper). The wrapper reaches BipedEnv.mirror_obs through env.unwrapped, so the
+    # --video RecordVideo wrapper is fine. play/export/probe paths never pass this (stats frozen).
+    wrapped_env = IsaacLabWrapper(
+        env, config,
+        symmetric_obs_stats=bool(getattr(config.train, "symmetry_augmentation", False)),
+    )
 
     # Initialize Model (SAC)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

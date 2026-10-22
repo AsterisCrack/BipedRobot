@@ -125,3 +125,74 @@ def test_real_table_layout_and_symmetry():
         # reference(vx, -vy, -wz, phase + 0.5) is the left/right mirror of reference(vx, vy, wz, phase)
         b = torch.roll(a.flip(1).flip(2), -ref.n_frames // 2, dims=3)[..., perm]
         assert torch.allclose(a, b, atol=1e-5), f"{name} is not left/right symmetric"
+
+
+# ---------------------------------------------------------------------- cadence (table v2)
+GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "cadence_grid_golden.json")
+
+
+def _synthetic_v2(tmp_path, freq):
+    path = _synthetic(tmp_path)
+    z = dict(np.load(path))
+    z.update(version=np.int32(2), freq=freq.astype(np.float32))
+    del z["dt"]
+    out = tmp_path / "t2.npz"
+    np.savez(out, **z)
+    return str(out)
+
+
+def test_v1_table_has_constant_frequency(ref):
+    c = torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.1, 1.0], [-5.0, 5.0, 0.0]])
+    assert torch.allclose(ref.frequency(c), torch.full((3,), 1.0 / 0.8))
+    assert ref.version == 1
+
+
+def test_v2_frequency_is_trilinear_and_clamped(tmp_path):
+    vx, vy, wz = np.meshgrid(GRID_VX, GRID_VY, GRID_WZ, indexing="ij")
+    freq = 1.0 + 0.5 * vx + 0.2 * vy + 0.1 * wz      # trilinear interpolation reproduces it exactly
+    ref = GaitTableReference(_synthetic_v2(tmp_path, freq), DEV)
+    assert ref.version == 2 and ref.dt == pytest.approx(ref.period / ref.n_frames)
+    rng = np.random.default_rng(1)
+    cmds = rng.uniform([-0.2, -0.1, -1.0], [0.3, 0.1, 1.0], size=(64, 3))
+    got = ref.frequency(torch.as_tensor(cmds, dtype=torch.float32)).numpy()
+    assert np.allclose(got, 1.0 + 0.5 * cmds[:, 0] + 0.2 * cmds[:, 1] + 0.1 * cmds[:, 2], atol=1e-5)
+    far = ref.frequency(torch.tensor([[9.0, -9.0, 9.0]]))
+    edge = ref.frequency(torch.tensor([[0.3, -0.1, 1.0]]))
+    assert torch.allclose(far, edge)
+
+
+def test_cadence_golden_vectors():
+    """Isaac (torch) and numpy CadenceGrid agree with an independent interpolator and with the
+    golden file the Jetson runtime is tested against (BipedRobotJetson/tests/data)."""
+    import json
+
+    from scipy.interpolate import RegularGridInterpolator
+    from utils.motion_reference import CadenceGrid
+
+    g = json.load(open(GOLDEN, encoding="utf-8"))
+    axes = [np.asarray(g[k]) for k in ("grid_vx", "grid_vy", "grid_wz")]
+    freq = np.asarray(g["freq"])
+    cmds = np.asarray(g["commands"])
+    clipped = np.column_stack([np.clip(cmds[:, i], a[0], a[-1]) for i, a in enumerate(axes)])
+    oracle = RegularGridInterpolator(axes, freq)(clipped)
+    assert np.allclose(oracle, g["expected"], atol=1e-9)
+
+    grid = CadenceGrid(*axes, freq)
+    assert np.allclose([grid.frequency(c) for c in cmds], g["expected"], atol=1e-9)
+
+    ref = GaitTableReference.__new__(GaitTableReference)
+    ref.device, ref.shape = DEV, freq.shape
+    ref.grid = [torch.as_tensor(a, dtype=torch.float32) for a in axes]
+    ref.freq = torch.as_tensor(freq, dtype=torch.float32).reshape(-1)
+    ref._offsets = torch.as_tensor([(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)])
+    got = ref.frequency(torch.as_tensor(cmds, dtype=torch.float32)).numpy()
+    assert np.allclose(got, g["expected"], atol=1e-5)
+
+
+@pytest.mark.skipif(not os.path.exists(REAL_TABLE), reason="baked table not present")
+def test_real_table_frequency_is_mirror_symmetric():
+    """The obs-mirror augmentation maps phase -> phase + 0.5 at (vx, -vy, -wz); that is only
+    exact if the clock runs at the same rate there."""
+    ref = GaitTableReference(REAL_TABLE, DEV)
+    f = ref.freq.reshape(ref.shape)
+    assert torch.allclose(f, f.flip(1).flip(2), atol=1e-6)

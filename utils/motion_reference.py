@@ -100,6 +100,54 @@ class MotionReference:
         return pos, vel
 
 
+class CadenceGrid:
+    """Gait clock frequency [cycles/s] as a function of the command, numpy (MuJoCo, export).
+
+    Table v2 cycles each have their own period (Gait Studio's cadence law), so the clock runs at
+    freq(cmd): trilinear in (vx, vy, wz), each axis clamped to the grid. The same rule as
+    ``GaitTableReference.frequency`` (Isaac) and the Jetson runtime's ``cadence_grid`` clock.
+    A v1 table has one period; ``from_npz`` turns it into a constant grid.
+    """
+
+    def __init__(self, grid_vx, grid_vy, grid_wz, freq) -> None:
+        self.axes = [np.asarray(a, dtype=np.float64) for a in (grid_vx, grid_vy, grid_wz)]
+        self.freq = np.asarray(freq, dtype=np.float64).reshape(tuple(len(a) for a in self.axes))
+
+    @classmethod
+    def from_npz(cls, z) -> "CadenceGrid":
+        axes = [np.asarray(z[k]) for k in ("grid_vx", "grid_vy", "grid_wz")]
+        if "freq" in z:
+            return cls(*axes, z["freq"])
+        return cls(*axes, np.full(tuple(len(a) for a in axes), 1.0 / float(z["period"])))
+
+    @staticmethod
+    def _locate(grid: np.ndarray, x: float) -> tuple[int, float]:
+        n = grid.size
+        if n == 1:
+            return 0, 0.0
+        x = min(max(float(x), float(grid[0])), float(grid[-1]))
+        i0 = int(np.clip(np.searchsorted(grid, x, side="right") - 1, 0, n - 2))
+        return i0, (x - float(grid[i0])) / float(grid[i0 + 1] - grid[i0])
+
+    def frequency(self, cmd) -> float:
+        idx = [self._locate(a, c) for a, c in zip(self.axes, cmd)]
+        out = 0.0
+        for di in (0, 1):
+            for dj in (0, 1):
+                for dk in (0, 1):
+                    w = 1.0
+                    cell = []
+                    for d, (i0, a), n in zip((di, dj, dk), idx, self.freq.shape):
+                        w *= a if d else 1.0 - a
+                        cell.append(min(i0 + d, n - 1))
+                    out += w * float(self.freq[tuple(cell)])
+        return out
+
+    @property
+    def constant(self) -> bool:
+        return bool(np.ptp(self.freq) < 1e-9)
+
+
 class GaitTableReference:
     """Command-conditioned gait table baked by Gait Studio (robot_motion_reference/gait_studio).
 
@@ -108,6 +156,10 @@ class GaitTableReference:
     (clamped to the grid) and linearly in phase (wrapping). Phase convention: phase 0 = right-foot
     touchdown, [0, 0.5) right stance. Table foot order is [left, right], joint order is the
     table's own: always go through ``bind_to_robot``.
+
+    The cycles are phase-normalised. In a v2 table each has its own period (cadence follows the
+    command, as in humans) and ``frequency`` gives the gait clock rate for a command, trilinear
+    like the table. A v1 table has a single ``period``.
     """
 
     def __init__(self, npz_path: str, device: torch.device, root_dir: str | None = None) -> None:
@@ -128,8 +180,15 @@ class GaitTableReference:
         self.stand = torch.as_tensor(z["stand"], dtype=torch.float32, device=device)
         self.grid = [torch.as_tensor(z[k], dtype=torch.float32, device=device)
                      for k in ("grid_vx", "grid_vy", "grid_wz")]
-        self.period = float(z["period"])
-        self.dt = float(z["dt"])
+        self.version = int(z["version"]) if "version" in z else 1
+        self.period = float(z["period"])     # v2: the zero-command cycle, for display only
+        if "freq" in z:
+            self.freq = torch.as_tensor(z["freq"], dtype=torch.float32, device=device).reshape(-1)
+        else:
+            self.freq = torch.full((int(np.prod(self.shape)),), 1.0 / self.period, device=device)
+        if self.freq.numel() != int(np.prod(self.shape)) or not bool((self.freq > 0).all()):
+            raise ValueError(f"gait table {path}: bad freq grid (shape {tuple(self.freq.shape)}, grid {self.shape})")
+        self.dt = float(z["dt"]) if "dt" in z else self.period / self.n_frames
         self.field_names = [str(s) for s in z["field_names"]]
         widths = [int(w) for w in z["field_widths"]]
         edges = np.concatenate([[0], np.cumsum(widths)])
@@ -159,11 +218,9 @@ class GaitTableReference:
         lo, hi = grid[i0], grid[i0 + 1]
         return i0, (x - lo) / (hi - lo)
 
-    def sample(self, commands: torch.Tensor, phase: torch.Tensor, standing: torch.Tensor) -> torch.Tensor:
-        """commands [N, 3] (vx, vy, wz), phase [N] in [0, 1), standing [N] bool -> [N, D]."""
+    def _corners(self, commands: torch.Tensor):
+        """The 8 trilinear corners of each command: [(cell index [N], weight [N])], clamped to the grid."""
         cmd = commands.to(device=self.device, dtype=torch.float32)
-        phase = phase.to(device=self.device, dtype=torch.float32)
-        n = cmd.shape[0]
         i0, wx = self._locate(self.grid[0], cmd[:, 0])
         j0, wy = self._locate(self.grid[1], cmd[:, 1])
         k0, wz = self._locate(self.grid[2], cmd[:, 2])
@@ -171,7 +228,24 @@ class GaitTableReference:
         w_hi = torch.stack([wx, wy, wz], dim=-1)                                   # [N, 3]
         nvx, nvy, nwz = self.shape
         top = torch.as_tensor([nvx - 1, nvy - 1, nwz - 1], device=self.device)
+        out = []
+        for off in self._offsets:                                                  # 8 corners
+            idx = torch.minimum(base + off, top)                                   # [N, 3]
+            w = torch.where(off.bool(), w_hi, 1.0 - w_hi).prod(dim=-1)             # [N]
+            out.append(((idx[:, 0] * nvy + idx[:, 1]) * nwz + idx[:, 2], w))
+        return out
 
+    def frequency(self, commands: torch.Tensor) -> torch.Tensor:
+        """Gait clock frequency [cycles/s] for commands [N, 3] -> [N]."""
+        out = torch.zeros(commands.shape[0], device=self.device)
+        for cell, w in self._corners(commands):
+            out += w * self.freq[cell]
+        return out
+
+    def sample(self, commands: torch.Tensor, phase: torch.Tensor, standing: torch.Tensor) -> torch.Tensor:
+        """commands [N, 3] (vx, vy, wz), phase [N] in [0, 1), standing [N] bool -> [N, D]."""
+        phase = phase.to(device=self.device, dtype=torch.float32)
+        n = commands.shape[0]
         pos = (phase % 1.0) * self.n_frames
         f_lo = torch.floor(pos)
         a = pos - f_lo
@@ -179,10 +253,7 @@ class GaitTableReference:
         f1 = (f0 + 1) % self.n_frames
 
         out = torch.zeros(n, self.dim, device=self.device)
-        for off in self._offsets:                                                  # 8 corners
-            idx = torch.minimum(base + off, top)                                   # [N, 3]
-            w = torch.where(off.bool(), w_hi, 1.0 - w_hi).prod(dim=-1)             # [N]
-            cell = (idx[:, 0] * nvy + idx[:, 1]) * nwz + idx[:, 2]
+        for cell, w in self._corners(commands):
             row0 = self.table[cell * self.n_frames + f0]
             row1 = self.table[cell * self.n_frames + f1]
             out += w.unsqueeze(-1) * (row0 * (1.0 - a).unsqueeze(-1) + row1 * a.unsqueeze(-1))

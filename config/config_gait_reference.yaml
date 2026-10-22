@@ -1,3 +1,33 @@
+# Gait-table imitation training: BipedRobotV2 + SAC + BAM servo model, residual action map.
+# Same settings as config/config.yaml (the newest non-reference config) PLUS the `reference:` block and
+# the imitation_* weights below. Synced with config.yaml on 2026-10-18 (residual map, relative tracking
+# kernels, posture terms, CAPS, delay / servo-gain DR). Differences kept on purpose are marked "REFERENCE:".
+#
+# Run (from BipedRobot/, Isaac Lab python). The default --task BipedRobot is the V1 robot:
+#   python src/isaaclab/train.py --task BipedRobotV2 --config_path config/config_gait_reference.yaml --headless
+#   (optional: --num_envs N, --checkpoint <path> to resume, --video; export_onnx.py takes the same --config_path)
+#   Bake the table first if it is missing or stale: cd robot_motion_reference && python -m gait_studio.bake
+#   Policies trained before the residual map / this config are incompatible (action map, obs, gait clock).
+#
+# What the table fixes (do not re-add it here): the gait clock (the TABLE's: a v1 table has one period, a v2 table
+# a per-command freq grid, cadence following the command as in humans; held below reference.stand_threshold;
+# gait_clock_* keys are ignored when a reference is set), foot clearance, stance width,
+# posture and contact timing. The imitation targets are ABSOLUTE joint angles from the table, so the residual
+# home below is the table's stand pose (a = 0 is the reference stand; max |a| over all 819 baked cells <= 0.85).
+#
+# Watch in TensorBoard:
+#   Reward_Terms/imitation_joint_pos, _foot_pos, _contact, _orientation, _lin_vel (should climb fast; RSI starts 80% of
+#     resets mid-gait), Diagnostics/swing_clearance_mm (table lifts 10-14 mm), Diagnostics/vel_err_moving_ms
+#   Diagnostics/foot_sole_sep_body_m (~0.09 standing, 0.05-0.16 walking; the band term only fires outside that)
+#   Reward_Terms/leg_contact_l2 (~0 at flat standing; small dips are table cells with |vy| >= 0.1 whose crossing
+#     steps touch the other ankle), Reward_Terms/foot_flat_l2 (~0: table stance tilt is < 3.3 deg)
+#   Diagnostics/foot_gap_mm and Diagnostics/foot_overlap_frac (E21; table gap 6-148 mm, stand 33; overlap_frac should fall to ~0,
+#     it was ~1.0 at command 0 in run gaitref_2026-10-22_07-18-30), Reward_Terms/foot_proximity
+#   Reward_Terms/action_rate_l2 and Curriculum/action_rate_weight (smoothness; CAPS is on)
+#   Curriculum/action_delay_max_steps, Curriculum/servo_kp_max, Curriculum/rel_standing_envs, Torque/frac_saturated
+#   Standing-still check: a "statue" in the stand pose scores 0.5-0.75 of the imitation budget and 1.8-2.7 of the 3.5
+#     tracking budget at cmd 0.05-0.2, so imitation_* stuck near 0.5-0.7 with vel_err_moving_ms high means it is not stepping.
+
 train:
   seed: 42
   steps: 500000
@@ -23,13 +53,27 @@ train:
   test_episodes: 2
   show_progress: true
   replace_checkpoint: true
+  # CAPS action-smoothness regulariser (torch_rl_algorithms SAC actor loss); schema default is off
+  caps_temporal_weight: 1.0
+  caps_spatial_weight: 1.0
+  caps_spatial_sigma: 0.1
+  # Explicit actor mirror loss: the gait was asymmetric (one leg lifts, the other drags); symmetry
+  # augmentation alone left the actor's mirror error at ~0.6x |a| at 49M steps. 0 = off.
+  # Now 0: equivariant_actor below makes the mirror error exactly 0, so the loss would be ~0 anyway.
+  symmetry_loss_weight: 0.0
+  # Exactly mirror-equivariant actor (loc/scale projected 1/2 (f(s) + M f(M s)), see
+  # torch_rl_algorithms/models/equivariant.py). Even with augmentation + the mirror loss the actor stayed
+  # ~22% non-equivariant and limped on the same leg from mirrored starts; projecting pi removed the limp.
+  # symmetry_augmentation stays on (the critic benefits). The mirror tables are saved in the checkpoint
+  # and baked into the ONNX export, so sim2real / policy_gate / Jetson need no change.
+  equivariant_actor: true
 
   env_config:
     reward_scale: 1.0
     reward_weights:
       # Primary locomotion
       track_lin_vel_xy_exp: 2.0
-      track_ang_vel_z_exp: 1.5          # was 0.5 — stronger yaw tracking for symmetric turns
+      track_ang_vel_z_exp: 2.0          # was 0.5 — stronger yaw tracking for symmetric turns
 
       # Stability
       # Softened -5.0 -> -2.0. This term was effectively dead until 2026-09-25 (it compared a
@@ -38,11 +82,13 @@ train:
       # time, which punishes the falls that walking attempts cause. Restore toward -5.0 once
       # walking is stable again.
       termination_penalty: -0.2
-      flat_orientation_l2: -2.0         # was -1.5 — stronger tilt penalty
+      flat_orientation_l2: -1         # was -1.5 — stronger tilt penalty
       lin_vel_z_l2: -2
       ang_vel_xy_l2: -0.05             # was -0.15 — damp pitch/roll oscillation (flowy body)
       angular_momentum: -0.02
-      upright: 0.5
+      # upright 0.5 -> 0.2: it was ~95% saturated (raw episode logs) -- a near-constant alive bonus rather than a shaping
+      # term; imitation_orientation and flat_orientation_l2 also cover tilt.
+      upright: 0.2
 
       # Smoothness
       # action_rate_l2 is now SCHEDULED (action_rate_weight_* below): this value is only the
@@ -68,12 +114,13 @@ train:
       # must exceed ~0.5 just to break even; 1.5 gives a 3x margin.
       # (The old "was encouraging unnecessary foot lifting" note predates the 4 cm cap.)
       swing_foot_height: 0.0
-      feet_slide: -0.1                 # flat foot contact (keep)
+      feet_slide: -0.7                 # flat foot contact (keep)
       step_length: 0.0
       knee_bend_touchdown: 0.0
 
       # Contact & joint quality
-      undesired_contacts: -0.5
+      # Saturates at undesired_contacts_sat_n = 5 N below (was 20 N, with -1.5): -1.0 as in config.yaml.
+      undesired_contacts: -1.0
       joint_deviation_hip: 0.0
       joint_deviation_hip_pitch: 0.0   # was -0.05 — slight increase for lean prevention
       joint_deviation_ankle_roll: 0.0
@@ -86,11 +133,10 @@ train:
       # dist in metres, which was flat across the whole robot (5 cm off still scored 0.9975),
       # so nothing resisted leaning ahead of the feet. Length scale is com_centering_std below.
       com_support_centering: 0.0
-      ankle_torques_l2: -0.003
+      ankle_torques_l2: 0
       # dof_pos_l2 is L2 (0.5*theta^2) vs joint_deviation_knee's L1 (0.15*|theta|): they match
       # at ~0.3 rad but L2 dominates at the 0.5-0.8 rad bend we want (0.32 vs 0.12 at 0.8).
-      # Reduced rather than zeroed: action 0 maps to the joint-limit midpoint (knee -57deg),
-      # so some joint-space anchor is still wanted.
+      # (Zeroed in this file: the imitation terms anchor the pose.)
       dof_acc_l2: -1.0e-06
       # Cut -0.5 -> -0.05. This pulls all 12 joints toward their defaults, and every V2 default
       # is 0.0 -- i.e. a fully straight, zero-abduction leg. Direct evidence it dominates:
@@ -100,8 +146,20 @@ train:
       dof_pos_l2: 0.0
       # base_height_l2: penalise crouching (<0.29m) and tiptoe (>0.29m)
       base_height_l2: 0 #-5.0
-      # foot_separation: V2 natural spacing is only 4.3 cm; require 7 cm minimum
-      foot_separation: 0.0
+      # foot_separation: two-sided band on the SOLE-CENTRE spacing (foot_separation_mode sole_band below). Weak
+      # backstop only: the baked gait keeps 0.05-0.16 m (stand 0.090), so the band is widened below.
+      foot_separation: -0.1
+      # roll tilt of each foot in contact (sin^2 of the sole normal's lateral component). Table stance tilt < 3.3 deg.
+      foot_flat_l2: 0   # penalty: must be <= 0; +1.0 rewarded edge standing in run gaitref_2026-10-19_20-20-42
+      # legs bracing on each other: non-foot leg links (+ feet on flat terrain), saturates at 5 N
+      leg_contact_l2: -0.5
+      # E19: non-saturating anchor to the table's stand-frame joints, only while the command is ~0 (run gaitref_2026-10-21_07-17-11 braced: knees on the stop, legs pressing, every other stand term flat)
+      stand_pose_l2: -1.0
+      # E21: terrain-independent foot-to-foot gap (horizontal-plane gap of the two sole rectangles, penalty
+      # clamp((margin - gap)/margin, 0, 2)^2, margin below). Run gaitref_2026-10-22_07-18-30 pressed its feet together in 100% of
+      # steps at command 0 (13.8 N, MuJoCo -1.2 mm; knees straightened, toes in, ankle pitched) because training uses
+      # use_rough_terrain: the contact sensor has no filter prims there, so undesired_contacts / leg_contact_l2 skip the feet.
+      foot_proximity: -2.0
       # action_l2 DISABLED: action=0 maps to tiptoe+crouch+lean due to asymmetric joint limits
       action_l2: 0.0
 
@@ -112,24 +170,43 @@ train:
       # Gait-table imitation (Gait Studio table, see env_config.reference below). The table now
       # provides foot clearance, stance width, posture and contact timing, so the hand-written
       # gait terms above are zeroed. Velocity tracking and every stability/smoothness term stay.
-      imitation_joint_pos: 1.5
-      imitation_foot_pos: 1.0
+      # E11 (2026-10-19): the real robot lifted its feet ~0.8 mm (Diagnostics/swing_clearance_mm) against the
+      # table's 10-14 mm, so feet slid. Two causes, both fixed here:
+      #  * foot height above the GROUND was never imitated (imitation_foot_pos compares foot origins in the base
+      #    frame, mean over 6 values, std 0.02: an 11 mm swing-height miss cost ~1% of it) -> new imitation_foot_height.
+      #  * a foot DRAGGED with < 1 N load counted as airborne (no height condition): it earned imitation_contact in the
+      #    reference swing and escaped feet_slide -> env_config.contact_height_thresh_m below.
+      # Budget: at 225M steps the imitation terms were 63% of the positive reward (sum 135 of ~215 per episode) vs
+      # track_lin_vel_xy_exp 37.7 + track_ang_vel_z_exp 18.4, so the imitation weights are cut (joint_pos 1.5 -> 0.6,
+      # foot_pos 1.0 -> 0.4, orientation 0.5 -> 0.2: it overlaps upright and flat_orientation_l2).
+      imitation_joint_pos: 0.6
+      imitation_foot_pos: 0.4
       imitation_contact: 0.5
-      imitation_orientation: 0.5
+      imitation_orientation: 0.2
       imitation_lin_vel: 0.3
       imitation_ang_vel: 0.2
       imitation_joint_vel: 0.1
+      # imitation_foot_height 0.5 -> 1.5: run gaitref_2026-10-20_09-32-16: raw clearance ~5 mm in the first few M steps, ~2 mm from ~7M, ~1.3 mm from 40M,
+      # dragged_foot_frac ~0.18 throughout. The wider std keeps the lift-vs-drag gap at ~0.21/step at weight 1.0, so 1.5 raises the
+      # total incentive to ~0.31/step; upright 0.5 -> 0.2 frees ~0.28/step of near-constant bonus.
+      imitation_foot_height: 1.5       # sole clearance vs the table's foot_height, std reference.std.foot_height (swing_foot_height stays 0)
 
-    # Gait-table imitation. With a table the gait clock is fixed-period (the table's) and holds
-    # while |cmd| < stand_threshold; the deploy runtime must do the same (export_onnx writes
-    # gait_clock into deploy_config.json). Bake: python -m gait_studio.bake in robot_motion_reference/.
+    # Gait-table imitation. With a table the gait clock runs at the table's rate (v1: one period;
+    # v2: freq(cmd), trilinear in the command) and holds while |cmd| < stand_threshold; the deploy
+    # runtime must do the same (export_onnx writes gait_clock into deploy_config.json; v2 = bundle v5). Bake: python -m gait_studio.bake in robot_motion_reference/.
     # RSI starts rsi_prob of resets mid-gait on the table (training only; play starts from default).
     reference:
       npz_path: robot_motion_reference/processed/gait_table.npz
       stand_threshold: 0.05
       rsi_prob: 0.8
       rsi_joint_noise: 0.05
-      std: {joint_pos: 0.15, joint_vel: 1.5, foot_pos: 0.02, orientation: 0.08, lin_vel: 0.1, ang_vel: 0.3}
+      # foot_height 0.010: per-foot kernel exp(-(dh/std)^2); 10 mm off -> 0.37, a 5 mm miss -> 0.78 per swing step.
+      # Averaged over the gait cycle a dragging policy still scores ~0.79 (about half the table frames are stance),
+      # so the lift-vs-drag gap is ~0.21 per unit weight (0.79 -> 1.0); the contact-height flag (contact_height_thresh_m) does the rest.
+      # foot_height 0.004 -> 0.010: at 4 mm the kernel exp(-(dh/std)^2) is ~0 for any lift below ~6 mm (1 mm vs a 10 mm target = 0.006,
+      # 3 mm = 0.047), so a dragging policy gets no gradient toward lifting; at 10 mm: 1 mm -> 0.44, 5 mm -> 0.78, 10 mm -> 1.0,
+      # over-lift 20 mm -> 0.37 (still discourages high steps).
+      std: {joint_pos: 0.15, joint_vel: 1.5, foot_pos: 0.02, orientation: 0.08, lin_vel: 0.1, ang_vel: 0.3, foot_height: 0.010}
 
     commands:
       base_velocity:
@@ -144,9 +221,9 @@ train:
         # ~2% of data, so it is otherwise never trained.
         rel_turn_in_place_envs: 0.15
         ranges:
-          lin_vel_x: [-0.2, 0.2]       # = bake grid (Gait Studio command_ranges)
-          lin_vel_y: [-0.15, 0.15]
-          ang_vel_z: [-1.2, 1.2]
+          lin_vel_x: [-0.3, 0.3]       # inside the v2 bake grid (+-0.3)
+          lin_vel_y: [-0.2, 0.2]     # inside the bake grid
+          ang_vel_z: [-1.5, 1.5]       # inside the bake grid
           heading: [-3.14159, 3.14159]
 
     # Per-channel observation noise std, in each channel's own units. The previous single
@@ -170,15 +247,18 @@ train:
       mean: 0.0
       std: 0.01
 
-    # Actuator delay. [1,3] was tested and measurably hurt; reference repo uses 0.
-    action_delay_steps_range: [0, 0]
+    # Actuator delay, in 50 Hz control steps, drawn per env at reset. Ramped 0 -> [0, 3] by the DR curriculum
+    # (curriculum_dr_events "action_delay"): full width from step 0 made walking too hard to discover
+    # (2026-10-12). Same as config.yaml.
+    action_delay_steps_range: [0, 3]
 
     # Sensor lag (observation side), in 50 Hz control steps.
     # Servo encoders report one step stale, same for every env.
     servo_obs_delay_steps: 1
-    # IMU (accel + gyro + projected gravity) lags 0-1 steps, drawn per-env at reset and held
+    # IMU (accel + gyro + projected gravity) lags 1-2 steps, drawn per-env at reset and held
     # for the episode, so the policy must be robust to an unknown but fixed lag.
-    imu_obs_delay_steps_range: [0, 1]
+    # [1, 2]: the BNO055 NDOF fusion output plus the I2C reader thread add ~10-25 ms, never 0.
+    imu_obs_delay_steps_range: [1, 2]
 
     # Per-episode CONSTANT sensor biases, drawn uniformly in +-range at each reset. These are
     # deliberately different from observation_noise_std: that resamples every step, so across
@@ -209,6 +289,10 @@ train:
     actuator:
       params_file: actuator/params/sts3215_12v/m6.json
       kp_fw: 32                     # firmware P register; must match the Jetson's config/robot.yaml
+      # Sim-only DR of the firmware P (per robot), ramped from 32 by the DR curriculum ("servo_stiffness"). The stall cap
+      # halves the model's small-signal stiffness (17 vs 37 N*m/rad uncapped), and the bench validated the uncapped fit,
+      # so the real servo is likely stiffer than the capped model. [32, 70] spans both. The robot still runs P = kp_fw.
+      kp_fw_range: [32, 70]
       vin_range: [11.1, 12.6]       # ASSUMED 3S pack -- set to the real battery's range.
                                     # The SysID bench measured 11.49 V at the servo.
       # 2026-10-10: widened from [0.9, 1.1]. The identified m6 model has a measured
@@ -240,12 +324,51 @@ train:
       impulse_cap: 2.94              # N*m cap on the re-engagement knock = the capped stall (clamped to it in bam_actuator)
 
     # ---- Action map and schedules (Target C) -------------------------------------------
-    # centered: a=0 is the standing pose, a=+-1 reach each joint limit. The legacy "absolute"
-    # map put a=0 at the limit-box midpoint (knee -57.5 deg). CHANGING THIS INVALIDATES EVERY
-    # EXISTING CHECKPOINT AND BUNDLE -- export_onnx records it, and the Jetson refuses a mismatch.
-    action_map: centered
+    # residual: target = clamp(home + scale*a, limits). CHANGING THE MAP INVALIDATES EVERY EXISTING CHECKPOINT AND
+    # BUNDLE -- export_onnx records it, and the Jetson refuses a mismatch. The home is also the reset pose,
+    # the joint_pos_rel origin and the (zeroed here) deviation-reward target.
+    # REFERENCE: unlike config.yaml (crouch -10/-26/-16), the home here is the baked table's STAND pose, rounded
+    # (v2 table stand, deg, L = R: hip_yaw 2.10, hip_roll -6.18, hip_pitch -17.72, knee -36.55, ankle_roll 6.53,
+    # ankle_pitch -18.71; stand base_height 0.2745 m). The imitation targets are absolute table angles, so a = 0 is the
+    # reference stand (|a_stand| < 0.002 with these values) and standing costs no stand_pose_l2 / joint_pos error at a = 0.
+    # Left/right share one value. Flat sole: hip_pitch - knee + ankle_pitch = -17.7 + 36.6 - 18.7 = 0.2 deg and
+    # hip_roll + ankle_roll = 0.3 deg.
+    # Scales (set by hand): hip_yaw 0.55, hip_roll 0.55, hip_pitch 0.95, knee 0.90, ankle_roll 0.60, ankle_pitch 0.45 rad.
+    # The training command ranges (commands.base_velocity.ranges above: vx +-0.3, vy +-0.2, wz +-1.5) are the WHOLE v2 bake
+    # grid, so the map must express every baked cell (16 x 12 x 16, both legs, table clamped to the joint limits). Max |a| over
+    # all of them: yaw 0.84, roll 0.89, hip_pitch 0.83, knee 0.81, ankle_roll 0.90, ankle_pitch 0.63 (no cell clips). With RSI's
+    # joint noise (reference.rsi_joint_noise, 0.05 rad, divided by the scale) added: 0.93 / 0.98 / 0.88 / 0.86 / 0.98 / 0.74, so
+    # RSI never needs a clamped action; tests/test_residual_action_map.py asserts max |a| + noise / scale < 1.0 per joint
+    # from these values. hip_roll and ankle_roll have the least headroom (0.02): re-baking a wider style needs larger scales there.
+    # ankle_pitch is a deliberate 0.45 floor (the table alone needs only 0.35): it keeps balance authority beyond the table.
+    # 0.1 of action = 2.6-5.4 deg. The lower ankle_pitch limit (-35 deg) and the knee upper limit (+5 deg) are exactly the
+    # table's min / max there, so those cells are expressible.
+    # CHANGING THE MAP INVALIDATES EVERY EXISTING CHECKPOINT AND BUNDLE (see above).
+    action_map: residual
+    action_home_deg:
+      hip_yaw: 2.1
+      hip_roll: -6.2
+      hip_pitch: -17.7
+      knee: -36.6
+      ankle_roll: 6.5
+      ankle_pitch: -18.7
+    action_scale_rad:
+      hip_yaw: 0.55
+      hip_roll: 0.55
+      hip_pitch: 0.95
+      knee: 0.90
+      ankle_roll: 0.60
+      ankle_pitch: 0.45
+    # Non-RSI resets (20%) and play spawn here: the home sole is flat, so the same ~5.4 mm foot clearance as the previous home
+    # (Isaac base z = this value; in MuJoCo the XML root sits 10 mm higher, so the same clearance reads 15.4 mm there).
+    # RSI resets take the base height from the table (stand 0.2745 + 0.005 = 0.2795), so the two agree to 0.5 mm.
+    # base_height_l2 (weight 0) would target this value.
+    spawn_height_m: 0.28
+    # Gait clock: with a reference it is the table's (its period or freq grid, held below reference.stand_threshold), so
+    # gait_clock_mode / gait_clock_period_s / gait_clock_stand_threshold are NOT set here (they would be ignored).
     # Ramps in common_step_counter units (control steps), the same unit as curriculum_dr_*.
-    standing_envs_start: 0.10      # gait table: the standing reference needs samples from step 0
+    # REFERENCE: 0.10 from step 0 (config.yaml starts at 0.02): the standing reference needs samples from the start.
+    standing_envs_start: 0.10
     # 0.25 -> 0.10. Standing is taught by the spawn mix (no stillness reward), but at 0.25
     # a quarter of every batch was commanded to hold still, which (a) costs that much
     # walking experience and (b) silently inflated track_lin_vel_xy_exp ~22%, since a
@@ -256,11 +379,9 @@ train:
     standing_envs_end: 0.10
     standing_envs_ramp_steps: 30000
     action_rate_weight_start: -0.01
-    # -0.3 -> -0.05. At -0.3 this was the largest single term in the budget (-18.2 weighted,
-    # vs the DC-motor run's -2.0) while swing_foot_height paid +0.06: the policy was paid far
-    # more to hold still than to lift a foot. The B_ar005 ablation set exactly this value and
-    # was the only one of four that improved the gait (episode score 1158 vs 699).
-    action_rate_weight_end: -0.05
+    # Same schedule as config.yaml (-0.01 -> -0.1; -0.3 stopped walking before). A perfect imitation of the table costs
+    # only ~0.004/step at -0.1 (mean action_rate_l2 0.04), so this does not fight the reference.
+    action_rate_weight_end: -0.1
     action_rate_ramp_steps: 30000
     # swing_foot_height pays clearance ABOVE the measured resting foot height (printed at startup)
     # Dead zone REMOVED 2026-10-03. It was 0.01 while the measured peak swing clearance was
@@ -269,8 +390,21 @@ train:
     # unloaded foot resting flat on the floor from earning reward, and the per-foot touchdown
     # datum (same date) already makes that structurally impossible -- a grounded foot reads
     # clearance 0 by construction. Keeping both was double protection that killed the signal.
+    # (swing_foot_height / feet_air_time weights are 0 here, so the swing_* keys are inactive; the table sets clearance.)
     swing_min_clearance: 0.0
     swing_max_clearance: 0.07
+    # Reward-side contact flag for imitation_contact and feet_slide: in contact if |F| > 1 N OR the foot is within 2 mm
+    # of its own last in-contact height. A foot dragged unloaded no longer counts as airborne. (The sensor, the
+    # clearance datum and all other terms stay force-based; Diagnostics/dragged_foot_frac shows the exploit shrinking.)
+    # contact_height_thresh_m 0.002 -> 0.004: a foot must clear 4 mm before it counts as airborne for imitation_contact and feet_slide.
+    contact_height_thresh_m: 0.006
+    # contact_height_thresh_m 0.004 -> 0.006 with contact_height_mode soft: contact score c = max(force_flag, 1 - clearance/6 mm)
+    # clamped to [0, 1] (a 3 mm lift counts half, 6 mm = airborne), used by imitation_contact (1 - |c - table|) and as the
+    # feet_slide weight. No cliff at the threshold. hard = the old binary flag.
+    contact_height_mode: soft
+    # imitation_foot_height / imitation_contact: min over the two feet (mean = old). With mean a limp (one foot lifted, one
+    # dragged) keeps half the reward; with min the limp-vs-symmetric gap doubles (0.21 -> 0.41 per step at weight 1.0).
+    imitation_foot_agg: min
     # com_support_centering now scores the distance the CoM lies OUTSIDE the support
     # POLYGON (0 when inside), not its distance from the support CENTRE. Measuring from the
     # centre taxed the weight transfer that begins every step: shifting onto one foot to
@@ -279,6 +413,37 @@ train:
     # form (isotropic 0.04, then anisotropic 0.12/0.04) left foot lift at ~6 mm both times.
     com_centering_std: 0.04
     com_foot_margin: 0.03           # foot half-extent; CoM over a planted foot reads 0
+    # Relative velocity-tracking kernels: std = clamp(rel*|cmd|, min). Standing still at |cmd| >= 0.1 earns ~0.13 of the
+    # max, half the commanded speed ~0.6. rel 0 = old fixed std (0.2 linear / 0.5 yaw). Same as config.yaml.
+    track_lin_std_rel: 0.7
+    track_lin_std_min: 0.07
+    # reference: the linear kernel is centred on the table's own base velocity at (command, phase) instead of the constant
+    # command (width unchanged). The table sways (lateral std ~0.065 m/s, mean = command), so against the command a PERFECT
+    # copy scores 0.38 at vx 0.1 (standing 0.13) and 0.28 at vx 0.05 (standing 0.60). Here: 1.0. command = old behaviour.
+    track_lin_target: reference
+    track_ang_std_rel: 0.7
+    track_ang_std_min: 0.1
+    # foot_separation: sole_band = two-sided band on the SOLE-CENTRE lateral separation, target +- tol, scale 0.02.
+    # REFERENCE: config.yaml uses 0.095 +- 0.025 (70..120 mm). The baked gait stands at 0.090 and keeps 0.088-0.092 for
+    # |vy| <= 0.05, but its lateral steps (|vy| >= 0.1) swing the sole centre out to 0.048-0.175 m, so the default band is
+    # violated in 43% of table frames (mean penalty 0.63, peak 7.7 x 0.1) and would pull the policy off the reference.
+    # 0.105 +- 0.055 = 50..160 mm leaves 0.019 mean (14% of frames, max 0.6): the narrow edge is where the table's own crossing
+    # steps start to touch the other ankle. This band is NOT a real guard against touching feet (39 mm sole spacing costs only 0.025/step): foot_flat_l2 guards edge
+    # standing and leg_contact_l2 guards ankle/shank/thigh bracing; with use_rough_terrain true the feet themselves are NOT covered by leg_contact_l2 (flat terrain: they are).
+    foot_separation_mode: sole_band
+    foot_sep_target_m: 0.105
+    foot_sep_tol_m: 0.055
+    # E21 foot_proximity: footprint half extents [x, y] (centred on foot_sole_offset_m; from the foot collision mesh, test-checked),
+    # and the gap below which the penalty starts. 6 mm = the largest whole mm below the gait table's footprint gap over the cells
+    # the command ranges above select (the whole 16x12x16 grid, 196,608 poses): min 6.4 mm (vx -0.3, vy -0.018, wz -1.3) /
+    # p1 11.4 / p5 17.1 mm (stand 32.8 mm), so the reference is never penalised. Narrower command ranges would allow a larger margin.
+    foot_sole_half_extents_m: [0.0450, 0.0186]
+    foot_proximity_margin_m: 0.006
+    # Optional termination: end the episode (as a fall, termination_penalty applies) after this many seconds of continuous
+    # footprint overlap (gap <= 0). 0 = off. 0.25 is the suggested value if the penalty alone does not stop the feet pressing together.
+    foot_overlap_termination_s: 0.0
+    # undesired_contacts saturates at this force (old: 20 N), so a 6 N lean costs 1.0 not 0.25
+    undesired_contacts_sat_n: 5.0
 
     # Domain randomization master switches. These MUST be set explicitly: the schema defaults
     # are false, and biped_env_cfg.__post_init__ now actually honours them (the gate used to be
@@ -290,10 +455,12 @@ train:
     # Curriculum — randomize_com and randomize_payload scale from 0→100% over dr_full_steps
     curriculum_enabled: true
     curriculum_dr_start_steps: 0        # start DR from step 0
-    curriculum_dr_full_steps:  40000    # reach full COM/payload DR at 40k steps
+    curriculum_dr_full_steps:  10000    # reach full COM/payload DR (and delay / servo gain) at 20k control steps
     curriculum_cmd_ramp_steps:  0       # full command range from the start
     curriculum_init_ramp_steps: 0       # full init range from the start
-    curriculum_dr_events: ["randomize_com", "randomize_payload"]
+    # "action_delay" and "servo_stiffness" are ramped in code (BipedEnv._dr_ramp): both at full width from step 0 made
+    # walking too hard to discover. They start at 0 delay / P = 32 and reach [0, 3] / kp_fw_range at curriculum_dr_full_steps.
+    curriculum_dr_events: ["randomize_com", "randomize_payload", "action_delay", "servo_stiffness"]
 
 model:
   actor_config:

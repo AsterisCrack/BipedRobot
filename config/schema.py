@@ -138,6 +138,18 @@ class EnvConfig(BaseModel):
     actuator: Optional[Dict[str, Any]] = None
     backlash: Optional[Dict[str, Any]] = None
     action_map: str = "absolute"
+    # action_map: residual -> target = clamp(home + scale*a, limits). Dicts keyed by joint type
+    # (hip_yaw, hip_roll, hip_pitch, knee, ankle_roll, ankle_pitch); l/r share a value.
+    action_home_deg: Optional[Dict[str, float]] = None
+    action_scale_rad: Optional[Dict[str, float]] = None
+    spawn_height_m: Optional[float] = None
+
+    # Gait clock without a gait table. speed_proportional: rate = gait_clock_base_freq * |v_xy|.
+    # fixed_period: constant rate 2*pi/gait_clock_period_s, held while |v_xy| and |wz| are both
+    # below gait_clock_stand_threshold. A gait table (reference) always uses its own period.
+    gait_clock_mode: str = "speed_proportional"
+    gait_clock_period_s: float = 0.7
+    gait_clock_stand_threshold: float = 0.05
 
     # Gait-table imitation (see utils/motion_reference.py GaitTableReference). None = off.
     reference: Optional[Dict[str, Any]] = None
@@ -152,8 +164,41 @@ class EnvConfig(BaseModel):
 
     swing_min_clearance: float = 0.01
     swing_max_clearance: float = 0.07
+    swing_max_time_s: float = 0.5
+    # Reward-side contact flag: |F| > 1 N OR foot clearance < this [m] (imitation_contact, feet_slide). None/0 = force only.
+    contact_height_thresh_m: Optional[float] = None
+    # hard (default) | soft: soft contact score c = max(force_flag, clamp(1 - clearance / thresh, 0, 1)) for
+    # imitation_contact (1 - |c - table|) and as the feet_slide weight. Needs contact_height_thresh_m > 0.
+    contact_height_mode: str = "hard"
+    # mean (default) | min over the two feet for imitation_foot_height and imitation_contact.
+    imitation_foot_agg: str = "mean"
+    track_lin_std_rel: float = 0.0
+    track_lin_std_min: float = 0.07
+    track_ang_std_rel: float = 0.0
+    track_ang_std_min: float = 0.15
+    # command (default) | reference: centre of the linear velocity-tracking kernel (reference = the gait table's
+    # base_lin_vel_b at the current command and phase; needs env_config.reference and track_lin_std_rel > 0).
+    track_lin_target: str = "command"
+    feet_air_time_mode: str = "per_step"
+    feet_air_time_min_s: float = 0.15
+    feet_air_time_max_s: float = 0.4
     com_centering_std: float = 0.04
     com_foot_margin: float = 0.03
+    # foot_separation_mode: origin_one_sided (old) | sole_band (two-sided band on sole centres)
+    foot_separation_mode: str = "origin_one_sided"
+    foot_sep_target_m: float = 0.095
+    foot_sep_tol_m: float = 0.025
+    foot_sep_scale_m: float = 0.02
+    foot_sole_offset_m: List[float] = Field(default_factory=lambda: [0.0163, 0.0211, -0.0316])
+    undesired_contacts_sat_n: float = 20.0
+    undesired_contacts_thresh_n: float = 1.0
+    leg_contact_thresh_n: float = 0.5
+    leg_contact_sat_n: float = 5.0
+    # foot_proximity (E21): sole-rectangle half extents [x, y] (m, centred on foot_sole_offset_m), penalty margin (m),
+    # and the optional overlap termination (s of continuous footprint overlap; 0 = off)
+    foot_sole_half_extents_m: List[float] = Field(default_factory=lambda: [0.0450, 0.0186])
+    foot_proximity_margin_m: float = 0.006
+    foot_overlap_termination_s: float = 0.0
 
     class Config:
         extra = "allow" # Allow extra fields to avoid validation errors for complex nested dicts
@@ -189,6 +234,15 @@ class TrainConfig(BaseModel):
     replace_checkpoint: bool = False
     log: bool = True
     symmetry_augmentation: bool = False
+    caps_temporal_weight: float = 0.0  # CAPS: weight on ||mu(s_t) - mu(s_t+1)||^2 (0 = off)
+    caps_spatial_weight: float = 0.0  # CAPS: weight on ||mu(s) - mu(s + eps)||^2 (0 = off)
+    caps_spatial_sigma: float = 0.05  # CAPS: std of eps in normalized actor-input space
+    symmetry_loss_weight: float = 0.0  # actor mirror loss ||mu(M s) - M mu(s)||^2 (0 = off; needs symmetry_augmentation)
+    # Exactly mirror-equivariant SAC actor: loc/scale are projected 1/2 (f(s) + M f(M s)) in pre-tanh space
+    # (torch_rl_algorithms/models/equivariant.py). Needs an env with a mirror transform (BipedEnv) and the
+    # gaussian_multivariate head. Default off = plain actor. Saved with the run config, so play / export /
+    # sim2real / policy_gate rebuild the same actor.
+    equivariant_actor: bool = False
     
     class Config:
         extra = "ignore"

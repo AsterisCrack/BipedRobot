@@ -1,4 +1,5 @@
 import torch
+from typing import List, Optional
 
 @torch.jit.script
 def swing_foot_height(
@@ -8,8 +9,13 @@ def swing_foot_height(
     min_clearance: float = 0.01,
     max_clearance: float = 0.07,
     min_speed_command_threshold: float = 0.05,
+    swing_valid: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Reward swing-foot clearance, only while the robot is commanded to move.
+
+    swing_valid (N, F) bool, optional: feet where it is False earn nothing even if airborne
+    (the env passes swing_time_mask so a leg held up beyond swing_max_time_s stops paying).
+    None = old behaviour.
 
     foot_clearance (N, F) is the foot height ABOVE ITS OWN RESTING STANCE HEIGHT, which the
     env measures from feet in contact. It is not the link origin's world Z. The old version
@@ -27,6 +33,8 @@ def swing_foot_height(
     cmd_norm = torch.norm(commands[:, :2], dim=1)
     moving = (cmd_norm > min_speed_command_threshold).float()
     swing = (~feet_contact).float()
+    if swing_valid is not None:
+        swing = swing * swing_valid.float()
     height_error = torch.clamp(foot_clearance - min_clearance, min=0.0)
     height_reward = torch.clamp(height_error, max=max_clearance - min_clearance)
     return torch.sum(height_reward * swing, dim=1) * moving
@@ -48,6 +56,68 @@ def track_ang_vel_z_exp(commands: torch.Tensor, base_ang_vel_b: torch.Tensor, st
     # Compute error
     ang_vel_error = torch.square(commands[:, 2] - base_ang_vel_b[:, 2])
     return torch.exp(-ang_vel_error / std**2)
+
+@torch.jit.script
+def track_lin_vel_xy_exp_rel(commands: torch.Tensor, base_lin_vel_b: torch.Tensor,
+                             std_rel: float = 0.7, std_min: float = 0.07):
+    """Linear-velocity tracking with a kernel width that scales with the command.
+
+    The fixed-std kernel pays too much for ignoring a small command: at |cmd| = 0.1 and std 0.2,
+    standing still scores exp(-0.01/0.04) = 0.78. Here std_i = clamp(std_rel * |cmd_xy|_i, min=std_min)
+    per env, so the same error is judged relative to what was asked (std_rel 0.7, std_min 0.07):
+      standing at any |cmd| >= 0.1        -> exp(-1/std_rel^2) ~ 0.13
+      walking at half the commanded speed -> exp(-0.25/std_rel^2) ~ 0.6
+      zero command, 0.05 m/s drift        -> exp(-(0.05/std_min)^2) ~ 0.6
+    std_min keeps the kernel from collapsing to a delta at zero command (sensor noise floor).
+    """
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    std = torch.clamp(std_rel * cmd_norm, min=std_min)
+    lin_vel_error = torch.sum(torch.square(commands[:, :2] - base_lin_vel_b[:, :2]), dim=1)
+    return torch.exp(-lin_vel_error / torch.square(std))
+
+@torch.jit.script
+def track_lin_vel_xy_exp_rel_target(target_xy: torch.Tensor, commands: torch.Tensor, base_lin_vel_b: torch.Tensor,
+                                    std_rel: float = 0.7, std_min: float = 0.07):
+    """track_lin_vel_xy_exp_rel with the kernel CENTRED on target_xy [N, >=2] instead of the command
+    (track_lin_target: reference: target_xy = the gait table's base_lin_vel_b at the current
+    (command, phase)). The WIDTH is still std_i = clamp(std_rel * |cmd_xy|_i, min=std_min), from the
+    command, not from the target.
+
+    Why: walking has natural body sway, and the table has it too. Per cycle its lateral velocity has
+    std 0.062-0.072 m/s and its forward velocity 0.03-0.05 m/s, while the cycle MEAN equals the
+    command exactly. Against the constant command, a PERFECT copy of the table scores only
+      0.38 at vx = 0.1   (standing still: 0.13)
+      0.28 at vx = 0.05  (standing still: 0.60, so standing beats perfect walking).
+    Centred on the table's own velocity a perfect copy scores 1.0 at every command, while standing
+    still (measured 0) scores the cycle mean of exp(-|target|^2 / std^2): 0.08-0.33 at the grid
+    commands tested, so the walking-minus-standing gap is >= 0.67 (tests/test_track_lin_reference_target.py).
+    """
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    std = torch.clamp(std_rel * cmd_norm, min=std_min)
+    lin_vel_error = torch.sum(torch.square(target_xy[:, :2] - base_lin_vel_b[:, :2]), dim=1)
+    return torch.exp(-lin_vel_error / torch.square(std))
+
+def validate_track_lin_target(mode: str, has_reference: bool, std_rel: float) -> None:
+    """env_config.track_lin_target: command (default) | reference. reference needs the gait table
+    (its base_lin_vel_b is the target) and a command-scaled kernel width (track_lin_std_rel > 0)."""
+    if mode not in ("command", "reference"):
+        raise ValueError(f"track_lin_target {mode!r}: expected command | reference")
+    if mode == "reference":
+        if not has_reference:
+            raise ValueError("track_lin_target: reference needs the gait-table reference "
+                             "(env_config.reference.npz_path); it tracks the table's base velocity")
+        if not std_rel > 0.0:
+            raise ValueError("track_lin_target: reference needs track_lin_std_rel > 0 (kernel width from the command)")
+
+@torch.jit.script
+def track_ang_vel_z_exp_rel(commands: torch.Tensor, base_ang_vel_b: torch.Tensor,
+                            std_rel: float = 0.7, std_min: float = 0.15):
+    """Yaw-rate tracking with std_i = clamp(std_rel * |wz_cmd|_i, min=std_min). See the linear
+    version. With the defaults, ignoring a yaw command >= 0.3 rad/s scores exp(-1/0.49) ~ 0.13
+    (the 0.15 floor makes smaller commands somewhat more lenient: 0.2 -> 0.17)."""
+    std = torch.clamp(std_rel * torch.abs(commands[:, 2]), min=std_min)
+    ang_vel_error = torch.square(commands[:, 2] - base_ang_vel_b[:, 2])
+    return torch.exp(-ang_vel_error / torch.square(std))
 
 @torch.jit.script
 def lin_vel_z_l2(base_lin_vel_b: torch.Tensor):
@@ -120,18 +190,53 @@ def feet_air_time(first_contact: torch.Tensor, last_air_time: torch.Tensor, comm
     return reward * mask
 
 @torch.jit.script
-def feet_slide(net_forces_w_history: torch.Tensor, body_lin_vel_w: torch.Tensor):
+def feet_air_time_touchdown(first_contact: torch.Tensor, last_air_time: torch.Tensor,
+                            other_in_contact: torch.Tensor, commands: torch.Tensor,
+                            air_time_max: float = 0.4, air_time_min: float = 0.15,
+                            min_speed_command_threshold: float = 0.05):
+    """Touchdown-paid air time (feet_air_time_mode: touchdown).
+
+    Pays clamp(last_air_time - air_time_min, 0, air_time_max - air_time_min) ONCE, on the step a
+    foot lands (first_contact), and only if the other foot was on the ground for that swing
+    (single stance, so a two-foot hop pays nothing) and the command is above the speed gate.
+    Zero on every other step, so a foot held in the air forever earns nothing (it never lands;
+    the per-step version paid every step). air_time_min is a dead zone: 70-130 ms flights (the
+    ~7 touchdowns/s vibration) pay exactly 0. With 0.15 / 0.4: 0.3 s swing -> 0.15, 0.7 s -> 0.25.
+
+    first_contact, other_in_contact: (N, F) bool. last_air_time: (N, F) s. Returns (N,).
+    """
+    cmd_norm = torch.norm(commands[:, :2], dim=1)
+    moving = (cmd_norm > min_speed_command_threshold).float()
+    paid = (first_contact & other_in_contact).float()
+    air = torch.clamp(last_air_time - air_time_min, 0.0, air_time_max - air_time_min)
+    return torch.sum(air * paid, dim=1) * moving
+
+@torch.jit.script
+def swing_time_mask(current_air_time: torch.Tensor, max_time: float = 0.5):
+    """(N, F) bool: True while the foot's CURRENT swing has lasted <= max_time seconds. A foot
+    held up longer than a real step stops earning swing_foot_height (anti-farming)."""
+    return current_air_time <= max_time
+
+@torch.jit.script
+def feet_slide(net_forces_w_history: torch.Tensor, body_lin_vel_w: torch.Tensor,
+               extra_contact: Optional[torch.Tensor] = None):
     """
     Penalize feet sliding.
 
     net_forces_w_history: (num_envs, history_len, num_feet, 3)
     body_lin_vel_w: (num_envs, num_feet, 3)
+    extra_contact: optional (num_envs, num_feet), combined with the force-based contact flag
+        by max. bool (clearance_contact: a foot dragged on the floor with < 1 N load still counts
+        as in contact) = logical OR; float in [0, 1] (clearance_contact_soft) = the soft contact
+        weight c = max(force_flag, extra) on the planar speed. None = the old force-only behaviour.
     """
     # Calculate contacts from history
     # norm(dim=-1) -> [N, T, F]
     # max(dim=1)[0] -> [N, F]
-    contacts = torch.max(torch.max(torch.norm(net_forces_w_history, dim=-1), dim=1)[0], dim=-1)[0] > 1.0
-    
+    contacts = (torch.max(torch.max(torch.norm(net_forces_w_history, dim=-1), dim=1)[0], dim=-1)[0] > 1.0).to(torch.float32)
+    if extra_contact is not None:
+        contacts = torch.maximum(contacts, extra_contact.to(torch.float32))
+
     # Calculate velocity norm (xy plane)
     feet_vel_xy = torch.norm(body_lin_vel_w[:, :, :2], dim=-1)
     
@@ -142,7 +247,7 @@ def feet_slide(net_forces_w_history: torch.Tensor, body_lin_vel_w: torch.Tensor)
 def feet_slide_with_vel(feet_contact: torch.Tensor, feet_vel_xy_norm: torch.Tensor):
     """
     Penalty for feet sliding (velocity when in contact).
-    feet_contact: (num_envs, num_feet) bool/float
+    feet_contact: (num_envs, num_feet) bool/float (a float in [0, 1] weights the speed: soft contact)
     feet_vel_xy_norm: (num_envs, num_feet) float of planar velocity norm
     """
     return torch.sum(feet_contact * feet_vel_xy_norm, dim=1)
@@ -414,6 +519,257 @@ def foot_separation_penalty(
     return torch.clamp(min_sep - sep, min=0.0)
 
 @torch.jit.script
+def _body_y_w(root_quat_w: torch.Tensor) -> torch.Tensor:
+    """Body +Y expressed in world = second column of R(q), quaternion [w, x, y, z]. (N, 3)."""
+    qw = root_quat_w[:, 0]; qx = root_quat_w[:, 1]
+    qy = root_quat_w[:, 2]; qz = root_quat_w[:, 3]
+    return torch.stack([
+        2.0 * (qx * qy - qw * qz),
+        1.0 - 2.0 * (qx * qx + qz * qz),
+        2.0 * (qy * qz + qw * qx),
+    ], dim=-1)
+
+
+@torch.jit.script
+def _quat_rotate(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Rotate v (..., 3) by quaternion q (..., 4) [w, x, y, z] (body -> world)."""
+    w = q[..., 0:1]
+    xyz = q[..., 1:4]
+    t = 2.0 * torch.cross(xyz, v, dim=-1)
+    return v + w * t + torch.cross(xyz, t, dim=-1)
+
+
+@torch.jit.script
+def foot_flat_roll_l2(
+    foot_quat_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    in_contact: torch.Tensor,
+) -> torch.Tensor:
+    """Roll tilt of the foot soles, squared, summed over feet that are in contact. Returns (N,).
+
+    foot_quat_w (N, F, 4) [w, x, y, z]; root_quat_w (N, 4); in_contact (N, F) bool.
+
+    The foot link frame is the ankle_pitch joint frame and the sole is the plane link z = -31.6 mm
+    (mesh z spans -31.6 .. +15.8 mm; every joint origin in the URDF has rpy = 0, so link z is
+    world up at the zero pose). The link +z axis is therefore the sole normal, pointing up out of
+    the foot. n_w = R_foot @ e_z is the third column of R(q).
+
+    Roll tilt = component of n_w along the robot's lateral direction, i.e. sin(roll). The lateral
+    direction is body +Y (as in foot_separation_penalty) PROJECTED ONTO THE HORIZONTAL PLANE and
+    renormalised: the plain 3D body Y of a rolled torso is not horizontal, and a foot lying flat
+    on the floor under a torso rolled by 5 degrees would otherwise read sin(5 deg) of "foot
+    tilt". Projected, a flat foot reads exactly 0 whatever the torso does. The result is
+    sin(roll)^2: a 14 degree roll costs 0.058 per foot in contact. Airborne feet cost 0.
+    """
+    qw = foot_quat_w[..., 0]; qx = foot_quat_w[..., 1]
+    qy = foot_quat_w[..., 2]; qz = foot_quat_w[..., 3]
+    n_w = torch.stack([
+        2.0 * (qx * qz + qw * qy),
+        2.0 * (qy * qz - qw * qx),
+        1.0 - 2.0 * (qx * qx + qy * qy),
+    ], dim=-1)                                              # (N, F, 3)
+    by = _body_y_w(root_quat_w)                             # (N, 3)
+    lat = torch.stack([by[:, 0], by[:, 1]], dim=-1)
+    lat = lat / torch.norm(lat, dim=-1, keepdim=True).clamp(min=1e-6)   # (N, 2) horizontal
+    tilt = n_w[..., 0] * lat[:, 0:1] + n_w[..., 1] * lat[:, 1:2]        # (N, F) = sin(roll)
+    return torch.sum(torch.square(tilt) * in_contact.float(), dim=1)
+
+
+@torch.jit.script
+def foot_sole_centre_lateral_sep(
+    feet_pos_w: torch.Tensor,
+    foot_quat_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    sole_x: float = 0.0163,
+    sole_lat: float = 0.0211,
+    sole_z: float = -0.0316,
+) -> torch.Tensor:
+    """SIGNED lateral (body +Y) distance, left sole centre minus right sole centre, metres. (N,).
+
+    feet_pos_w (N, 2, 3) is [right, left] link ORIGINS (the ankle_pitch joint), foot_quat_w
+    (N, 2, 4). The sole centre sits at (+sole_x, +-sole_lat, sole_z) in the foot link frame.
+    The lateral sign differs per foot, derived from Robot.urdf / the foot STLs (link frame =
+    mesh * 0.001 + visual origin): the LEFT foot mesh spans y = +2.0 .. +39.3 mm, sole-face
+    centre (16.3, +21.1, -31.6); the RIGHT foot spans y = -39.3 .. -2.0 mm, centre
+    (16.3, -21.1, -31.6). So the sole centre lies OUTBOARD of the origin: sign +1 for left
+    (index 1), -1 for right (index 0). Positive result = left foot on the left, as expected;
+    crossed feet read negative.
+    """
+    sign = torch.tensor([-1.0, 1.0], device=feet_pos_w.device, dtype=feet_pos_w.dtype)
+    off = torch.zeros_like(feet_pos_w)
+    off[:, :, 0] = sole_x
+    off[:, :, 1] = sign.unsqueeze(0) * sole_lat
+    off[:, :, 2] = sole_z
+    centres = feet_pos_w + _quat_rotate(foot_quat_w, off)
+    vec = centres[:, 1, :] - centres[:, 0, :]
+    return torch.sum(vec * _body_y_w(root_quat_w), dim=-1)
+
+
+@torch.jit.script
+def foot_separation_sole_band_penalty(
+    feet_pos_w: torch.Tensor,
+    foot_quat_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    target: float = 0.095,
+    tol: float = 0.025,
+    scale: float = 0.02,
+    sole_x: float = 0.0163,
+    sole_lat: float = 0.0211,
+    sole_z: float = -0.0316,
+) -> torch.Tensor:
+    """foot_separation_mode: sole_band. Two-sided band on the SOLE-CENTRE lateral separation.
+
+    penalty = clamp((|sep - target| - tol) / scale, 0, 3)^2, so it is 0 inside
+    [target - tol, target + tol] (0.07 .. 0.12 m by default), then grows quadratically both for
+    too narrow (feet braced against each other, 0.04 m -> 2.25) and too wide (0.16 m -> 4.0).
+    Max 9. Unlike foot_separation_penalty this measures where the SOLES are, not the ankle_pitch
+    link origin (which sits 31.6 mm above the sole and 2 mm inside the medial edge, so it moves
+    only 1.3 mm per degree of ankle roll while the sole moves ~7x more).
+    """
+    sep = foot_sole_centre_lateral_sep(feet_pos_w, foot_quat_w, root_quat_w,
+                                       sole_x, sole_lat, sole_z)
+    return torch.square(torch.clamp((torch.abs(sep - target) - tol) / scale, min=0.0, max=3.0))
+
+
+@torch.jit.script
+def _planar_obb(pos_w: torch.Tensor, quat_w: torch.Tensor, centre_offset: List[float]):
+    """Horizontal-plane footprint frame of one foot. pos_w (N, 3), quat_w (N, 4) [w, x, y, z].
+
+    Returns (centre (N, 2), ax (N, 2), ay (N, 2)): the sole centre pos + R @ centre_offset
+    projected to xy, and the unit foot-forward / foot-left axes in the world horizontal plane.
+    The axes come from the foot's YAW (atan2 of the link +X axis projected to the floor), so a
+    pitched or rolled foot still yields an orthonormal planar frame (atan2(0, 0) = 0 is the
+    harmless fallback for a foot standing on its toe)."""
+    off = torch.zeros_like(pos_w)
+    off[:, 0] = centre_offset[0]
+    off[:, 1] = centre_offset[1]
+    off[:, 2] = centre_offset[2]
+    centre = (pos_w + _quat_rotate(quat_w, off))[:, 0:2]
+    w = quat_w[:, 0]
+    x = quat_w[:, 1]
+    y = quat_w[:, 2]
+    z = quat_w[:, 3]
+    # link +X axis in world = first column of R(q)
+    yaw = torch.atan2(2.0 * (x * y + w * z), 1.0 - 2.0 * (y * y + z * z))
+    c = torch.cos(yaw)
+    s = torch.sin(yaw)
+    ax = torch.stack([c, s], dim=-1)
+    ay = torch.stack([-s, c], dim=-1)
+    return centre, ax, ay
+
+
+@torch.jit.script
+def _obb_corners(centre: torch.Tensor, ax: torch.Tensor, ay: torch.Tensor, hx: float, hy: float) -> torch.Tensor:
+    """(N, 4, 2) corners of an oriented rectangle."""
+    ex = ax * hx
+    ey = ay * hy
+    return torch.stack([centre + ex + ey, centre + ex - ey, centre - ex - ey, centre - ex + ey], dim=1)
+
+
+@torch.jit.script
+def _point_obb_dist(p: torch.Tensor, centre: torch.Tensor, ax: torch.Tensor, ay: torch.Tensor,
+                    hx: float, hy: float) -> torch.Tensor:
+    """Euclidean distance (N, 4) from points p (N, 4, 2) to the (filled) rectangle; 0 inside."""
+    d = p - centre.unsqueeze(1)
+    qx = torch.abs(torch.sum(d * ax.unsqueeze(1), dim=-1)) - hx
+    qy = torch.abs(torch.sum(d * ay.unsqueeze(1), dim=-1)) - hy
+    return torch.sqrt(torch.square(torch.clamp(qx, min=0.0)) + torch.square(torch.clamp(qy, min=0.0)))
+
+
+@torch.jit.script
+def foot_footprint_gap(
+    pos_l: torch.Tensor,
+    quat_l: torch.Tensor,
+    pos_r: torch.Tensor,
+    quat_r: torch.Tensor,
+    centre_offset: List[float],
+    half_extents: List[float],
+) -> torch.Tensor:
+    """SIGNED horizontal-plane gap [m] between the two foot footprints (N,). Terrain-independent.
+
+    pos_* (N, 3) foot LINK origins, quat_* (N, 4) [w, x, y, z] (world), centre_offset = [x, lateral
+    magnitude, z] of the sole centre in the foot link frame (cfg.foot_sole_offset_m; the lateral
+    sign is +y for the left foot, -y for the right, as in foot_sole_centre_lateral_sep),
+    half_extents = [hx, hy] of the footprint rectangle about that centre (cfg.foot_sole_half_extents_m).
+
+    Each foot is an oriented rectangle in the world horizontal plane (see _planar_obb). Apart:
+    the exact minimum 2D distance between the rectangles (smallest vertex-to-rectangle distance
+    over both rectangles' corners). Overlapping: minus the penetration depth, i.e. the SAT
+    minimum-translation distance (max over the 4 edge normals of |d.n| - (r_a + r_b), which is <= 0
+    exactly when they overlap). The two branches meet at 0 when touching.
+
+    It is 2D: height is ignored, so a swing foot passing OVER the other foot's footprint reads <= 0
+    although the 3D geometry is apart. The stance-width band keeps that rare (see CHANGES.md).
+    """
+    hx = half_extents[0]
+    hy = half_extents[1]
+    off_l = [centre_offset[0], centre_offset[1], centre_offset[2]]
+    off_r = [centre_offset[0], -centre_offset[1], centre_offset[2]]
+    ca, axa, aya = _planar_obb(pos_l, quat_l, off_l)
+    cb, axb, ayb = _planar_obb(pos_r, quat_r, off_r)
+    d = cb - ca
+    # SAT: separation along each of the four edge normals
+    sep = torch.full_like(d[:, 0], -1.0e9)
+    for ax_ in (axa, aya, axb, ayb):
+        proj = torch.abs(torch.sum(d * ax_, dim=-1))
+        ra = hx * torch.abs(torch.sum(axa * ax_, dim=-1)) + hy * torch.abs(torch.sum(aya * ax_, dim=-1))
+        rb = hx * torch.abs(torch.sum(axb * ax_, dim=-1)) + hy * torch.abs(torch.sum(ayb * ax_, dim=-1))
+        sep = torch.maximum(sep, proj - ra - rb)
+    corners_a = _obb_corners(ca, axa, aya, hx, hy)
+    corners_b = _obb_corners(cb, axb, ayb, hx, hy)
+    dist = torch.minimum(
+        _point_obb_dist(corners_a, cb, axb, ayb, hx, hy).amin(dim=1),
+        _point_obb_dist(corners_b, ca, axa, aya, hx, hy).amin(dim=1),
+    )
+    return torch.where(sep > 0.0, dist, sep)
+
+
+@torch.jit.script
+def foot_proximity_penalty(gap: torch.Tensor, margin_m: float) -> torch.Tensor:
+    """clamp((margin - gap) / margin, 0, 2)^2 (N,): 0 for gap >= margin, 1 when touching, up to 4
+    when overlapping by one margin or more. Meant for a NEGATIVE weight (foot_proximity)."""
+    return torch.square(torch.clamp((margin_m - gap) / max(margin_m, 1e-6), min=0.0, max=2.0))
+
+
+@torch.jit.script
+def leg_contact_l2(
+    body_forces: torch.Tensor,
+    thresh_n: float = 0.5,
+    sat_n: float = 5.0,
+) -> torch.Tensor:
+    """Inter-leg contact penalty. body_forces (N, B) force magnitudes [N] on the leg bodies
+    (non-floor part). Per body clamp((F - thresh_n) / (sat_n - thresh_n), 0, 1)^2, summed.
+    Free below thresh_n (sensor noise), saturating at sat_n, so bracing on the other leg costs
+    the same whether it is 5 N or 50 N but a graze costs next to nothing."""
+    x = torch.clamp((body_forces - thresh_n) / max(sat_n - thresh_n, 1e-6), min=0.0, max=1.0)
+    return torch.sum(torch.square(x), dim=-1)
+
+@torch.jit.script
+def stand_pose_l2(joint_pos: torch.Tensor, ref_joint_pos: torch.Tensor,
+                  standing_mask: torch.Tensor) -> torch.Tensor:
+    """Non-saturating stand-pose anchor: sum_j (q_j - q_ref_j)^2 [rad^2] while the reference is standing, else 0.
+
+    joint_pos, ref_joint_pos: (N, J) in the same (robot) joint order; standing_mask: (N,) float (1 = the
+    gait reference is on its stand frame, 0 = walking). Meant for a NEGATIVE weight (a penalty).
+
+    Why: at command 0 the run gaitref_2026-10-21_07-17-11 (98.3M steps) left the stand pose for a braced
+    stance (per-joint deviation [-28 -18 -4 -13 33 15 26 24 -22 20 2 19] deg, knees on their +5 deg stop,
+    legs pressing each other with 8-15 N, sole gap 50 mm). Every stand anchor is flat there:
+    imitation_joint_pos = exp(-mean(e^2)/0.15^2) ~ 0.003, imitation_foot_pos ~ 0, leg_contact_l2 and
+    undesired_contacts saturate at 5 N, so nothing leads back. A quadratic never saturates:
+    at the observed brace sum(e^2) ~ 1.5 rad^2 (1.56 from the rounded numbers above; weight -1.0 costs ~1.5/step), 2 deg on every joint
+    costs ~0.015, walking envs 0 (the mask), so the walking gait is untouched."""
+    return torch.sum(torch.square(joint_pos - ref_joint_pos), dim=-1) * standing_mask
+
+
+def validate_stand_pose_l2(weight: float, has_reference: bool) -> None:
+    """stand_pose_l2 compares with the gait table's stand frame, so a nonzero weight needs the table."""
+    if float(weight) != 0.0 and not has_reference:
+        raise ValueError("stand_pose_l2 != 0 needs the gait-table reference (env_config.reference.npz_path): "
+                         "it penalises the distance to the table's stand-frame joint pose")
+
+
+@torch.jit.script
 def angular_momentum_l2(body_ang_vel_w: torch.Tensor, body_mass: torch.Tensor) -> torch.Tensor:
     """Penalize mass-weighted body angular momentum to reduce limb wobble.
     body_ang_vel_w: (N, num_bodies, 3) — world-frame angular velocity per body
@@ -444,7 +800,181 @@ def imitation_mse_exp(value: torch.Tensor, ref: torch.Tensor, std: float) -> tor
 
 
 @torch.jit.script
-def imitation_contact_match(feet_in_contact: torch.Tensor, ref_contact: torch.Tensor) -> torch.Tensor:
-    """Fraction of feet whose contact state matches the reference (ref_contact > 0.5 means stance)."""
-    in_contact = feet_in_contact.to(torch.float32) > 0.5
-    return torch.mean((in_contact == (ref_contact > 0.5)).to(torch.float32), dim=-1)
+def imitation_contact_match(feet_in_contact: torch.Tensor, ref_contact: torch.Tensor,
+                            soft: bool = False, agg_min: bool = False) -> torch.Tensor:
+    """Per-foot contact match against the reference, combined over the feet by mean (default) or min.
+
+    soft=False (default, old behaviour): binary, the foot's contact flag > 0.5 equals
+    (ref_contact > 0.5) -> 1 else 0.
+    soft=True: feet_in_contact is the soft score c in [0, 1] (soft_contact_score) and the match is
+    1 - |c - ref_contact|, which has a gradient through the 0-6 mm lift instead of a 4 mm cliff.
+    agg_min=True: the worse foot decides (a limp, one foot matched and one not, scores 0, not 0.5)."""
+    if soft:
+        match = 1.0 - torch.abs(torch.clamp(feet_in_contact.to(torch.float32), 0.0, 1.0) - ref_contact)
+    else:
+        in_contact = feet_in_contact.to(torch.float32) > 0.5
+        match = (in_contact == (ref_contact > 0.5)).to(torch.float32)
+    if agg_min:
+        return torch.min(match, dim=-1)[0]
+    return torch.mean(match, dim=-1)
+
+
+@torch.jit.script
+def clearance_contact(clearance: torch.Tensor, thresh_m: float) -> torch.Tensor:
+    """(N, F) bool: foot sole is within thresh_m of the ground it last stood on.
+
+    clearance: (N, F) [m], foot-origin height above the foot's own last in-contact height (the
+    swing_foot_height datum; ~0 for a foot resting on the floor even when unloaded). thresh_m <= 0
+    disables the test (all False), which is the old force-only behaviour."""
+    if thresh_m <= 0.0:
+        return torch.zeros_like(clearance, dtype=torch.bool)
+    return clearance < thresh_m
+
+
+@torch.jit.script
+def clearance_contact_soft(clearance: torch.Tensor, thresh_m: float) -> torch.Tensor:
+    """(N, F) float in [0, 1]: clamp(1 - clearance / thresh_m, 0, 1). 1 on the ground (or below
+    it), 0.5 at thresh_m / 2, 0 from thresh_m up -- the soft version of clearance_contact, with no
+    cliff at the threshold. thresh_m <= 0 disables it (all 0, the force-only behaviour)."""
+    if thresh_m <= 0.0:
+        return torch.zeros_like(clearance)
+    return torch.clamp(1.0 - clearance / thresh_m, 0.0, 1.0)
+
+
+@torch.jit.script
+def soft_contact_score(force_contact: torch.Tensor, clearance: torch.Tensor, thresh_m: float) -> torch.Tensor:
+    """Soft contact score for REWARD terms (contact_height_mode: soft): c = max(force_flag,
+    clamp(1 - clearance / thresh_m, 0, 1)) in [0, 1]. A loaded foot is 1; an unloaded one decays
+    linearly to 0 over thresh_m of lift (6 mm: a 3 mm lift counts half). thresh_m <= 0 returns the
+    force flag as float."""
+    return torch.maximum(force_contact.to(torch.float32), clearance_contact_soft(clearance, thresh_m))
+
+
+@torch.jit.script
+def feet_contact_with_clearance(force_contact: torch.Tensor, clearance: torch.Tensor,
+                                thresh_m: float) -> torch.Tensor:
+    """Contact flag for REWARD terms: |F| > 1 N (force_contact) OR clearance < thresh_m.
+
+    A foot dragged along the floor with < 1 N load has force_contact False but clearance ~0, so it
+    no longer counts as airborne (it used to earn imitation_contact in the reference swing and
+    escape feet_slide). The sensor flag itself, and the datum that produces `clearance`, stay
+    force-based, so there is no feedback loop. thresh_m <= 0 returns force_contact unchanged."""
+    return force_contact | clearance_contact(clearance, thresh_m)
+
+
+@torch.jit.script
+def imitation_foot_height(clearance_env: torch.Tensor, ref_height: torch.Tensor, std: float,
+                          agg_min: bool = False) -> torch.Tensor:
+    """Per-foot kernel exp(-((h - h_ref) / std)^2), averaged over the two feet (agg_min=True: the
+    worse foot, so a limp that lifts one foot and drags the other no longer keeps half the reward).
+
+    clearance_env: (N, 2) robot sole clearance [m] in ENV foot order [right, left], clamped >= 0.
+    ref_height: (N, 2) the gait table's `foot_height` field, TABLE order [left, right].
+    The env order is flipped to the table's here. 1.0 on the reference; 4 mm off with std 4 mm
+    -> e^-1 = 0.37; an 11 mm miss (foot dragged instead of lifted) -> 0.0005."""
+    h = torch.flip(torch.clamp(clearance_env, min=0.0), [1])
+    k = torch.exp(-torch.square((h - ref_height) / std))
+    if agg_min:
+        return torch.min(k, dim=-1)[0]
+    return torch.mean(k, dim=-1)
+
+
+# --------------------------------------------------------------------------- weight sign guard
+# Expected sign of each reward weight, from the sign of the term the weight multiplies (the
+# RETURNED quantity of the function in BipedEnv._get_rewards / BipedEnvV2._compute_reward, not
+# the name). Shared by both envs. The total reward is sum(weight * term), so:
+#   -1: the term is >= 0 and is meant to be subtracted -> weight must be <= 0. A positive
+#       weight turns the penalty into a bonus (foot_flat_l2 = +1.0 paid the policy for standing
+#       on its foot edges in run gaitref_2026-10-19_20-20-42).
+#   +1: the term is >= 0 (an exp kernel, a clamped gap, a count) and is meant to be earned
+#       -> weight must be >= 0.
+# 0 is valid for both (term disabled).
+REWARD_WEIGHT_SIGN: dict[str, int] = {
+    # penalties (term >= 0)
+    "termination_penalty": -1,          # 0/1 flag
+    "lin_vel_z_l2": -1,
+    "ang_vel_xy_l2": -1,
+    "flat_orientation_l2": -1,
+    "action_rate_l2": -1,
+    "action_l2": -1,
+    "dof_torques_l2": -1,
+    "dof_acc_l2": -1,
+    "dof_pos_limits": -1,               # amount outside the soft limits, >= 0
+    "dof_pos_l2": -1,
+    "ankle_torques_l2": -1,
+    "angular_momentum": -1,
+    "base_height_l2": -1,               # squared height error
+    "feet_slide": -1,                   # contact * foot speed
+    "undesired_contacts": -1,           # clamp(., 0, 1) per body
+    "leg_contact_l2": -1,
+    "stand_pose_l2": -1,                # sum of squared joint error to the table stand frame, only while standing
+    "foot_flat_l2": -1,                 # sin^2(sole roll) over feet in contact
+    "foot_separation": -1,              # both modes: origin_one_sided clamp(min_sep - sep, 0), sole_band squared
+    "foot_proximity": -1,               # clamp((margin - footprint gap)/margin, 0, 2)^2: feet pressing together
+    "joint_deviation_hip": -1,          # L1 |q - q_default|
+    "joint_deviation_hip_pitch": -1,
+    "joint_deviation_ankle_roll": -1,
+    "joint_deviation_ankle_pitch": -1,
+    "joint_deviation_knee": -1,
+    # rewards (term >= 0)
+    "track_lin_vel_xy_exp": 1,
+    "track_ang_vel_z_exp": 1,
+    "track_joint_pos_exp": 1,
+    "track_joint_vel_exp": 1,
+    "upright": 1,
+    "feet_air_time": 1,                 # positive_biped and touchdown modes are both >= 0
+    "swing_foot_height": 1,
+    "gait_phase_contact": 1,            # [0, 1]
+    "knee_bend_touchdown": 1,
+    "step_length": 1,                   # sum of stride^2 at touchdown: a reward despite no "reward" in the name
+    "torso_centering": 1,
+    "com_support_centering": 1,
+    "imitation_joint_pos": 1,
+    "imitation_joint_vel": 1,
+    "imitation_foot_pos": 1,
+    "imitation_contact": 1,
+    "imitation_orientation": 1,
+    "imitation_lin_vel": 1,
+    "imitation_ang_vel": 1,
+    "imitation_foot_height": 1,
+}
+
+# Scheduled weights (cfg.action_rate_weight_start / _end drive rewards["action_rate_l2"]).
+SCHEDULED_WEIGHT_SIGN: dict[str, int] = {
+    "action_rate_weight_start": -1,
+    "action_rate_weight_end": -1,
+}
+
+
+def reward_weight_sign_errors(weights, schedule=None, keys=None) -> list[str]:
+    """One message per weight whose sign contradicts REWARD_WEIGHT_SIGN. [] when all are valid.
+
+    weights: mapping key -> number (cfg.rewards / env_config.reward_weights). Keys that are not
+        in REWARD_WEIGHT_SIGN are ignored (unknown / future terms are not this guard's business).
+    schedule: optional mapping of SCHEDULED_WEIGHT_SIGN keys -> number (None values skipped).
+    keys: optional iterable restricting the check to those weight keys (the MuJoCo env only
+        implements a subset of the terms).
+    """
+    errors: list[str] = []
+    only = None if keys is None else set(keys)
+    for src, table, restrict in ((weights, REWARD_WEIGHT_SIGN, True),
+                                 (schedule, SCHEDULED_WEIGHT_SIGN, False)):
+        for key, val in dict(src or {}).items():
+            sign = table.get(key)
+            if sign is None or val is None or (restrict and only is not None and key not in only):
+                continue
+            v = float(val)
+            if (sign < 0 and v > 0.0) or (sign > 0 and v < 0.0):
+                want = "<= 0 (penalty)" if sign < 0 else ">= 0 (reward)"
+                errors.append(f"{key}: {v:g}, expected {want}")
+    return errors
+
+
+def validate_reward_weight_signs(weights, schedule=None, keys=None, where: str = "reward weights") -> None:
+    """Raise ValueError listing ALL wrong-sign weights (see REWARD_WEIGHT_SIGN)."""
+    errors = reward_weight_sign_errors(weights, schedule, keys)
+    if errors:
+        raise ValueError(
+            f"{where}: {len(errors)} reward weight(s) with the wrong sign. The total reward is "
+            "sum(weight * term) and every listed term is >= 0, so a wrong sign rewards what it "
+            "was meant to penalise (or the reverse):\n  " + "\n  ".join(errors))

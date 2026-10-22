@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import torch
 import math
 import numpy as np
@@ -49,6 +50,15 @@ class BipedEnv(DirectRLEnv):
         # Set logging level
         if hasattr(cfg, "logging_level"):
             logging.getLogger().setLevel(getattr(logging, cfg.logging_level.upper()))
+
+        # Sign guard: a penalty term with a positive weight is a bonus (foot_flat_l2 = +1.0 rewarded
+        # edge standing). Raises ValueError listing every wrong-sign weight; see
+        # rewards.REWARD_WEIGHT_SIGN. Valid configs are untouched.
+        rewards.validate_reward_weight_signs(
+            cfg.rewards,
+            schedule={k: getattr(cfg, k, None) for k in rewards.SCHEDULED_WEIGHT_SIGN},
+            where="BipedEnv cfg.rewards",
+        )
 
         # Calculate Observation Dimensions
         # Proprio: 3+3+3+3+12+12+12+2 = 50
@@ -118,6 +128,26 @@ class BipedEnv(DirectRLEnv):
         # Gait phase clock: scalar phase per env, advanced proportional to commanded speed
         self.gait_phase = torch.zeros(self.num_envs, device=self.device)
         self.gait_clock_freq = getattr(cfg, 'gait_clock_base_freq', 1.5)
+        if cfg.gait_clock_mode not in ("speed_proportional", "fixed_period"):
+            raise ValueError(f"gait_clock_mode {cfg.gait_clock_mode!r}: expected speed_proportional | fixed_period")
+        if cfg.gait_clock_mode == "fixed_period" and not (0.2 < cfg.gait_clock_period_s < 5.0):
+            raise ValueError(f"gait_clock_period_s {cfg.gait_clock_period_s!r} s is implausible (expected 0.2-5 s)")
+        self._fixed_period_clock = cfg.gait_clock_mode == "fixed_period" and not cfg.reference_npz_path
+        if cfg.feet_air_time_mode not in ("per_step", "touchdown"):
+            raise ValueError(f"feet_air_time_mode {cfg.feet_air_time_mode!r}: expected per_step | touchdown")
+        if not (0.0 <= cfg.feet_air_time_min_s < cfg.feet_air_time_max_s):
+            raise ValueError("feet_air_time_min_s must be >= 0 and < feet_air_time_max_s")
+        if cfg.imitation_foot_agg not in ("mean", "min"):
+            raise ValueError(f"imitation_foot_agg {cfg.imitation_foot_agg!r}: expected mean | min")
+        if cfg.contact_height_mode not in ("hard", "soft"):
+            raise ValueError(f"contact_height_mode {cfg.contact_height_mode!r}: expected hard | soft")
+        rewards.validate_track_lin_target(
+            cfg.track_lin_target, has_reference=bool(cfg.reference_npz_path), std_rel=cfg.track_lin_std_rel)
+        rewards.validate_stand_pose_l2(cfg.rewards.get("stand_pose_l2", 0.0), has_reference=bool(cfg.reference_npz_path))
+        if cfg.swing_max_time_s <= 0.0:
+            raise ValueError("swing_max_time_s must be > 0")
+        if min(cfg.track_lin_std_rel, cfg.track_ang_std_rel) < 0.0 or min(cfg.track_lin_std_min, cfg.track_ang_std_min) <= 0.0:
+            raise ValueError("track_*_std_rel must be >= 0 and track_*_std_min > 0")
 
         # Action smoothing filter (EMA): target = α*raw + (1-α)*prev
         self.filtered_targets = torch.zeros(self.num_envs, self.num_joints, device=self.device)
@@ -227,6 +257,8 @@ class BipedEnv(DirectRLEnv):
         # and tells us nothing -- which is exactly what happened when it moved to body frame.
         # Log the unclamped value so min_sep can be calibrated against the real distribution.
         self.foot_sep_sum = torch.zeros(self.num_envs, device=self.device)
+        # Same for the signed SOLE-CENTRE separation (foot_separation_mode: sole_band's quantity).
+        self.foot_sole_sep_sum = torch.zeros(self.num_envs, device=self.device)
         
         # History
         self.history_size = self.cfg.history_size if self.cfg.use_history else 0
@@ -288,6 +320,40 @@ class BipedEnv(DirectRLEnv):
         print(f"[biped_env] robot feet order: {[self.robot.body_names[i] for i in self.feet_indices]}")
         # Undesired contact bodies are all but feet
         self._undesired_contact_body_ids = [i for i in range(self.robot.num_bodies) if i not in self._feet_ids]
+        # leg_contact_l2: every non-foot body of either leg (hip/thigh/calf/ankle links; base_link
+        # and imu_link are excluded by the l_/r_ prefix). Indexed in contact-sensor body order.
+        _leg_re = re.compile(r"^(l|r|left|right)_")
+        self._leg_body_ids = [i for i, n in enumerate(self.contact_sensor.body_names)
+                              if i not in self._feet_ids and _leg_re.match(n)]
+        print(f"[biped_env] leg_contact bodies: {[self.contact_sensor.body_names[i] for i in self._leg_body_ids]}")
+        _sole = [float(v) for v in self.cfg.foot_sole_offset_m]
+        if len(_sole) != 3:
+            raise ValueError(f"foot_sole_offset_m {_sole}: expected [x, lateral_magnitude, z]")
+        self._foot_sole_offset = tuple(_sole)
+        # foot_proximity (E21): footprint = sole rectangle centred on foot_sole_offset_m, see rewards.foot_footprint_gap
+        _half = [float(v) for v in self.cfg.foot_sole_half_extents_m]
+        if len(_half) != 2 or min(_half) <= 0.0:
+            raise ValueError(f"foot_sole_half_extents_m {_half}: expected two positive values [x, y]")
+        self._foot_sole_half = tuple(_half)
+        self._foot_prox_margin = float(self.cfg.foot_proximity_margin_m)
+        if self._foot_prox_margin <= 0.0:
+            raise ValueError(f"foot_proximity_margin_m {self._foot_prox_margin}: must be > 0")
+        _ov_s = float(self.cfg.foot_overlap_termination_s)
+        if _ov_s < 0.0:
+            raise ValueError(f"foot_overlap_termination_s {_ov_s}: must be >= 0 (0 = off)")
+        # 0 = termination off. Otherwise: consecutive control steps of footprint overlap that end the episode.
+        self._foot_overlap_steps = int(math.ceil(_ov_s / self.step_dt - 1e-6)) if _ov_s > 0.0 else 0
+        # Consecutive-overlap counter. Updated ONCE per step, in _get_dones (which DirectRLEnv.step runs before
+        # _get_rewards), zeroed in _reset_idx. Only advanced while the termination is enabled.
+        self.foot_overlap_count = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        # Envs whose last _get_dones ended the episode ONLY because of the overlap (for Episode_Termination/foot_overlap)
+        self._foot_overlap_term = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # Foot-link-origin height above the ground at a flat stance = the sole centre's depth below
+        # the link origin. Seeds the swing datum (foot_ground_z) of reset envs on FLAT terrain.
+        self._flat_foot_origin_z = abs(_sole[2])
+        if self.cfg.foot_separation_mode not in ("origin_one_sided", "sole_band"):
+            raise ValueError(f"foot_separation_mode {self.cfg.foot_separation_mode!r}: "
+                             "expected origin_one_sided | sole_band")
         
         # Specific joint indices for rewards
         self.hip_indices, _ = self.robot.find_joints(self.cfg.hip_joint_names)
@@ -321,13 +387,15 @@ class BipedEnv(DirectRLEnv):
         # with the knee box at [-120, +5] deg it either wastes most of one side or clips
         # flexion. The map is identical for L and R, so the mirror table is unaffected.
         self.action_map = getattr(self.cfg, "action_map", "absolute")
-        if self.action_map not in ("centered", "absolute"):
-            raise ValueError(f"action_map must be 'centered' or 'absolute', got {self.action_map!r}")
+        if self.action_map not in ("centered", "absolute", "residual"):
+            raise ValueError(f"action_map must be 'centered', 'absolute' or 'residual', got {self.action_map!r}")
         self.action_span_pos = self.joint_limits_max - self.default_joint_pos
         self.action_span_neg = self.default_joint_pos - self.joint_limits_min
         if self.action_map == "centered" and (
                 (self.action_span_pos <= 0).any() or (self.action_span_neg <= 0).any()):
             raise ValueError("centered action map needs every default joint pos strictly inside its limits")
+        if self.action_map == "residual":
+            self._init_residual_map()
 
         # BAM servo actuators need the articulation for the mass matrix and joint_acc, and
         # Isaac Lab gives an actuator no handle to it. Duck-typed, so the V1 robot (DCMotor)
@@ -354,7 +422,8 @@ class BipedEnv(DirectRLEnv):
         _hy_r, _ = self.robot.find_joints(["(r|right)_hip_yaw.*"])
         self.hip_yaw_lr = torch.tensor(_hy_l + _hy_r, device=self.device, dtype=torch.long)
         self.diag_keys = ("com_ahead_m", "com_lateral_abs_m", "com_outside_mm", "lean_fwd_deg",
-                          "toe_in_deg", "vel_err_moving_ms", "yaw_err_moving_rads")
+                          "toe_in_deg", "vel_err_moving_ms", "yaw_err_moving_rads",
+                          "foot_gap_mm", "foot_overlap_frac")
         self.diag_sums = {k: torch.zeros(self.num_envs, device=self.device) for k in self.diag_keys}
         # Separate count per key: the *_moving_* keys are nan on envs the command tells to
         # stand, so they must be averaged over the steps they were actually valid.
@@ -363,6 +432,9 @@ class BipedEnv(DirectRLEnv):
         self.swing_peak_sum = torch.zeros(self.num_envs, device=self.device)
         self.swing_count = torch.zeros(self.num_envs, device=self.device)
         self.contact_steps = torch.zeros(self.num_envs, 2, device=self.device)
+        # Diagnostics/dragged_foot_frac: foot-steps with |F| <= 1 N, clearance < thresh and the foot
+        # moving horizontally (the exploit contact_height_thresh_m closes). Count per env, per episode.
+        self.dragged_foot_steps = torch.zeros(self.num_envs, device=self.device)
 
         # Motion reference (imitation)
         self.motion_ref = None
@@ -395,7 +467,8 @@ class BipedEnv(DirectRLEnv):
             print(f"[biped_env] gait table: grid vx{tuple(round(v, 3) for v in (g.grid[0][0].item(), g.grid[0][-1].item()))} "
                   f"vy{tuple(round(v, 3) for v in (g.grid[1][0].item(), g.grid[1][-1].item()))} "
                   f"wz{tuple(round(v, 3) for v in (g.grid[2][0].item(), g.grid[2][-1].item()))}, "
-                  f"{g.n_frames} frames, period {g.period:.3f}s, style {g.style_digest}")
+                  f"{g.n_frames} frames, period {1.0 / g.freq.max().item():.3f}-{1.0 / g.freq.min().item():.3f}s, "
+                  f"style {g.style_digest}")
             for axis, key in zip(g.grid, ("lin_vel_x", "lin_vel_y", "ang_vel_z")):
                 lo, hi = self._cmd_full_ranges.get(key, (0.0, 0.0))
                 if lo < axis[0].item() - 1e-6 or hi > axis[-1].item() + 1e-6:
@@ -484,8 +557,35 @@ class BipedEnv(DirectRLEnv):
         else:
             self.targets = raw_targets
 
+    def _init_residual_map(self) -> None:
+        """residual: target = clamp(home + scale*a, limits). home == default_joint_pos, which
+        env_config wrote into the articulation init_state from env_config.action_home_deg, so
+        every 'relative to default' term (obs, deviation rewards, dof_pos_l2, knee bend) is
+        measured from it. Check that it really arrived, by joint NAME order, and is mirror-safe."""
+        from utils.residual_action import JOINT_TYPES, check_residual_map, home_rad, scale_rad
+        for i, name in enumerate(self.robot.joint_names):
+            want = ("l_" if i % 2 == 0 else "r_") + JOINT_TYPES[i // 2]
+            if not name.startswith(want):
+                raise ValueError(f"residual map: joint {i} is {name!r}, expected {want}* "
+                                 f"(policy order is L,R interleaved per joint type)")
+        if not (self.cfg.action_home_deg and self.cfg.action_scale_rad):
+            raise ValueError("action_map 'residual' needs cfg.action_home_deg and cfg.action_scale_rad")
+        home = home_rad(self.cfg.action_home_deg)
+        scale = scale_rad(self.cfg.action_scale_rad)
+        check_residual_map(home, scale, self.joint_limits_min.cpu().numpy(), self.joint_limits_max.cpu().numpy(),
+                           self.cfg.mirror_joint_perm, self.cfg.mirror_joint_signs)
+        home_t = torch.as_tensor(home, dtype=self.default_joint_pos.dtype, device=self.device)
+        err = (self.default_joint_pos - home_t).abs().max().item()
+        if err > 1e-4:
+            raise ValueError(f"residual map: articulation default_joint_pos differs from action_home_deg "
+                             f"by {err:.2e} rad; env_config.apply_env_config must set init_state.joint_pos")
+        self.action_scale = torch.as_tensor(scale, dtype=self.default_joint_pos.dtype, device=self.device)
+
     def actions_to_targets(self, actions: torch.Tensor) -> torch.Tensor:
         """Policy action in [-1, 1] -> joint target in encoder space. Mirrored by export_onnx."""
+        if self.action_map == "residual":
+            return torch.clamp(self.default_joint_pos + self.action_scale * torch.clamp(actions, -1.0, 1.0),
+                               self.joint_limits_min, self.joint_limits_max)
         if self.action_map == "centered":
             span = torch.where(actions >= 0.0, self.action_span_pos, self.action_span_neg)
             return self.default_joint_pos + actions * span
@@ -493,6 +593,8 @@ class BipedEnv(DirectRLEnv):
 
     def targets_to_actions(self, targets: torch.Tensor) -> torch.Tensor:
         """Inverse of actions_to_targets (encoder-space joint target -> action in [-1, 1])."""
+        if self.action_map == "residual":
+            return torch.clamp((targets - self.default_joint_pos) / self.action_scale, -1.0, 1.0)
         if self.action_map == "centered":
             span = torch.where(targets >= self.default_joint_pos, self.action_span_pos, self.action_span_neg)
             return torch.clamp((targets - self.default_joint_pos) / span, -1.0, 1.0)
@@ -606,8 +708,8 @@ class BipedEnv(DirectRLEnv):
 
         # Gait phase clock: advance proportional to commanded XY speed. With a gait table the
         # clock is advanced in _get_rewards instead (fixed period), so the reward and the next
-        # observation see the same phase.
-        if self.gait_ref is None:
+        # observation see the same phase. gait_clock_mode=fixed_period (no table) does the same.
+        if self.gait_ref is None and not self._fixed_period_clock:
             v_cmd_norm = torch.norm(self.commands[:, :2], dim=1)
             self.gait_phase = (
                 self.gait_phase + self.step_dt * 2.0 * math.pi * self.gait_clock_freq * v_cmd_norm
@@ -679,8 +781,14 @@ class BipedEnv(DirectRLEnv):
 
         # With a gait table, advance the clock first: the reward then compares the post-step
         # state with the reference at the post-step phase, and the next observation shows it.
+        # The reference frame at that (command, phase) is sampled ONCE here and shared by the
+        # linear-velocity tracking term (track_lin_target: reference) and the imitation terms.
+        ref = None
         if self.gait_ref is not None:
             self._advance_gait_phase()
+            ref = self._sample_reference()
+        elif self._fixed_period_clock:
+            self._advance_fixed_period_phase()
 
         # --- Prepare Data ---
         feet_pos = self.robot.data.body_pos_w[:, self.feet_indices]
@@ -689,6 +797,49 @@ class BipedEnv(DirectRLEnv):
         # Check current contact force > threshold
         feet_contact_forces = self.contact_sensor.data.net_forces_w[:, self._feet_ids]
         feet_in_contact = torch.norm(feet_contact_forces, dim=-1) > 1.0
+
+        # Foot clearance above the foot's own last in-contact height (the swing_foot_height datum;
+        # see section 17). Computed here, before feet_slide, so the reward-side contact flag below
+        # can use it. The datum update is driven by the FORCE-based feet_in_contact only, never by
+        # the height-aware flag, so the datum cannot freeze on a dragged foot.
+        foot_z = feet_pos[:, :, 2]
+        fresh = ~self.foot_ground_init
+        if fresh.any():                       # first step after reset: seed the datum
+            if self.cfg.use_rough_terrain:
+                # Unknown local height under the feet: both feet = their current z (a foot that
+                # starts mid-swing reads clearance ~0 until it lands).
+                self.foot_ground_z[fresh] = foot_z[fresh]
+            else:
+                # Flat terrain: the ground is at env_origins z, and a foot resting flat has its link
+                # origin _flat_foot_origin_z above it. Seeds airborne feet (RSI mid-swing) with
+                # their true clearance; a foot in contact is overwritten with its z just below.
+                self.foot_ground_z[fresh] = self.scene.env_origins[fresh][:, 2:3] + self._flat_foot_origin_z
+            self.foot_ground_init[fresh] = True
+        self.foot_ground_z = torch.where(feet_in_contact, foot_z, self.foot_ground_z)
+        clearance = foot_z - self.foot_ground_z
+
+        # Reward-side contact flag (imitation_contact, feet_slide only): |F| > 1 N OR clearance <
+        # contact_height_thresh_m. A foot dragged with < 1 N load counts as in contact, not airborne.
+        # None / 0 = old force-only behaviour. Sensor consumers (stride, air time, COM support,
+        # gait_phase_contact, swing_foot_height, foot_flat) keep the force flag.
+        # contact_height_mode: hard (default) = the bool flag above; soft = a score in [0, 1],
+        # c = max(force_flag, clamp(1 - clearance / thresh, 0, 1)), used as the feet_slide weight
+        # on the planar speed and as the imitation_contact value (match = 1 - |c - table|). It
+        # removes the cliff at the threshold (3.9 mm = full penalty, 4.1 mm = none).
+        _ch_thresh = float(self.cfg.contact_height_thresh_m or 0.0)
+        _ch_soft = self.cfg.contact_height_mode == "soft"
+        if _ch_soft:
+            clear_contact = rewards.clearance_contact_soft(clearance, _ch_thresh)       # float [0, 1]
+            feet_contact_rw = torch.maximum(feet_in_contact.float(), clear_contact)
+        else:
+            clear_contact = rewards.clearance_contact(clearance, _ch_thresh)
+            feet_contact_rw = feet_in_contact | clear_contact
+        # dragged_foot_frac diagnostic: unloaded, near the ground, sliding. Its definition is
+        # unchanged by contact_height_mode: it always uses the HARD threshold (clearance <
+        # contact_height_thresh_m). Uses 2 mm when the flag is off so a baseline run logs the same quantity.
+        _feet_vel_xy = torch.norm(self.robot.data.body_lin_vel_w[:, self.feet_indices, :2], dim=-1)
+        _dragged = (~feet_in_contact) & (clearance < (_ch_thresh if _ch_thresh > 0.0 else 0.002)) & (_feet_vel_xy > 0.05)
+        self.dragged_foot_steps += _dragged.float().sum(dim=1)
 
         # --- Update stride state ---
         # Detect Liftoff: Contact -> Air
@@ -720,10 +871,29 @@ class BipedEnv(DirectRLEnv):
         self.knee_bend_max = torch.where(knee_airborne, torch.maximum(self.knee_bend_max, knee_bend), self.knee_bend_max)
 
         # 1. track_lin_vel_xy_exp (w=2.0)
-        r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp(self.commands, self.base_lin_vel_b, std=0.15)
+        # track_*_std_rel > 0: kernel width scales with the command (rewards.py *_rel); 0 = fixed std.
+        # track_lin_target reference: the kernel is centred on the table's base velocity at (command,
+        # phase), the same frame the imitation terms use, and measured on the FRESH robot.data velocity
+        # (self.base_lin_vel_b is refreshed in _get_observations, so it is one step stale here). The
+        # width still comes from the command. command (default): unchanged, below.
+        if self.cfg.track_lin_target == "reference":
+            r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp_rel_target(
+                self.gait_ref.field(ref, "base_lin_vel_b")[:, :2], self.commands, self.robot.data.root_lin_vel_b,
+                std_rel=float(self.cfg.track_lin_std_rel), std_min=float(self.cfg.track_lin_std_min))
+        elif self.cfg.track_lin_std_rel > 0.0:
+            r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp_rel(
+                self.commands, self.base_lin_vel_b,
+                std_rel=float(self.cfg.track_lin_std_rel), std_min=float(self.cfg.track_lin_std_min))
+        else:
+            r_track_lin_vel_xy = rewards.track_lin_vel_xy_exp(self.commands, self.base_lin_vel_b, std=0.2)
         
         # 2. track_ang_vel_z_exp (w=1.5)
-        r_track_ang_vel_z = rewards.track_ang_vel_z_exp(self.commands, self.base_ang_vel_b, std=0.5)
+        if self.cfg.track_ang_std_rel > 0.0:
+            r_track_ang_vel_z = rewards.track_ang_vel_z_exp_rel(
+                self.commands, self.base_ang_vel_b,
+                std_rel=float(self.cfg.track_ang_std_rel), std_min=float(self.cfg.track_ang_std_min))
+        else:
+            r_track_ang_vel_z = rewards.track_ang_vel_z_exp(self.commands, self.base_ang_vel_b, std=0.5)
         
         # 3. termination_penalty (w=-10.0)
         # Uses the same helper as _get_dones. Previously this recomputed the test with a
@@ -757,7 +927,22 @@ class BipedEnv(DirectRLEnv):
         # 11. feet_air_time (w=1.0) ~ threshold 0.4
         current_air_time = self.contact_sensor.data.current_air_time[:, self._feet_ids]
         current_contact_time = self.contact_sensor.data.current_contact_time[:, self._feet_ids]
-        r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.3, min_speed_command_threshold=0.05)
+        if self.cfg.feet_air_time_mode == "touchdown":
+            # Paid once, on the step the foot lands. `touchdown` (env force threshold, same 1 N and
+            # same net_forces_w as the sensor, evaluated once per control step above) marks the
+            # landing; the sensor's last_air_time holds that swing's duration on exactly that
+            # step (Isaac Lab updates it at first contact, before current_air_time resets).
+            # Other foot "was down for the swing" <=> its contact time covers the whole swing
+            # (half-step tolerance for sensor time quantisation). Feet order is [right, left].
+            last_air_time = self.contact_sensor.data.last_air_time[:, self._feet_ids]
+            other_contact_time = current_contact_time[:, [1, 0]]
+            other_in_contact = (other_contact_time > 0.0) & (other_contact_time + 0.5 * self.step_dt >= last_air_time)
+            r_feet_air_time = rewards.feet_air_time_touchdown(
+                touchdown, last_air_time, other_in_contact, self.commands,
+                air_time_max=float(self.cfg.feet_air_time_max_s),
+                air_time_min=float(self.cfg.feet_air_time_min_s), min_speed_command_threshold=0.05)
+        else:
+            r_feet_air_time = rewards.feet_air_time_positive_biped(current_air_time, current_contact_time, self.commands, threshold=0.3, min_speed_command_threshold=0.05)
 
         # 12. feet_slide
         # force_matrix_w_history is only populated when filter_prim_paths_expr is non-empty
@@ -765,10 +950,13 @@ class BipedEnv(DirectRLEnv):
         if self.contact_sensor.data.force_matrix_w_history is not None:
             r_feet_slide = rewards.feet_slide(
                 self.contact_sensor.data.force_matrix_w_history[:, :, self._feet_ids, :],
-                self.robot.data.body_lin_vel_w[:, self.feet_indices]
+                self.robot.data.body_lin_vel_w[:, self.feet_indices],
+                clear_contact if _ch_thresh > 0.0 else None,
             )
         else:
-            feet_contact = (torch.norm(self.contact_sensor.data.net_forces_w[:, self._feet_ids], dim=-1) > 1.0).float()
+            feet_contact = torch.maximum(
+                (torch.norm(self.contact_sensor.data.net_forces_w[:, self._feet_ids], dim=-1) > 1.0).float(),
+                clear_contact.float())
             feet_vel_xy  = torch.norm(self.robot.data.body_lin_vel_w[:, self.feet_indices, :2], dim=-1)
             r_feet_slide = rewards.feet_slide_with_vel(feet_contact, feet_vel_xy)
 
@@ -777,6 +965,15 @@ class BipedEnv(DirectRLEnv):
             net_contact_forces_undesired = self.contact_sensor.data.force_matrix_w_history[:, :, self._undesired_contact_body_ids]
             undesired_forces_norm = torch.norm(net_contact_forces_undesired, dim=-1)  # [N, T, B]
             undesired_forces_max_per_body = torch.max(torch.max(undesired_forces_norm, dim=1)[0], dim=-1)[0]
+
+            # Foot-foot contact. The sensor filter only reports body-vs-ground in force_matrix_w,
+            # while net_forces_w contains every contact. So (net - ground) on a foot is whatever
+            # else is touching it -- i.e. the other foot (feet are the only bodies excluded above,
+            # and legs/hips are already penalised on their own).
+            feet_net = self.contact_sensor.data.net_forces_w_history[:, :, self._feet_ids]  # [N, T, F, 3]
+            feet_ground = self.contact_sensor.data.force_matrix_w_history[:, :, self._feet_ids].sum(dim=3)  # [N, T, F, 3]
+            feet_other_norm = torch.norm(feet_net - feet_ground, dim=-1).max(dim=1)[0]  # [N, F]
+            undesired_forces_max_per_body = torch.cat([undesired_forces_max_per_body, feet_other_norm], dim=-1)
         else:
             # Without filter history, use current net forces directly.
             # Keep shape [N, num_undesired_bodies] so undesired_contacts() can apply
@@ -784,8 +981,33 @@ class BipedEnv(DirectRLEnv):
             undesired_forces_max_per_body = torch.norm(
                 self.contact_sensor.data.net_forces_w[:, self._undesired_contact_body_ids], dim=-1
             )  # [N, num_undesired]
-        r_undesired_contacts = rewards.undesired_contacts(undesired_forces_max_per_body, threshold=1.0)
+        r_undesired_contacts = rewards.undesired_contacts(
+            undesired_forces_max_per_body,
+            threshold=float(getattr(self.cfg, "undesired_contacts_thresh_n", 1.0)),
+            saturation=float(getattr(self.cfg, "undesired_contacts_sat_n", 20.0)),
+        )
+
+        # 13b. leg_contact_l2: legs bracing on each other (see _leg_contact_forces for coverage).
+        if float(self.cfg.rewards.get("leg_contact_l2", 0.0)) != 0.0:
+            r_leg_contact = rewards.leg_contact_l2(
+                self._leg_contact_forces(),
+                thresh_n=float(self.cfg.leg_contact_thresh_n),
+                sat_n=float(self.cfg.leg_contact_sat_n),
+            )
+        else:
+            r_leg_contact = torch.zeros(self.num_envs, device=self.device)
         
+        # 13c. stand_pose_l2: distance to the table's stand-frame pose while the reference stands. Reuses the
+        # frame sampled once above (ref), fresh robot.data.joint_pos (self.joint_pos is one step stale here).
+        if ref is not None and float(self.cfg.rewards.get("stand_pose_l2", 0.0)) != 0.0:
+            r_stand_pose = rewards.stand_pose_l2(
+                self.robot.data.joint_pos,
+                self.gait_ref.joint_field(ref, "joint_pos"),
+                self._reference_standing().float(),
+            )
+        else:
+            r_stand_pose = torch.zeros(self.num_envs, device=self.device)
+
         # 14. joint_deviation_hip (w=-0.2)
         r_joint_deviation_hip = rewards.joint_deviation_l1(
             self.joint_pos[:, self.hip_indices], 
@@ -821,18 +1043,15 @@ class BipedEnv(DirectRLEnv):
         # paid a flat-but-unloaded foot ~0.025/step to do nothing (the standing jitter).
         # The resting height is learned from in-contact feet, and the terrain origin is
         # subtracted so patch elevation cannot be farmed either.
-        foot_z = feet_pos[:, :, 2]
-        fresh = ~self.foot_ground_init
-        if fresh.any():                       # first step after reset: both feet = ground
-            self.foot_ground_z[fresh] = foot_z[fresh]
-            self.foot_ground_init[fresh] = True
-        self.foot_ground_z = torch.where(feet_in_contact, foot_z, self.foot_ground_z)
-        clearance = foot_z - self.foot_ground_z
+        # (foot_ground_z / clearance are updated near the top of _get_rewards, where feet_in_contact
+        # is computed: feet_slide and imitation_contact need the clearance too.)
         r_swing_foot_height = rewards.swing_foot_height(
             clearance, feet_in_contact, self.commands,
             min_clearance=float(getattr(self.cfg, "swing_min_clearance", 0.01)),
             max_clearance=float(getattr(self.cfg, "swing_max_clearance", 0.07)),
             min_speed_command_threshold=0.05,
+            # anti-farming: no credit once this foot's current swing exceeds swing_max_time_s
+            swing_valid=rewards.swing_time_mask(current_air_time, float(self.cfg.swing_max_time_s)),
         )
         # diagnostics: peak clearance per completed swing, contact share per foot
         swinging = ~feet_in_contact
@@ -867,6 +1086,11 @@ class BipedEnv(DirectRLEnv):
         r_com_support_centering = rewards.com_support_centering_reward(
             com_dist, std=max(float(getattr(self.cfg, "com_centering_std", 0.04)), 1e-3))
         diag = self.gait_diagnostics(com_offset, com_dist)
+        # Footprint gap of the two feet from the FRESH articulation state (same source as _get_dones); one
+        # evaluation per step, shared by the penalty and the diagnostics.
+        foot_gap = self._foot_footprint_gap()
+        diag["foot_gap_mm"] = foot_gap * 1000.0
+        diag["foot_overlap_frac"] = (foot_gap <= 0.0).float()
         for k, v in diag.items():
             valid = ~torch.isnan(v)
             self.diag_sums[k] += torch.where(valid, v, torch.zeros_like(v))
@@ -898,21 +1122,45 @@ class BipedEnv(DirectRLEnv):
         # 24: dof_pos_l2 — correct all-joint pose regulariser (joint-space, not action-space)
         r_dof_pos_l2 = rewards.dof_pos_l2(self.joint_pos, self.default_joint_pos)
 
-        # 25: base_height_l2 — penalise crouching (below 0.29m) and tiptoe (above 0.29m)
+        # 25: base_height_l2 — penalise crouching (below target) and tiptoe (above). The target
+        # is cfg.target_base_height (0.29 m; follows spawn_height_m when env_config sets it).
         r_base_height = torch.square(
             self.robot.data.root_pos_w[:, 2] - getattr(self.cfg, "target_base_height", 0.29)
         )
 
-        # 26: foot_separation — V2 hip joints are ±21.7 mm apart (4.3 cm natural spacing);
-        # penalise when feet come closer than min_sep to force stable hip-width stance.
-        # Measured along body +Y (URDF-verified lateral axis) so it is heading-independent;
-        # the previous world-Y version read ~0 whenever the robot faced world ±Y.
-        # min_sep raised 0.07 -> 0.09. Diagnostics/foot_sep_body_m showed the policy settling at
-        # 0.0433 m -- exactly the URDF hip spacing, i.e. hip_roll driven to zero -- so 0.07 was
-        # not enough pressure to widen the stance. 0.09 needs ~6.7 deg of abduction and gives
-        # the swing leg room, which matters more for a 30 cm biped than the penalty costs.
-        r_foot_separation = rewards.foot_separation_penalty(
-            feet_pos, self.robot.data.root_quat_w, min_sep=0.09
+        # 26: foot_separation. Measured along body +Y (URDF-verified lateral axis) so it is
+        # heading-independent; the previous world-Y version read ~0 whenever the robot faced
+        # world +-Y.
+        # origin_one_sided (old): the hip joints are +-21.7 mm apart (the 0.0433 m the policy once
+        # settled at is 2 * 0.021672, i.e. hip_roll driven to zero; it is NOT a foot-origin
+        # distance). The measured point is the foot LINK ORIGIN (ankle_pitch joint, 31.6 mm above
+        # the sole, 2 mm inside the medial edge), 64.7 mm apart at the home pose, and min_sep
+        # 0.09 is clamp-one-sided, so it only ever pushes feet apart and barely sees ankle roll.
+        # sole_band: two-sided band on the SOLE-CENTRE separation (centres are 106.9 mm apart at
+        # home vs the 105 mm hip spacing); see rewards.foot_separation_sole_band_penalty.
+        feet_quat = self.robot.data.body_quat_w[:, self.feet_indices]
+        if self.cfg.foot_separation_mode == "sole_band":
+            r_foot_separation = rewards.foot_separation_sole_band_penalty(
+                feet_pos, feet_quat, self.robot.data.root_quat_w,
+                target=float(self.cfg.foot_sep_target_m), tol=float(self.cfg.foot_sep_tol_m),
+                scale=float(self.cfg.foot_sep_scale_m),
+                sole_x=self._foot_sole_offset[0], sole_lat=self._foot_sole_offset[1],
+                sole_z=self._foot_sole_offset[2],
+            )
+        else:
+            r_foot_separation = rewards.foot_separation_penalty(
+                feet_pos, self.robot.data.root_quat_w, min_sep=0.09
+            )
+
+        # 26b: foot_proximity (E21) -- clamp((margin - gap)/margin, 0, 2)^2 on the horizontal-plane gap between the
+        # sole rectangles. Terrain-independent: needs no contact sensor, so it also covers the feet on rough terrain.
+        r_foot_proximity = rewards.foot_proximity_penalty(foot_gap, self._foot_prox_margin)
+
+        # 27: foot_flat_l2 -- roll tilt of each foot in contact (sin^2 of the sole normal's
+        # lateral component). No term saw sole flatness before, so the policy stood on the
+        # inner/outer foot edges with ankle_roll saturated.
+        r_foot_flat = rewards.foot_flat_roll_l2(
+            feet_quat, self.robot.data.root_quat_w, feet_in_contact
         )
 
         # 23: hip pitch deviation — mild penalty allows walking but discourages lean/crouch
@@ -968,12 +1216,16 @@ class BipedEnv(DirectRLEnv):
             "dof_pos_l2": r_dof_pos_l2 * self.cfg.rewards.get("dof_pos_l2", 0.0),
             "base_height_l2": r_base_height * self.cfg.rewards.get("base_height_l2", 0.0),
             "foot_separation": r_foot_separation * self.cfg.rewards.get("foot_separation", 0.0),
+            "foot_proximity": r_foot_proximity * self.cfg.rewards.get("foot_proximity", 0.0),
+            "foot_flat_l2": r_foot_flat * self.cfg.rewards.get("foot_flat_l2", 0.0),
+            "leg_contact_l2": r_leg_contact * self.cfg.rewards.get("leg_contact_l2", 0.0),
+            "stand_pose_l2": r_stand_pose * self.cfg.rewards.get("stand_pose_l2", 0.0),
             "upright": r_upright * self.cfg.rewards.get("upright", 0.0),
             "angular_momentum": r_angular_momentum * self.cfg.rewards.get("angular_momentum", 0.0),
         }
         
         if self.gait_ref is not None:
-            for name, term in self._imitation_terms(feet_pos, feet_in_contact).items():
+            for name, term in self._imitation_terms(feet_pos, feet_contact_rw, clearance, ref).items():
                 reward_terms[name] = term * self.cfg.rewards.get(name, 0.0)
 
         # Weighted sum
@@ -1011,6 +1263,10 @@ class BipedEnv(DirectRLEnv):
         self.foot_sep_sum += torch.abs(
             torch.sum((feet_pos[:, 0, :] - feet_pos[:, 1, :]) * _body_y, dim=-1)
         )
+        self.foot_sole_sep_sum += rewards.foot_sole_centre_lateral_sep(
+            feet_pos, feet_quat, self.robot.data.root_quat_w,
+            self._foot_sole_offset[0], self._foot_sole_offset[1], self._foot_sole_offset[2],
+        )
 
         if self.motion_time is not None:
             self.motion_time += self.step_dt
@@ -1032,19 +1288,75 @@ class BipedEnv(DirectRLEnv):
         thr = self.cfg.reference_stand_threshold
         return (torch.norm(self.commands[:, :2], dim=1) < thr) & (self.commands[:, 2].abs() < thr)
 
-    def _advance_gait_phase(self) -> None:
-        moving = (~self._reference_standing()).float()
-        self.gait_phase = (self.gait_phase + moving * self.step_dt * 2.0 * math.pi / self.gait_ref.period) % (2.0 * math.pi)
+    def _advance_fixed_period_phase(self) -> None:
+        """gait_clock_mode=fixed_period without a table: constant rate, held while standing.
+        Same stand rule as the table clock (|v_xy| and |wz| both below the threshold)."""
+        thr = self.cfg.gait_clock_stand_threshold
+        standing = (torch.norm(self.commands[:, :2], dim=1) < thr) & (self.commands[:, 2].abs() < thr)
+        self.gait_phase = (
+            self.gait_phase + (~standing).float() * self.step_dt * 2.0 * math.pi / self.cfg.gait_clock_period_s
+        ) % (2.0 * math.pi)
 
-    def _imitation_terms(self, feet_pos: torch.Tensor, feet_in_contact: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Seven imitation terms against the table at (command, phase). Unweighted, in [0, 1].
+    def _advance_gait_phase(self) -> None:
+        """Table clock: 2*pi*freq(command) per second, held while standing. A v2 table's cadence
+        follows the command (Gait Studio's cadence law); freq is trilinear in the command like
+        the table itself, so the clock and the reference always describe the same cycle."""
+        moving = (~self._reference_standing()).float()
+        freq = self.gait_ref.frequency(self.commands)
+        self.gait_phase = (self.gait_phase + moving * self.step_dt * 2.0 * math.pi * freq) % (2.0 * math.pi)
+
+    def _leg_contact_forces(self) -> torch.Tensor:
+        """(N, B) peak |force| [N] over the sensor history on the bodies leg_contact_l2 watches.
+
+        Contact sensor: prim_path Robot/Robot/.* (every link), so net_forces_w holds the sum of
+        ALL contacts on a body, floor and other robot links alike (self-collisions are enabled in
+        the asset). filter_prim_paths_expr is the ground plane only, so force_matrix_w is the
+        floor part alone, which is why the old undesired_contacts term (it reads force_matrix_w
+        for non-foot bodies) cannot see leg-leg contact.
+          * non-foot leg bodies (hip/thigh/calf/ankle): the net force. The floor never touches
+            them while standing, so any force is the other leg (or a fall) -- always undesired.
+          * feet (flat terrain only, i.e. when force_matrix_w exists): net - floor = whatever else
+            touches the foot (the other foot), the construction undesired_contacts already used.
+            With rough terrain the filter is cleared (biped_env_cfg.__post_init__), the floor
+            force cannot be removed from a foot's net force, and the feet are left OUT.
+        """
+        cs = self.contact_sensor.data
+        net_hist = cs.net_forces_w_history                                      # [N, T, B, 3]
+        forces = torch.norm(net_hist[:, :, self._leg_body_ids], dim=-1).max(dim=1)[0]
+        if cs.force_matrix_w_history is not None:
+            feet_net = net_hist[:, :, self._feet_ids]
+            feet_ground = cs.force_matrix_w_history[:, :, self._feet_ids].sum(dim=3)
+            feet_other = torch.norm(feet_net - feet_ground, dim=-1).max(dim=1)[0]
+            forces = torch.cat([forces, feet_other], dim=-1)
+        return forces
+
+    def _sample_reference(self) -> torch.Tensor:
+        """Table frame [N, D] at the current (command, phase); stored in self.ref_frame."""
+        ref = self.gait_ref.sample(self.commands, self.gait_phase / (2.0 * math.pi), self._reference_standing())
+        self.ref_frame = ref
+        return ref
+
+    def _imitation_terms(self, feet_pos: torch.Tensor, feet_in_contact: torch.Tensor,
+                         clearance: torch.Tensor, ref: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        """Eight imitation terms against the table at (command, phase). Unweighted, in [0, 1].
 
         Reads robot.data directly: the self.joint_pos etc. caches are refreshed in
         _get_observations, so they are one step stale here. Env foot order is [right, left]; the
-        table's is [left, right]."""
+        table's is [left, right].
+
+        feet_in_contact is the reward-side flag (|F| > 1 N or clearance < contact_height_thresh_m;
+        contact_height_mode soft: the float score in [0, 1]). imitation_foot_agg picks mean | min
+        over the two feet for imitation_foot_height and imitation_contact.
+        clearance (N, 2, env order) is the swing_foot_height datum quantity; the table's
+        foot_height is the sole height above the ground (stance baseline 0.01-0.06 mm, far below
+        the 4 mm std, so it is used as is).
+        ref: the frame _get_rewards already sampled for this step (shared with the tracking term);
+        None samples it here."""
         g, d, std = self.gait_ref, self.robot.data, self._ref_std
-        ref = g.sample(self.commands, self.gait_phase / (2.0 * math.pi), self._reference_standing())
-        self.ref_frame = ref
+        _agg_min = self.cfg.imitation_foot_agg == "min"
+        _soft = self.cfg.contact_height_mode == "soft"
+        if ref is None:
+            ref = self._sample_reference()
 
         rel = (feet_pos - d.root_pos_w.unsqueeze(1))[:, [1, 0]]                      # [N, 2, 3] world, [left, right]
         quat = d.root_quat_w.unsqueeze(1).expand(-1, 2, -1).reshape(-1, 4)
@@ -1054,10 +1366,14 @@ class BipedEnv(DirectRLEnv):
             "imitation_joint_pos": rewards.imitation_mse_exp(d.joint_pos, g.joint_field(ref, "joint_pos"), std["joint_pos"]),
             "imitation_joint_vel": rewards.imitation_mse_exp(d.joint_vel, g.joint_field(ref, "joint_vel"), std["joint_vel"]),
             "imitation_foot_pos": rewards.imitation_mse_exp(feet_b, g.field(ref, "foot_pos_b"), std["foot_pos"]),
-            "imitation_contact": rewards.imitation_contact_match(feet_in_contact[:, [1, 0]], g.field(ref, "contact")),
+            "imitation_contact": rewards.imitation_contact_match(feet_in_contact[:, [1, 0]], g.field(ref, "contact"), _soft, _agg_min),
             "imitation_orientation": rewards.imitation_mse_exp(d.projected_gravity_b, g.field(ref, "projected_gravity"), std["orientation"]),
             "imitation_lin_vel": rewards.imitation_mse_exp(d.root_lin_vel_b, g.field(ref, "base_lin_vel_b"), std["lin_vel"]),
             "imitation_ang_vel": rewards.imitation_mse_exp(d.root_ang_vel_b, g.field(ref, "base_ang_vel_b"), std["ang_vel"]),
+            # Sole height above the ground vs the table's. imitation_foot_pos only sees the foot
+            # origin in the base frame (an 11 mm swing-height miss costs ~1% of it). env order is
+            # flipped to the table's [left, right] inside the function.
+            "imitation_foot_height": rewards.imitation_foot_height(clearance, g.field(ref, "foot_height"), std["foot_height"], _agg_min),
         }
 
     def _reference_state_init(self, env_ids: torch.Tensor) -> None:
@@ -1181,6 +1497,18 @@ class BipedEnv(DirectRLEnv):
         cos_tilt = (-self.robot.data.projected_gravity_b[:, 2]).clamp(-1.0, 1.0)
         return torch.acos(cos_tilt).abs() > limit_angle
 
+    def _foot_footprint_gap(self) -> torch.Tensor:
+        """(N,) signed horizontal-plane gap [m] between the two foot sole rectangles (negative = overlapping).
+
+        Reads robot.data.body_pos_w / body_quat_w directly (fresh after the physics step, like _tilt_exceeded), so
+        the penalty, the diagnostics and the overlap termination all see the same state. self.feet_indices is
+        [right, left]; rewards.foot_footprint_gap takes (left, right)."""
+        pos = self.robot.data.body_pos_w[:, self.feet_indices]
+        quat = self.robot.data.body_quat_w[:, self.feet_indices]
+        return rewards.foot_footprint_gap(
+            pos[:, 1], quat[:, 1], pos[:, 0], quat[:, 0],
+            list(self._foot_sole_offset), list(self._foot_sole_half))
+
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = self._tilt_exceeded()
@@ -1191,6 +1519,15 @@ class BipedEnv(DirectRLEnv):
             torch.isnan(self.robot.data.root_pos_w).any(dim=-1)
         )
         died = died | nan_state
+        # Optional foot-overlap termination (E21, off by default). DirectRLEnv.step runs _get_dones BEFORE
+        # _get_rewards, both after the physics step, so this is the one place the counter advances.
+        if self._foot_overlap_steps > 0:
+            overlap = self._foot_footprint_gap() <= 0.0
+            self.foot_overlap_count = torch.where(
+                overlap, self.foot_overlap_count + 1, torch.zeros_like(self.foot_overlap_count))
+            overlap_done = self.foot_overlap_count >= self._foot_overlap_steps
+            self._foot_overlap_term = overlap_done & ~died
+            died = died | overlap_done
         return died, time_out
         
     def _reset_idx(self, env_ids: torch.Tensor):
@@ -1243,7 +1580,10 @@ class BipedEnv(DirectRLEnv):
         self.extras["log"].update(_curriculum_log)
         self.extras["log"].update(extras)
         extras_term = dict()
-        extras_term["Episode_Termination/base_contact"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+        _ov_term = self._foot_overlap_term[env_ids] & self.reset_terminated[env_ids]
+        extras_term["Episode_Termination/base_contact"] = (
+            torch.count_nonzero(self.reset_terminated[env_ids]) - torch.count_nonzero(_ov_term)).item()
+        extras_term["Episode_Termination/foot_overlap"] = torch.count_nonzero(_ov_term).item()
         extras_term["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
 
         # Torque headroom. Normalised by ACTUAL episode length (unlike Reward_Terms, which
@@ -1255,6 +1595,7 @@ class BipedEnv(DirectRLEnv):
             extras_term["Actuator/mean_abs_tau_ext"] = torch.mean(self.tau_ext_abs_sum[env_ids] / _steps).item()
             extras_term["Actuator/mean_abs_friction"] = torch.mean(self.friction_abs_sum[env_ids] / _steps).item()
         extras_term["Diagnostics/foot_sep_body_m"] = torch.mean(self.foot_sep_sum[env_ids] / _steps).item()
+        extras_term["Diagnostics/foot_sole_sep_body_m"] = torch.mean(self.foot_sole_sep_sum[env_ids] / _steps).item()
         for k, v in self.diag_sums.items():
             # Average over the steps this key was valid, not over every step: the
             # *_moving_* keys are undefined while an env is commanded to stand.
@@ -1270,6 +1611,10 @@ class BipedEnv(DirectRLEnv):
                 1000.0 * self.swing_peak_sum[env_ids].sum() / _swings.sum()).item()
         _cf = self.contact_steps[env_ids] / _steps.unsqueeze(-1)
         extras_term["Diagnostics/contact_asym"] = torch.mean((_cf[:, 0] - _cf[:, 1]).abs()).item()
+        # fraction of foot-steps with |F| <= 1 N, clearance < thresh, moving > 0.05 m/s
+        extras_term["Diagnostics/dragged_foot_frac"] = torch.mean(
+            self.dragged_foot_steps[env_ids] / (2.0 * _steps)).item()
+        self.dragged_foot_steps[env_ids] = 0.0
         self.swing_peak[env_ids] = 0.0
         self.swing_peak_sum[env_ids] = 0.0
         self.swing_count[env_ids] = 0.0
@@ -1291,6 +1636,9 @@ class BipedEnv(DirectRLEnv):
         self.tau_ext_abs_sum[env_ids] = 0.0
         self.friction_abs_sum[env_ids] = 0.0
         self.foot_sep_sum[env_ids] = 0.0
+        self.foot_sole_sep_sum[env_ids] = 0.0
+        self.foot_overlap_count[env_ids] = 0
+        self._foot_overlap_term[env_ids] = False
         self.episode_step_count[env_ids] = 0.0
 
         self.extras["log"].update(extras_term)
@@ -1627,6 +1975,21 @@ class BipedEnv(DirectRLEnv):
     def mirror_action(self, actions: torch.Tensor) -> torch.Tensor:
         """Return a left-right mirrored copy of actions."""
         return actions[:, self._mirror_action_perm] * self._mirror_action_signs
+
+    def actor_mirror_tables(self):
+        """(obs_perm, obs_sign, act_perm, act_sign) as CPU tensors for the ACTOR input exactly as the
+        actor receives it, i.e. the per-frame 50-dim tables tiled over the history stack (the same
+        chunk-wise mirror as mirror_obs). mirror x := x[..., perm] * sign. Used by the equivariant actor
+        wrapper (train.equivariant_actor), which stores them as checkpoint buffers."""
+        if self.cfg.policy_has_privileged_info:
+            raise ValueError("actor_mirror_tables: the actor obs carries privileged dims, which mirror_obs "
+                             "does not mirror (its per-frame layout is the 50-dim proprio frame only)")
+        n_frames, rest = divmod(self.num_obs_policy, self.obs_proprio_dim)
+        if rest or n_frames < 1:
+            raise ValueError(f"actor obs dim {self.num_obs_policy} is not a multiple of the {self.obs_proprio_dim}-dim frame")
+        perm = torch.cat([self._mirror_obs_perm.cpu() + i * self.obs_proprio_dim for i in range(n_frames)])
+        sign = self._mirror_obs_signs.cpu().repeat(n_frames)
+        return perm, sign, self._mirror_action_perm.cpu(), self._mirror_action_signs.cpu()
 
     def _resample_commands(self, env_ids: torch.Tensor):
         self.command_generator.reset(env_ids)

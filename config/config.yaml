@@ -23,6 +23,10 @@ train:
   test_episodes: 2
   show_progress: true
   replace_checkpoint: true
+  # CAPS action-smoothness regulariser (torch_rl_algorithms SAC actor loss); schema default is off
+  caps_temporal_weight: 1.0
+  caps_spatial_weight: 1.0
+  caps_spatial_sigma: 0.1
 
   env_config:
     reward_scale: 1.0
@@ -38,11 +42,11 @@ train:
       # time, which punishes the falls that walking attempts cause. Restore toward -5.0 once
       # walking is stable again.
       termination_penalty: -0.2
-      flat_orientation_l2: -2.0         # was -1.5 — stronger tilt penalty
-      lin_vel_z_l2: -2
+      flat_orientation_l2: -1.5        # was -1.5 — stronger tilt penalty
+      lin_vel_z_l2: -1.0
       ang_vel_xy_l2: -0.05             # was -0.15 — damp pitch/roll oscillation (flowy body)
       angular_momentum: -0.02
-      upright: 0.5
+      upright: 0.2
 
       # Smoothness
       # action_rate_l2 is now SCHEDULED (action_rate_weight_* below): this value is only the
@@ -60,23 +64,23 @@ train:
       # Standing with both feet down scores 0.5 here, perfect alternation 1.0, so the real
       # incentive to alternate is 0.5*weight per step. Speed-gated, so standing envs are exempt.
       gait_phase_contact: 0.5
-      feet_air_time: 0.05               # removed — was encouraging big hops; gait_phase_contact handles timing
+      feet_air_time: 3.0                # touchdown-paid (feet_air_time_mode below); was 0.05 per-step
       # 0.15 -> 1.5, alongside widening the clearance window to 0.09 in biped_env.
       # Break-even analysis: bending the knee to ~0.6 rad for clearance costs ~0.024/step in
       # joint_deviation_knee + dof_pos_l2, while the clearance reward at weight 0.15 paid only
       # ~0.0075/step. Lifting was a NET LOSS, so the policy correctly refused to do it. Weight
       # must exceed ~0.5 just to break even; 1.5 gives a 3x margin.
       # (The old "was encouraging unnecessary foot lifting" note predates the 4 cm cap.)
-      swing_foot_height: 1.5
+      swing_foot_height: 1.0            # re-enabled: capped at 2 cm, only while swing <= swing_max_time_s
       feet_slide: -0.1                 # flat foot contact (keep)
       step_length: 0.0
       knee_bend_touchdown: 0.0
 
       # Contact & joint quality
-      undesired_contacts: -0.5
-      joint_deviation_hip: -0.08
-      joint_deviation_hip_pitch: -0.05   # was -0.05 — slight increase for lean prevention
-      joint_deviation_ankle_roll: -0.05
+      undesired_contacts: -1.0
+      joint_deviation_hip: -0.05
+      joint_deviation_hip_pitch: -0.03   # was -0.05 — slight increase for lean prevention
+      joint_deviation_ankle_roll: -0.1
       # Every V2 default joint pos is 0.0 and the knee limit is [-120deg, +5deg], so these
       # deviation terms were literally enforcing a straight leg / flat foot.
       joint_deviation_ankle_pitch: -0.05  # was -0.2 — heel-strike to toe-off needs ankle range
@@ -85,7 +89,7 @@ train:
       # Raised 0.1 -> 0.5 when the term was FIXED (2026-10-03). It used exp(-1.0*dist^2) with
       # dist in metres, which was flat across the whole robot (5 cm off still scored 0.9975),
       # so nothing resisted leaning ahead of the feet. Length scale is com_centering_std below.
-      com_support_centering: 0.5
+      com_support_centering: 0.0
       ankle_torques_l2: -0.003
       # dof_pos_l2 is L2 (0.5*theta^2) vs joint_deviation_knee's L1 (0.15*|theta|): they match
       # at ~0.3 rad but L2 dominates at the 0.5-0.8 rad bend we want (0.32 vs 0.12 at 0.8).
@@ -101,7 +105,11 @@ train:
       # base_height_l2: penalise crouching (<0.29m) and tiptoe (>0.29m)
       base_height_l2: 0 #-5.0
       # foot_separation: V2 natural spacing is only 4.3 cm; require 7 cm minimum
-      foot_separation: -1.0
+      foot_separation: -0.1
+      # roll tilt of each foot in contact (sin^2 of the sole normal's lateral component)
+      foot_flat_l2: -3.0
+      # legs bracing on each other: non-foot leg links (+ feet on flat terrain), saturates at 5 N
+      leg_contact_l2: -0.5
       # action_l2 DISABLED: action=0 maps to tiptoe+crouch+lean due to asymmetric joint limits
       action_l2: 0.0
 
@@ -113,15 +121,18 @@ train:
       base_velocity:
         resampling_time_range: [4.0, 8.0]
         heading_control_stiffness: 0.5
+        # Heading mode turns at error*0.5 clamped to this. Without it, ang_vel_z's +-1.2 (sized for
+        # turn-in-place) made most moving envs turn at ~1 rad/s for the first seconds of each command.
+        heading_max_ang_vel: 0.5
         rel_standing_envs: 0.02      # starting value; scheduled by standing_envs_* below
         rel_heading_envs: 1.0
         # vx = vy = 0 with |wz| in [0.4*max, max]. Uniform sampling makes spin-on-the-spot
         # ~2% of data, so it is otherwise never trained.
         rel_turn_in_place_envs: 0.15
         ranges:
-          lin_vel_x: [-0.3, 0.5]       # Include backward motion
-          lin_vel_y: [-0.3, 0.3]       # Full lateral range
-          ang_vel_z: [-0.3, 0.3]
+          lin_vel_x: [-0.2, 0.2]       # = bake grid (Gait Studio command_ranges)
+          lin_vel_y: [-0.2, 0.2]
+          ang_vel_z: [-1.2, 1.2]
           heading: [-3.14159, 3.14159]
 
     # Per-channel observation noise std, in each channel's own units. The previous single
@@ -149,7 +160,16 @@ train:
     # was confounded (massless links, actuator 3x too strong; TODO.md). [0, 0] left the policy
     # with almost no latency margin: in MuJoCo, +40 ms of actuation delay made it shake and fall,
     # and with the stiffer real servo +20 ms was enough, which is what the Jetson had (2026-10-12).
-    action_delay_steps_range: [0, 2]
+    # 2026-10-14 real trace: the robot behaved like MuJoCo with +2 steps of delay on top of the old
+    # [0, 2] (chatter 0.41/step vs 0.04 in sim), i.e. no margin. Now [1, 3], ramped by the DR curriculum.
+    action_delay_steps_range: [0, 3]
+
+    # Max change of the normalized action per control step, applied in the env BEFORE the EMA, against
+    # the previously applied action. 0 = off. OFF on purpose: with SAC (stores the raw action) the limiter
+    # let the policy collapse into a period-2 bang-bang that leaned on the clip (trace 2026-10-15: 100% of
+    # steps limited, MuJoCo vx 0 at cmd 0.2). The Jetson keeps its own 0.5 safety clip;
+    # src/mujoco/policy_gate.py checks the policy rarely hits it.
+    action_rate_limit: 0
 
     # Sensor lag (observation side), in 50 Hz control steps.
     # Servo encoders report one step stale, same for every env.
@@ -227,7 +247,33 @@ train:
     # centered: a=0 is the standing pose, a=+-1 reach each joint limit. The legacy "absolute"
     # map put a=0 at the limit-box midpoint (knee -57.5 deg). CHANGING THIS INVALIDATES EVERY
     # EXISTING CHECKPOINT AND BUNDLE -- export_onnx records it, and the Jetson refuses a mismatch.
-    action_map: centered
+    # residual: target = clamp(home + scale*a, limits); a=0 is the crouched, flat-footed HOME pose
+    # below (also the reset pose, joint_pos_rel origin and deviation-reward target). Home sole is
+    # flat: hip_pitch - knee + ankle_pitch = -10 + 26 - 16 = 0. Left/right share one value.
+    # Baked gaits stay within |a| <= 0.90 per joint with these scales.
+    # `centered` / `absolute` still work (omit the two dicts and spawn_height_m).
+    action_map: residual
+    action_home_deg:
+      hip_yaw: 0.0
+      hip_roll: 0.0
+      hip_pitch: -10.0
+      knee: -26.0
+      ankle_roll: 0.0
+      ankle_pitch: -16.0
+    action_scale_rad:
+      hip_yaw: 0.6
+      hip_roll: 0.45
+      hip_pitch: 0.8
+      knee: 0.6
+      ankle_roll: 0.45
+      ankle_pitch: 0.6
+    spawn_height_m: 0.286            # 0.29 minus the 3.9 mm the crouch lowers the base; base_height_l2 target follows
+    # Gait clock (no gait table). speed_proportional = gait_clock_base_freq * |v_xy| Hz, which
+    # is a 2 s cycle at 0.1 m/s. fixed_period = constant cycle time gait_clock_period_s while
+    # moving, held while |v_xy| and |wz| are both below gait_clock_stand_threshold.
+    gait_clock_mode: fixed_period
+    gait_clock_period_s: 0.7
+    gait_clock_stand_threshold: 0.05
     # Ramps in common_step_counter units (control steps), the same unit as curriculum_dr_*.
     standing_envs_start: 0.02
     # 0.25 -> 0.10. Standing is taught by the spawn mix (no stillness reward), but at 0.25
@@ -244,7 +290,7 @@ train:
     # vs the DC-motor run's -2.0) while swing_foot_height paid +0.06: the policy was paid far
     # more to hold still than to lift a foot. The B_ar005 ablation set exactly this value and
     # was the only one of four that improved the gait (episode score 1158 vs 699).
-    action_rate_weight_end: -0.05
+    action_rate_weight_end: -0.1
     action_rate_ramp_steps: 30000
     # swing_foot_height pays clearance ABOVE the measured resting foot height (printed at startup)
     # Dead zone REMOVED 2026-10-03. It was 0.01 while the measured peak swing clearance was
@@ -254,7 +300,24 @@ train:
     # datum (same date) already makes that structurally impossible -- a grounded foot reads
     # clearance 0 by construction. Keeping both was double protection that killed the signal.
     swing_min_clearance: 0.0
-    swing_max_clearance: 0.07
+    # Natural gait: the gait table lifts only 1.0-1.4 cm, so credit saturates at 2 cm (no
+    # reward for lifting higher). A foot airborne for longer than swing_max_time_s earns
+    # nothing (the policy used to hold one leg up to farm this term).
+    swing_max_clearance: 0.02
+    swing_max_time_s: 0.5
+    # Relative velocity-tracking kernels: std = clamp(rel*|cmd|, min). Standing still at
+    # |cmd| >= 0.1 earns ~0.13 of the max, half the commanded speed ~0.6, zero command with
+    # 0.05 drift ~0.6. rel 0 = old fixed std (0.2 linear / 0.5 yaw).
+    track_lin_std_rel: 0.7
+    track_lin_std_min: 0.07
+    track_ang_std_rel: 0.7
+    track_ang_std_min: 0.15
+    # feet_air_time: touchdown = paid once per step at landing =
+    # clamp(swing - min_s, 0, max_s - min_s), single stance only (0.3 s swing -> 0.15, a
+    # 0.1 s flicker -> 0, 0.7 s -> 0.25); per_step = old behaviour (pays every step a foot is up).
+    feet_air_time_mode: touchdown
+    feet_air_time_min_s: 0.15
+    feet_air_time_max_s: 0.4
     # com_support_centering now scores the distance the CoM lies OUTSIDE the support
     # POLYGON (0 when inside), not its distance from the support CENTRE. Measuring from the
     # centre taxed the weight transfer that begins every step: shifting onto one foot to
@@ -263,6 +326,11 @@ train:
     # form (isotropic 0.04, then anisotropic 0.12/0.04) left foot lift at ~6 mm both times.
     com_centering_std: 0.04
     com_foot_margin: 0.03           # foot half-extent; CoM over a planted foot reads 0
+    # foot_separation: sole_band = two-sided band on the SOLE-CENTRE lateral separation
+    # (target 0.095 +- 0.025 m, scale 0.02); origin_one_sided = old link-origin one-sided penalty
+    foot_separation_mode: sole_band
+    # undesired_contacts saturates at this force (old: 20 N), so a 6 N lean costs 1.0 not 0.25
+    undesired_contacts_sat_n: 5.0
 
     # Domain randomization master switches. These MUST be set explicitly: the schema defaults
     # are false, and biped_env_cfg.__post_init__ now actually honours them (the gate used to be
@@ -274,7 +342,7 @@ train:
     # Curriculum — randomize_com and randomize_payload scale from 0→100% over dr_full_steps
     curriculum_enabled: true
     curriculum_dr_start_steps: 0        # start DR from step 0
-    curriculum_dr_full_steps:  12000    # reach full COM/payload DR at 40k steps
+    curriculum_dr_full_steps:  20000    # reach full COM/payload DR at 40k steps
     curriculum_cmd_ramp_steps:  0       # full command range from the start
     curriculum_init_ramp_steps: 0       # full init range from the start
     # "action_delay" and "servo_stiffness" are ramped in code (BipedEnv._dr_ramp): both at full
