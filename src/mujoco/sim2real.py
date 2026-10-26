@@ -41,6 +41,7 @@ if _ROOT not in sys.path:
 from config.schema import ModelType
 from envs.mujoco.biped_env_v2 import BipedEnvV2
 from utils import Config
+from utils.residual_home import freeze_residual_map
 
 # RL algorithm imports
 _TRL = os.path.join(_ROOT, "torch_rl_algorithms")
@@ -214,6 +215,7 @@ def main():
         print(f"[sim2real] Config not found: {args.config_path}")
         sys.exit(1)
     config = Config(cfg_path)
+    freeze_residual_map(config, warn_unfrozen=True)      # a run's own config.yaml is already numbers
 
     # ------------------------------------------------------------------ checkpoint
     ckpt = _resolve_checkpoint(args.checkpoint, config)
@@ -305,11 +307,13 @@ def main():
             obs, _ = env.reset()
             # Apply fixed command if specified
             if args.vx is not None or args.vy is not None or args.wz is not None:
-                env.set_command(
-                    args.vx if args.vx is not None else env.commands[0],
-                    args.vy if args.vy is not None else env.commands[1],
-                    args.wz if args.wz is not None else env.commands[2],
-                )
+                want = (args.vx if args.vx is not None else env.commands[0],
+                        args.vy if args.vy is not None else env.commands[1],
+                        args.wz if args.wz is not None else env.commands[2])
+                eff = env.set_command(*want)
+                if not np.allclose(eff, want, atol=1e-9):
+                    print(f"[sim2real] command ({want[0]:.3f}, {want[1]:.3f}, {want[2]:.3f}) limited to "
+                          f"({eff[0]:.4f}, {eff[1]:.4f}, {eff[2]:.4f}) by the config's command limit")
 
             ep_reward  = 0.0
             ep_steps   = 0

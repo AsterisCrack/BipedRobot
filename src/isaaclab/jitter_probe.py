@@ -46,6 +46,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from torch_rl_algorithms.algorithms.sac.model import SAC  # noqa: E402
 from utils import Config  # noqa: E402
+from utils.residual_home import freeze_residual_map  # noqa: E402
 from src.isaaclab.common import BaseIsaacLabWrapper  # noqa: E402
 from src.isaaclab.env_config import build_env_cfg  # noqa: E402
 from envs.isaaclab.biped_env import BipedEnv  # noqa: E402
@@ -64,6 +65,7 @@ def main():
     ckpt = os.path.abspath(args.checkpoint)
     cfg_path = args.config_path or os.path.join(os.path.dirname(ckpt), "config.yaml")
     config = Config(cfg_path)
+    freeze_residual_map(config, warn_unfrozen=True)
     config.train.use_rough_terrain = False
 
     env_cfg = build_env_cfg(config, BipedRobotV2EnvCfg if args.task == "BipedRobotV2" else BipedEnvCfg,
@@ -71,6 +73,7 @@ def main():
     bv = env_cfg.commands["base_velocity"]
     vx, vy, wz = args.cmd
     bv["ranges"].update(lin_vel_x=(vx, vx), lin_vel_y=(vy, vy), ang_vel_z=(wz, wz))
+    bv["limit_shape"] = "box"   # the ranges are collapsed onto the probe command: an ellipse would scale it
     for k in ("rel_standing_envs", "rel_heading_envs", "rel_turn_in_place_envs"):
         if k in bv:
             bv[k] = 0.0

@@ -56,6 +56,21 @@ def test_roll_14deg_is_sin_squared_per_foot():
     assert both == pytest.approx(2 * expect, rel=1e-5)       # sign of the roll does not matter
 
 
+def test_roll_20deg_rocker_pitch_and_flat_feet_e22():
+    # E22 (foot_flat_l2 -1.0 in the gait-reference config): both feet in contact, torso upright, quaternions [w, x, y, z].
+    # Roll = rotation about the foot x axis (qx); the heel-toe rocker is a rotation about y (qy) and must cost nothing.
+    a = math.radians(20.0)
+    root = IDQ.unsqueeze(0)
+    both = contact(True, True)
+    expect = math.sin(a) ** 2                                # 0.117 per foot
+    assert expect == pytest.approx(0.117, abs=1e-3)
+    rolled = R.foot_flat_roll_l2(feet_q(qx(a), qx(a)), root, both).item()
+    assert rolled == pytest.approx(2 * expect, rel=1e-5)
+    assert R.foot_flat_roll_l2(feet_q(IDQ, IDQ), root, both).item() == pytest.approx(0.0, abs=1e-7)
+    for s in (1.0, -1.0):                                     # toe-down / heel-down rocker, either foot
+        assert R.foot_flat_roll_l2(feet_q(qy(s * a), qy(-s * a)), root, both).item() == pytest.approx(0.0, abs=1e-7)
+
+
 def test_airborne_foot_is_ignored():
     a = math.radians(14.0)
     q = feet_q(qx(a), qx(a))
@@ -267,5 +282,5 @@ def test_shipped_config_yaml_values():
     t = d["train"]
     ec, w = t["env_config"], t["env_config"]["reward_weights"]
     assert ec["foot_separation_mode"] == "sole_band" and ec["undesired_contacts_sat_n"] == 5.0
-    assert (w["foot_flat_l2"], w["foot_separation"], w["undesired_contacts"], w["leg_contact_l2"]) == (-3.0, -0.1, -1.0, -0.5)
+    assert (w["foot_flat_l2"], w["foot_separation"], w["undesired_contacts"], w["leg_contact_l2"]) == (-5.0, -0.1, -1.0, -0.5)   # foot_flat_l2 -3 -> -5 (2026-10-25)
     assert (t["caps_temporal_weight"], t["caps_spatial_weight"], t["caps_spatial_sigma"]) == (1.0, 1.0, 0.1)

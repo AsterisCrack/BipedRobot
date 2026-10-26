@@ -29,14 +29,9 @@ HOME_DEG = {"hip_yaw": 0.0, "hip_roll": 0.0, "hip_pitch": -10.0, "knee": -26.0,
             "ankle_roll": 0.0, "ankle_pitch": -16.0}
 SCALE = {"hip_yaw": 0.6, "hip_roll": 0.45, "hip_pitch": 0.8, "knee": 0.6,
          "ankle_roll": 0.45, "ankle_pitch": 0.6}
-# config/config_gait_reference.yaml: home = the v2 baked table's stand pose (rounded); the scales are the user's choice,
-# sized so that every baked cell inside the training command ranges (now the whole v2 grid) AND the RSI joint noise stay
-# inside [-1, 1] (ankle_pitch 0.45 is a deliberate floor above the 0.35 the table needs)
-REF_HOME_DEG = {"hip_yaw": 2.1, "hip_roll": -6.2, "hip_pitch": -17.7, "knee": -36.6,
-                "ankle_roll": 6.5, "ankle_pitch": -18.7}
-REF_SCALE = {"hip_yaw": 0.55, "hip_roll": 0.55, "hip_pitch": 0.95, "knee": 0.90,
-             "ankle_roll": 0.60, "ankle_pitch": 0.45}
-REF_SPAWN_HEIGHT_M = 0.28                        # same ~5.4 mm sole clearance as the previous home at 0.286
+CONFIG_YAML_SCALE = {"hip_yaw": 0.45, "hip_roll": 0.45, "hip_pitch": {"pos": 0.6, "neg": 0.8}, "knee": {"pos": 0.55, "neg": 0.8}, "ankle_roll": 0.35, "ankle_pitch": {"pos": 0.6, "neg": 0.35}}   # config/config.yaml since 2026-10-25
+# config/config_gait_reference.yaml says `auto` for home / scales / spawn height: utils/residual_home.py derives them from
+# the baked table (see the invariants tested below and tests/test_residual_home_resolver.py), so nothing here pins them.
 LIM_DEG = [[-45, 45], [-45, 45], [-25, 45], [-25, 45], [-90, 30], [-90, 30],
            [-120, 5], [-120, 5], [-60, 60], [-60, 60], [-35, 50], [-35, 50]]
 LO = np.radians([lo for lo, _ in LIM_DEG])
@@ -104,7 +99,7 @@ def test_isaac_env_methods_match_numpy_formula():
     f32 = torch.float32
     me = SimpleNamespace(
         action_map="residual", default_joint_pos=torch.tensor(HOME, dtype=f32),
-        action_scale=torch.tensor(SC, dtype=f32),
+        action_scale=torch.tensor(SC, dtype=f32), action_scale_neg=None,        # None = symmetric
         joint_limits_min=torch.tensor(LO, dtype=f32), joint_limits_max=torch.tensor(HI, dtype=f32))
     a = torch.tensor(np.random.default_rng(1).uniform(-1.3, 1.3, (64, 12)), dtype=f32)
     t = fwd(me, a)
@@ -183,17 +178,21 @@ def test_config_yaml_parses_residual_defaults():
     from utils import Config
     ec = Config(os.path.join(ROOT, "config", "config.yaml")).train.env_config
     assert ec.action_map == "residual"
-    assert dict(ec.action_home_deg) == HOME_DEG and dict(ec.action_scale_rad) == SCALE
+    assert dict(ec.action_home_deg) == HOME_DEG and dict(ec.action_scale_rad) == CONFIG_YAML_SCALE
     assert ec.spawn_height_m == pytest.approx(0.286)
-    # the gait-table config is residual too, with the baked table's (rounded) STAND pose as home
+    # the gait-table config is residual too and derives its map from the baked table: home = the table's STAND pose
     ec2 = Config(os.path.join(ROOT, "config", "config_gait_reference.yaml")).train.env_config
-    assert ec2.action_map == "residual" and ec2.spawn_height_m == pytest.approx(REF_SPAWN_HEIGHT_M)
-    assert dict(ec2.action_home_deg) == REF_HOME_DEG and dict(ec2.action_scale_rad) == REF_SCALE
-    h = expand_by_type(ec2.action_home_deg, "x")
-    assert abs(h[4] - h[6] + h[10]) < 0.5 and abs(h[2] + h[8]) < 0.5               # flat sole (pitch and roll), v2 stand: 0.2 / 0.3 deg
-    check_residual_map(home_rad(ec2.action_home_deg), scale_rad(ec2.action_scale_rad), LO, HI)
+    assert ec2.action_map == "residual"
+    assert ec2.action_home_deg == "auto" and ec2.action_scale_rad == "auto" and ec2.spawn_height_m == "auto"
+    assert ec2.spawn_clearance_m == pytest.approx(0.0054) and ec2.scale_headroom == pytest.approx(0.96)
+    home_deg, scale, spawn, _ = _resolved()
+    h = expand_by_type(home_deg, "x")
+    assert abs(h[4] - h[6] + h[10]) < 0.5 and abs(h[2] + h[8]) < 0.5               # flat sole (pitch and roll) within 0.5 deg
+    check_residual_map(home_rad(home_deg), scale_rad(scale), LO, HI)               # in the limits, L/R symmetric, scale > 0
+    assert 0.25 < spawn < 0.30
 
 
+JOINT_TYPES_ = ("hip_yaw", "hip_roll", "hip_pitch", "knee", "ankle_roll", "ankle_pitch")
 REAL_TABLE = os.path.join(ROOT, "robot_motion_reference", "processed", "gait_table.npz")
 
 
@@ -208,14 +207,29 @@ def _cells_in_range(grid, bound):
     return keep
 
 
+_RESOLVED = {}
+
+
+def _resolved():
+    """(home_deg, scale_rad, spawn_m, report) the resolver derives from config_gait_reference.yaml and the CURRENT table."""
+    if "r" not in _RESOLVED:
+        from utils import Config
+        from utils.residual_home import resolve_residual_map
+        ec = Config(os.path.join(ROOT, "config", "config_gait_reference.yaml")).train.env_config
+        _RESOLVED["r"] = resolve_residual_map(ec, ROOT)
+    return _RESOLVED["r"]
+
+
 @pytest.mark.skipif(not os.path.exists(REAL_TABLE), reason="baked table not present")
 def test_reference_config_map_covers_every_baked_cell():
-    """The gait-table config's residual map must express every baked cell inside the TRAINING command ranges (both legs,
-    clamped to the joint limits) with room for the RSI joint noise: per joint, max |a| + rsi_joint_noise / scale < 1.0, i.e.
-    reference-state initialisation never needs a clamped action (the real constraint; the old fixed 0.86 bound was a proxy
-    for it). Re-baking with a wider style, or widening the command ranges, fails this, not training."""
+    """The residual map the gait-table config derives (`auto`) must express every baked cell inside the TRAINING command
+    ranges (both legs, clamped to the joint limits) with room for the RSI joint noise: per joint, max |a| + rsi_joint_noise /
+    scale <= scale_headroom < 1.0, i.e. reference-state initialisation never needs a clamped action. a = 0 is the table's
+    stand pose, flat sole, L/R symmetric, and each scale is the narrowest 0.05 step that satisfies the headroom. Computed
+    here independently of the resolver (own cell selection and arithmetic), so a re-bake cannot break it silently."""
     from utils import Config
     ec = Config(os.path.join(ROOT, "config", "config_gait_reference.yaml")).train.env_config
+    REF_HOME_DEG, REF_SCALE, _, _ = _resolved()
     cmd = ec.commands["base_velocity"]["ranges"]
     z = np.load(REAL_TABLE, allow_pickle=False)
     names = [str(s) for s in z["field_names"]]
@@ -229,9 +243,22 @@ def test_reference_config_map_covers_every_baked_cell():
     a = (np.clip(q, LO, HI) - home) / sc
     noise = float(ec.reference["rsi_joint_noise"])                                 # rad, added to the RSI joint targets
     need = np.abs(a).max(axis=0) + noise / sc
+    head = float(ec.scale_headroom)
+    assert 0.0 < head < 1.0
     assert np.all(np.abs(a).max(axis=0) <= 1.0) and np.all(need < 1.0), (np.abs(a).max(axis=0), need)
+    assert np.all(need <= head + 1e-9), (need, head)
     stand = (z["stand"][:12].astype(np.float64) - home) / sc
     assert np.abs(stand).max() < 0.05                                              # a = 0 is the table's stand pose
+    h = expand_by_type(REF_HOME_DEG, "x")
+    assert abs(h[4] - h[6] + h[10]) < 0.5 and abs(h[2] + h[8]) < 0.5               # flat sole (pitch and roll)
+    assert np.allclose(home[0::2], home[1::2])                                     # L/R symmetric
+    # minimal: one 0.05 step narrower breaks the headroom for that joint type (unless already at the 0.05 floor)
+    dev = np.abs(a * sc).max(axis=0)                                               # rad, per joint
+    for i in range(0, 12, 2):
+        s = float(sc[i])
+        if s > 0.05 + 1e-9:
+            d = max(dev[i], dev[i + 1])
+            assert (d + noise) / (s - 0.05) > head, (JOINT_TYPES_[i // 2], s, d)
 
 
 # ---------------------------------------------------------------- MuJoCo env

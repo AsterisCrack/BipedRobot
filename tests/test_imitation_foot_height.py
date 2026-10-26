@@ -20,6 +20,22 @@ MM = 1e-3
 STD = 0.004
 
 
+def _config_foot_height_std():
+    """reference.std.foot_height the gait-reference config trains with [m]."""
+    import yaml
+    with open(os.path.join(ROOT, "config", "config_gait_reference.yaml"), encoding="utf-8") as fh:
+        return float(yaml.safe_load(fh)["train"]["env_config"]["reference"]["std"]["foot_height"])
+
+
+def _table_step_height(z, default=0.025):
+    """The baked style's nominal swing height [m] (style_yaml base.step_height); the swing peaks run above it (lateral lift, sway)."""
+    import yaml
+    try:
+        return float(yaml.safe_load(str(z["style_yaml"]))["base"]["step_height"])
+    except Exception:
+        return default
+
+
 def t(*rows):
     return torch.tensor(list(rows), dtype=torch.float32)
 
@@ -171,14 +187,14 @@ def test_table_foot_height_field_is_stance_zero_and_two_wide():
     i = names.index("foot_height")
     assert widths[i] == 2
     sl = slice(sum(widths[:i]), sum(widths[:i + 1]))
-    assert float(z["stand"][sl].max()) < 1e-4             # stance baseline ~0.06 mm, no subtraction needed
+    assert float(z["stand"][sl].max()) < 0.02 * _config_foot_height_std()    # stance baseline (0.06-0.12 mm) << the kernel std: no subtraction needed
     fh = z["data"][..., sl]
     assert abs(float(fh.min())) < 1e-4                     # stance ~0: the v2 bake dips to -0.04 mm (IK noise), kernel std is 10 mm
-    assert 0.008 < float(fh.max()) < 0.025                 # 10-14 mm swing peaks (max 19.6 mm in some cells)
+    assert 0.008 < float(fh.max()) < 1.6 * _table_step_height(z)     # real swings, not runaway: peaks run up to 1.42 x the style's step_height
 
 
 def test_table_reference_samples_foot_height_with_the_other_fields():
-    pytest.importorskip("numpy")
+    np = pytest.importorskip("numpy")
     path = os.path.join(ROOT, "robot_motion_reference", "processed", "gait_table.npz")
     if not os.path.exists(path):
         pytest.skip("baked table not present")
@@ -187,7 +203,7 @@ def test_table_reference_samples_foot_height_with_the_other_fields():
     cmd = torch.tensor([[0.1, 0.0, 0.0]])
     peak = max(g.field(g.sample(cmd, torch.tensor([p / 40.0]), torch.tensor([False])), "foot_height").max().item()
                for p in range(40))
-    assert 0.008 < peak < 0.02
+    assert 0.008 < peak < 1.6 * _table_step_height(np.load(path, allow_pickle=False))
     ref = g.sample(cmd, torch.tensor([0.25]), torch.tensor([False]))      # phase 0.25: right foot mid-stance
     contact = g.field(ref, "contact")[0]                                  # [left, right]
     fh = g.field(ref, "foot_height")[0]

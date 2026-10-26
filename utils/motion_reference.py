@@ -8,6 +8,8 @@ from typing import Iterable
 import numpy as np
 import torch
 
+from utils.command_limit import limit_command, validate_shape
+
 
 @dataclass
 class MotionReferenceConfig:
@@ -148,6 +150,14 @@ class CadenceGrid:
         return bool(np.ptp(self.freq) < 1e-9)
 
 
+def resolve_table_path(npz_path: str, root_dir: str | None = None) -> str:
+    """Path of a baked gait table: a relative path is taken from root_dir (the BipedRobot root)."""
+    path = npz_path
+    if not os.path.isabs(path) and root_dir:
+        path = os.path.abspath(os.path.join(root_dir, path))
+    return path
+
+
 class GaitTableReference:
     """Command-conditioned gait table baked by Gait Studio (robot_motion_reference/gait_studio).
 
@@ -160,12 +170,19 @@ class GaitTableReference:
     The cycles are phase-normalised. In a v2 table each has its own period (cadence follows the
     command, as in humans) and ``frequency`` gives the gait clock rate for a command, trilinear
     like the table. A v1 table has a single ``period``.
+
+    Table versions: 1 (one period), 2 (per-command ``freq``), 3 (= 2 + command-limit metadata:
+    ``command_limit_shape``, ``command_ranges_x/y/z``, ``cmd_baked``; cells outside the limit are
+    baked at the projected command). The table never defines the command limit: the TRAINING config
+    does, and the env hands it over with ``set_command_limit``. ``check_command_limit`` compares the
+    table's metadata with it.
     """
 
+    _limit: tuple[dict, str] | None = None     # the config's limit, set by the env (class default: none)
+    baked_limit: dict | None = None            # what a v3 table was baked under (None for v1/v2)
+
     def __init__(self, npz_path: str, device: torch.device, root_dir: str | None = None) -> None:
-        path = npz_path
-        if not os.path.isabs(path) and root_dir:
-            path = os.path.abspath(os.path.join(root_dir, path))
+        path = resolve_table_path(npz_path, root_dir)
         if not os.path.exists(path):
             raise FileNotFoundError(f"gait table not found: {path} (bake it with "
                                     f"`python -m gait_studio.bake` in robot_motion_reference/)")
@@ -196,9 +213,52 @@ class GaitTableReference:
         self.joint_names = [str(s) for s in z["joint_names"]]
         self.style_digest = str(z["style_digest"])
         self.phase_convention = str(z["phase_convention"])
+        # Command limit the table was baked under (v3). None for v1/v2: baked without a limit.
+        self.baked_limit: dict | None = None
+        if "command_limit_shape" in z:
+            self.baked_limit = {"shape": str(z["command_limit_shape"]),
+                                "lin_vel_x": tuple(float(v) for v in z["command_ranges_x"]),
+                                "lin_vel_y": tuple(float(v) for v in z["command_ranges_y"]),
+                                "ang_vel_z": tuple(float(v) for v in z["command_ranges_z"])}
+        self._limit: tuple[dict, str] | None = None   # the config's limit, set by the env
         self._joint_idx: torch.Tensor | None = None
         self._offsets = torch.as_tensor(
             [(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)], device=device)  # [8, 3]
+        # Built once here: a torch.as_tensor(..., device=cuda) per call is a CPU->GPU copy (a sync).
+        self._top = torch.as_tensor([n - 1 for n in self.shape], device=device)
+        self._offsets_hi = self._offsets.bool()                                  # [8, 3]
+
+    def set_command_limit(self, ranges: dict, shape: str) -> None:
+        """The TRAINING config's command limit. ``corners`` (hence ``sample`` and ``frequency``) applies it to
+        the commands before locating the cell, so an over-limit command reads the projected one's frame.
+        Box = per-axis ranges only = no change here (the grid clamp in ``_locate`` already bounds each axis)."""
+        shape = validate_shape(shape)
+        self._limit = None if shape == "box" else ({k: tuple(ranges[k]) for k in ("lin_vel_x", "lin_vel_y", "ang_vel_z")}, shape)
+
+    def check_command_limit(self, ranges: dict, shape: str, tol: float = 1e-6) -> list[str]:
+        """Messages (empty = consistent) comparing the table's baked command limit with the config's.
+
+        Never reads the limit from the table; this is only a consistency check. A v1/v2 table has no
+        metadata: that is silent for a box config, and a one-line note otherwise (boundary cells are
+        interpolated, which is fine)."""
+        shape = validate_shape(shape)
+        b = self.baked_limit
+        if b is None:
+            if shape == "box":
+                return []
+            return [f"note: this table (v{self.version}) was baked without a command limit; config limit_shape="
+                    f"{shape!r} only narrows the commands, boundary cells are interpolated (fine)"]
+        out = []
+        if b["shape"] != shape:
+            out.append(f"WARNING: table baked with command_limit_shape={b['shape']!r} but the training config has "
+                       f"limit_shape={shape!r}; the table's boundary cells are not baked for this limit "
+                       f"(rebake in Gait Studio with command_limit_shape: {shape})")
+        for key in ("lin_vel_x", "lin_vel_y", "ang_vel_z"):
+            cfg_r = tuple(float(v) for v in ranges[key])
+            if any(abs(a - c) > tol for a, c in zip(b[key], cfg_r)):
+                out.append(f"WARNING: table baked with command range {key}={b[key]} but the training config has "
+                           f"{key}={cfg_r}")
+        return out
 
     def bind_to_robot(self, robot_joint_names: Iterable[str]) -> None:
         names = list(robot_joint_names)
@@ -218,45 +278,51 @@ class GaitTableReference:
         lo, hi = grid[i0], grid[i0 + 1]
         return i0, (x - lo) / (hi - lo)
 
-    def _corners(self, commands: torch.Tensor):
-        """The 8 trilinear corners of each command: [(cell index [N], weight [N])], clamped to the grid."""
+    def corners(self, commands: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The 8 trilinear corners of each command, clamped to the grid: (cell index [N, 8], weight [N, 8]).
+
+        All 8 at once (one batch of ops, not a Python loop of ~10 small kernels per corner). Pass the
+        result to frequency() / sample() when both are evaluated for the same commands."""
+        if self._limit is not None:
+            commands = limit_command(commands, *self._limit)
         cmd = commands.to(device=self.device, dtype=torch.float32)
         i0, wx = self._locate(self.grid[0], cmd[:, 0])
         j0, wy = self._locate(self.grid[1], cmd[:, 1])
         k0, wz = self._locate(self.grid[2], cmd[:, 2])
         base = torch.stack([i0, j0, k0], dim=-1)                                   # [N, 3]
         w_hi = torch.stack([wx, wy, wz], dim=-1)                                   # [N, 3]
-        nvx, nvy, nwz = self.shape
-        top = torch.as_tensor([nvx - 1, nvy - 1, nwz - 1], device=self.device)
-        out = []
-        for off in self._offsets:                                                  # 8 corners
-            idx = torch.minimum(base + off, top)                                   # [N, 3]
-            w = torch.where(off.bool(), w_hi, 1.0 - w_hi).prod(dim=-1)             # [N]
-            out.append(((idx[:, 0] * nvy + idx[:, 1]) * nwz + idx[:, 2], w))
-        return out
+        _, nvy, nwz = self.shape
+        idx = torch.minimum(base.unsqueeze(1) + self._offsets, self._top)          # [N, 8, 3]
+        w = torch.where(self._offsets_hi, w_hi.unsqueeze(1), 1.0 - w_hi.unsqueeze(1)).prod(dim=-1)  # [N, 8]
+        return (idx[..., 0] * nvy + idx[..., 1]) * nwz + idx[..., 2], w
 
-    def frequency(self, commands: torch.Tensor) -> torch.Tensor:
+    def frequency(self, commands: torch.Tensor, corners: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
         """Gait clock frequency [cycles/s] for commands [N, 3] -> [N]."""
-        out = torch.zeros(commands.shape[0], device=self.device)
-        for cell, w in self._corners(commands):
-            out += w * self.freq[cell]
+        cell, w = corners if corners is not None else self.corners(commands)
+        f = w * self.freq[cell]                                                    # [N, 8]
+        out = f[:, 0]
+        for k in range(1, 8):   # corner by corner, in the old order: bit-identical sums (RSI poses, clock)
+            out = out + f[:, k]
         return out
 
-    def sample(self, commands: torch.Tensor, phase: torch.Tensor, standing: torch.Tensor) -> torch.Tensor:
+    def sample(self, commands: torch.Tensor, phase: torch.Tensor, standing: torch.Tensor,
+               corners: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
         """commands [N, 3] (vx, vy, wz), phase [N] in [0, 1), standing [N] bool -> [N, D]."""
         phase = phase.to(device=self.device, dtype=torch.float32)
         n = commands.shape[0]
         pos = (phase % 1.0) * self.n_frames
         f_lo = torch.floor(pos)
-        a = pos - f_lo
+        a = (pos - f_lo).unsqueeze(-1)                                             # [N, 1]
         f0 = f_lo.long() % self.n_frames
         f1 = (f0 + 1) % self.n_frames
 
-        out = torch.zeros(n, self.dim, device=self.device)
-        for cell, w in self._corners(commands):
-            row0 = self.table[cell * self.n_frames + f0]
-            row1 = self.table[cell * self.n_frames + f1]
-            out += w.unsqueeze(-1) * (row0 * (1.0 - a).unsqueeze(-1) + row1 * a.unsqueeze(-1))
+        cell, w = corners if corners is not None else self.corners(commands)      # [N, 8]
+        row0 = self.table[cell * self.n_frames + f0.unsqueeze(-1)]                 # [N, 8, D]
+        row1 = self.table[cell * self.n_frames + f1.unsqueeze(-1)]
+        frame = w.unsqueeze(-1) * (row0 * (1.0 - a).unsqueeze(-1) + row1 * a.unsqueeze(-1))   # [N, 8, D]
+        out = frame[:, 0]
+        for k in range(1, 8):   # corner by corner, in the old order: bit-identical to the old per-corner loop
+            out = out + frame[:, k]
         return torch.where(standing.to(self.device).unsqueeze(-1), self.stand.expand(n, -1), out)
 
     def field(self, ref: torch.Tensor, name: str) -> torch.Tensor:

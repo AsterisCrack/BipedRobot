@@ -59,6 +59,7 @@ from envs.isaaclab.biped_env import BipedEnv                      # noqa: E402
 from envs.isaaclab.biped_env_cfg import BipedRobotV2EnvCfg         # noqa: E402
 from src.isaaclab.env_config import build_env_cfg, describe       # noqa: E402
 from utils import Config                                           # noqa: E402
+from utils.residual_home import freeze_residual_map  # noqa: E402
 
 RESULTS: list[tuple[bool, str]] = []
 
@@ -70,6 +71,7 @@ def check(ok: bool, msg: str) -> None:
 
 def main() -> None:
     config = Config(os.path.join(_ROOT, args_cli.config_path))
+    freeze_residual_map(config, _ROOT, warn_unfrozen=True)
     # Measure the MODEL, not the curriculum: flat ground, no pushes, no random initial joint
     # offsets. Everything servo-side (the BAM population, lash, mount offset, IMU
     # misalignment, sensor lag) stays exactly as in training. A robot holding zero action
@@ -123,6 +125,10 @@ def main() -> None:
     if env.action_map == "residual":
         want = torch.minimum(env.default_joint_pos + env.action_scale, env.joint_limits_max)
         check((one_t - want).abs().max().item() < 1e-6, "a = +1 -> min(home + scale, upper joint limit)")
+        neg_scale = env.action_scale if env.action_scale_neg is None else env.action_scale_neg
+        neg_t = env.actions_to_targets(-torch.ones(n, J, device=env.device))
+        want_neg = torch.maximum(env.default_joint_pos - neg_scale, env.joint_limits_min)
+        check((neg_t - want_neg).abs().max().item() < 1e-6, "a = -1 -> max(home - neg scale, lower joint limit)")
     else:
         check((one_t - env.joint_limits_max).abs().max().item() < 1e-6, "a = +1 -> upper joint limits")
 
@@ -163,6 +169,13 @@ def main() -> None:
     # and ~-1 for a flipped one. Backlash scatters the residual by up to +-lash/2, which is
     # why this uses a slope, not a tight per-joint tolerance.
     q = env.robot.data.joint_pos
+    if getattr(env, "_servo_side_encoder", False):
+        # backlash.encoder_side servo: the firmware regulates the servo SHAFT, so that is what tracks t - d; the
+        # link scatters around it by up to +-lash/2 (comparable to d) and would bias the slope low.
+        q = q.clone()
+        for act in env.bam_actuators:
+            ids = act._joint_ids()
+            q[:, ids] = act.encoder_reading(q[:, ids], env.robot.data.joint_vel[:, ids])[0]
     d = env.mount_offset
     t = env.filtered_targets
     enc_err = ((q + d) - t).abs().mean().item()

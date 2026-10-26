@@ -9,6 +9,8 @@ battery sag, varies unit to unit, and derates as the servo heats up.
 
 from __future__ import annotations
 
+import math
+
 import torch
 from typing import TYPE_CHECKING
 
@@ -118,6 +120,7 @@ def randomize_bam_actuator(
     vin_range: tuple[float, float],
     friction_scale_range: tuple[float, float],
     lash_range_rad: tuple[float, float] | None = None,
+    deadband_counts_range: tuple[int, int] | None = None,
 ):
     """Draw a per-robot servo population for the BAM actuator (use mode="startup").
 
@@ -148,3 +151,8 @@ def randomize_bam_actuator(
         lm = servo.lost_motion
         if lm is not None and lash_range_rad is not None:
             lm.lash[env_ids] = torch.empty(n, k.num_joints, device=lm.lash.device).uniform_(*lash_range_rad)
+        if deadband_counts_range is not None:
+            # Firmware dead zone, an integer register per servo (CW/CCW_DEADBAND), drawn in encoder counts.
+            lo, hi = int(deadband_counts_range[0]), int(deadband_counts_range[1])
+            counts = torch.randint(lo, hi + 1, (n, k.num_joints), device=k.deadband.device)
+            k.deadband[env_ids] = counts.to(k.deadband.dtype) * (2.0 * math.pi / 4096.0)

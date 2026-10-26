@@ -106,14 +106,15 @@ def test_env_wiring_uses_the_shared_reference_frame_and_fresh_joint_pos():
     src = _src("envs/isaaclab/biped_env.py")
     assert "rewards.validate_stand_pose_l2(" in src[:src.index("def _get_rewards")]          # at init
     body = src[src.index("def _get_rewards"):src.index("def _reference_standing")]
-    assert body.count("_sample_reference()") == 1 and "gait_ref.sample(" not in body       # no second sample
-    i_sample = body.index("ref = self._sample_reference()")
+    assert body.count("_sample_reference(") == 1 and "gait_ref.sample(" not in body        # no second sample
+    i_sample = body.index("ref = self._sample_reference(")
     i_call = body.index("rewards.stand_pose_l2(")
     assert i_sample < i_call
     call = body[i_call:i_call + 300]
     assert "self.robot.data.joint_pos" in call                                             # fresh, not the stale cache
     assert 'self.gait_ref.joint_field(ref, "joint_pos")' in call
-    assert "self._reference_standing().float()" in call
+    assert "ref_standing.float()" in call                                                  # the step's stand mask ...
+    assert "ref_standing = self._reference_standing()" in body[:i_sample]                  # ... computed once, before the sample
     assert "ref is not None" in body[i_call - 200:i_call]                                  # no reference -> term is 0
     assert '"stand_pose_l2": r_stand_pose * self.cfg.rewards.get("stand_pose_l2", 0.0)' in body   # weighted, summed, logged
 

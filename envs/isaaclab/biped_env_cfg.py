@@ -144,7 +144,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # scene
     scene: BipedRobotSceneCfg = BipedRobotSceneCfg(
         num_envs=4096,
-        env_spacing=2.5,
+        env_spacing=0.5,
     )
 
     # robot-specific mappings
@@ -203,7 +203,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     reference_std: dict = {
         "joint_pos": 0.15, "joint_vel": 1.5, "foot_pos": 0.02,
         "orientation": 0.08, "lin_vel": 0.1, "ang_vel": 0.3,
-        "foot_height": 0.004,   # imitation_foot_height: per-foot sole clearance vs the table, [m]
+        "foot_height": 0.015,   # imitation_foot_height: per-foot sole clearance vs the table, [m]
     }
 
     # Observations
@@ -229,6 +229,10 @@ class BipedEnvCfg(DirectRLEnvCfg):
     #     is below gait_clock_stand_threshold in both |v_xy| and |wz| (same rule as the table clock).
     gait_clock_mode: str = "speed_proportional"
     gait_clock_period_s: float = 0.7
+    # cadence_law (no table): period from max (slow, just above the stand threshold) to min (fastest command),
+    # linear in the elliptic command magnitude (utils/cadence_law.py).
+    gait_clock_period_min_s: float = 0.6
+    gait_clock_period_max_s: float = 0.9
     gait_clock_stand_threshold: float = 0.05
 
     # Action smoothing filter (EMA): target = alpha*raw + (1-alpha)*prev
@@ -253,10 +257,12 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # "residual" (target = clamp(home + scale*a, limits)). "residual" takes its home pose
     # (deg) and per-joint-type scale (rad) from these dicts, set by env_config.apply_env_config;
     # the home is also written into the articulation's init_state, so it IS default_joint_pos.
-    # spawn_height_m: init base z (None = the asset's 0.29 m; residual defaults to 0.286).
+    # spawn_height_m: init base z (None = the asset's 0.29 m; residual defaults to 0.286). env_config may say "auto" for
+    # action_home_deg / action_scale_rad / spawn_height_m: train.py freezes them into numbers before they reach this cfg
+    # (utils/residual_home.py), and env_config._apply_action_home resolves them itself, with a warning, if they arrive unfrozen.
     action_map: str = "absolute"
     action_home_deg: dict | None = None
-    action_scale_rad: dict | None = None
+    action_scale_rad: dict | None = None   # per type: a number, or {pos: x, neg: y} (asymmetric; utils/residual_action.py)
     spawn_height_m: float | None = None
     target_base_height: float = 0.29     # base_height_l2 target; follows spawn_height_m
 
@@ -354,6 +360,11 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # ranges select (the whole 16x12x16 grid) has min 6.4 mm / p1 11.4 mm / p5 17.1 mm (CHANGES.md, E21), so the reference
     # gait is never penalised. Largest whole mm below the table minimum; tests/test_foot_proximity.py recomputes it.
     foot_proximity_margin_m: float = 0.006
+    # foot_drag (E25): a foot that is NOT loaded (|F| <= 1 N) and lower than this clearance [m] (lowest sole corner above its
+    # height at the foot's last loaded step; NOT the link-origin swing clearance, which a pitched foot biases) and moving is
+    # scuffing; the penalty fades linearly to 0 at this height. See rewards.foot_drag / rewards.foot_sole_slip_speed (foot_slip
+    # uses the same sole corners and foot_sole_half_extents_m). The gait-reference yaml sets 0.002.
+    foot_drag_height_m: float = 0.005
     # Optional termination (counts as `died`, so termination_penalty applies): end the episode once the footprint gap has
     # been <= 0 for this many seconds in a row. 0 = off. 0.25 is the suggested value if the penalty alone does not stop it.
     foot_overlap_termination_s: float = 0.0
@@ -378,8 +389,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
     curriculum_dr_events: list = []
 
     # Target (full-curriculum) DR values — curriculum scales toward these
-    curriculum_dr_max_push_x: float = 0.2
-    curriculum_dr_max_push_y: float = 0.2
+    curriculum_dr_max_push_x: float = 0.3
+    curriculum_dr_max_push_y: float = 0.3
     # Mass is now a SCALE factor, not an additive kg offset, so this is centred on 1.0.
     # The old (-0.2, 0.4) was in kg and drove sub-0.2 kg leg links to zero mass.
     curriculum_dr_mass_range: tuple = (0.9, 1.1)
@@ -390,8 +401,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # them every reset. Editing the EventTerm params for com/payload does nothing; edit here.
     # (The reverse holds for mass/gains/friction/push: those are not in the list, so their
     # EventTerm params are live and these values are only documentation of the intended target.)
-    curriculum_dr_com_range: float = 0.02      # was 0.01 — most ZMP-critical term at this scale
-    curriculum_dr_payload_max: float = 0.1     # was 0.15 — 18% of the 1.661 kg body
+    curriculum_dr_com_range: float = 0.01      # 2026-10-24 back to 0.01 (from 0.02): CAD COM; +-2 cm barely moved the gait in MuJoCo
+    curriculum_dr_payload_max: float = 0.1    # 2026-10-24 from 0.1: the robot carries no payload; 3% of the 1.661 kg body
     # Command range limits
     curriculum_cmd_start_lin_vel_x: tuple = (0.0, 0.2)   # slow forward-only at start
     curriculum_cmd_full_lin_vel_x: tuple  = (-0.3, 0.5)  # full range at end
@@ -430,6 +441,14 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # Encoder quantisation. STS3215 is 4096 counts/rev on both position and the speed
     # register, so the policy sees the same resolution floor in sim as on hardware.
     quantize_joint_obs: bool = True
+    # Band-limited sensor 'vibration' (2026-10-26 hardware traces): walking on the robot carries 3-4x the sim's
+    # 3-10 Hz content on the gyro (+0.4-0.9 rad/s), accelerometer (+0.5-1.3 m/s^2) and knee/hip joint velocity
+    # (+0.3-0.8 rad/s) -- structure/gear play the encoders and the sim don't have. White per-step noise largely
+    # averages out over the history stack; this does not. Per env and per dim: a resonator (pole radius 0.9,
+    # ~1.6 Hz bandwidth) at a centre frequency drawn in observation_vibration_hz, unit-variance normalised, times
+    # std[channel] times a per-env amplitude U(0, 1). Redrawn at reset. Keys: imu_acc, gyro, joint_vel. {} = off.
+    observation_vibration_std: dict = {}
+    observation_vibration_hz: list = [3.0, 10.0]
 
     # simulation
     sim: sim_utils.SimulationCfg = sim_utils.SimulationCfg(
@@ -521,7 +540,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             # NOTE: push_robot is NOT in curriculum_dr_events, so these params are live from
             # step 0 and curriculum_dr_max_push_x/y never reach the sim.
             params={"velocity_range": {
-                "x": (-0.2, 0.2), "y": (-0.2, 0.2), "yaw": (-0.6, 0.6),
+                "x": (-0.3, 0.3), "y": (-0.3, 0.3), "yaw": (-0.6, 0.6),
             }},
         ),
         # Physics Randomization
@@ -544,7 +563,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*_link_1"),
-                "mass_distribution_params": (0.85, 1.15),  # widened from (0.8, 1.2)
+                "mass_distribution_params": (0.92, 1.08),  # 2026-10-24 tightened from (0.85, 1.15): CAD / weighed links, gait-insensitive
                 "operation": "scale",
             },
         ),
@@ -599,11 +618,11 @@ class BipedEnvCfg(DirectRLEnvCfg):
                 # friction_combine_mode="multiply" and the terrain material is exactly 1.0, so
                 # the robot's draw passes through unchanged. If terrain friction ever changes
                 # from 1.0, this whole range scales silently.
-                # Widened (0.5, 1.3) -> (0.3, 1.4): 0.5 is still a reasonable floor. Wet tile
+                # Live range below: static (0.6, 1.1), dynamic (0.5, 1.0) (an older note said (0.3, 1.4)). Wet tile
                 # or laminate is mu ~0.2-0.3, and that is exactly where a flat-footed biped
                 # slips. Training only down to 0.5 never sees a genuinely slippery surface.
-                "static_friction_range": (0.5, 1.2),
-                "dynamic_friction_range": (0.5, 1.2),
+                "static_friction_range": (0.6, 1.1),
+                "dynamic_friction_range": (0.5, 1.0),
                 # Was pinned at zero. Carpet/rubber/tile differ in bounce, and a hard zero also
                 # means foot-strike never has any rebound to reject.
                 "restitution_range": (0.0, 0.3),
@@ -626,7 +645,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
             mode="reset",
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-                "com_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (-0.01, 0.01)},
+                "com_range": {"x": (-0.025, 0.025), "y": (-0.025, 0.025), "z": (-0.025, 0.025)},
             },
         ),
         # Payload: curriculum-scaled via curriculum_dr_events
@@ -659,6 +678,8 @@ class BipedEnvCfg(DirectRLEnvCfg):
             "heading_control_stiffness": 0.3,
             "rel_standing_envs": 0.02,
             "rel_heading_envs": 1.0,
+            # "box" = per-axis ranges only; "ellipse_xy" also limits (vx, vy) to an ellipse (utils/command_limit.py).
+            "limit_shape": "box",
             "ranges": {
                 "lin_vel_x": (-0.3, 0.4),
                 "lin_vel_y": (-0.3, 0.3),
@@ -702,7 +723,7 @@ class BipedRobotV2EnvCfg(BipedEnvCfg):
     # scene
     scene: BipedRobotV2SceneCfg = BipedRobotV2SceneCfg(
         num_envs=4096,
-        env_spacing=2.5,
+        env_spacing=0.5,
     )
 
     # robot-specific mappings

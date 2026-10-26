@@ -185,6 +185,8 @@ def test_cadence_golden_vectors():
     ref.grid = [torch.as_tensor(a, dtype=torch.float32) for a in axes]
     ref.freq = torch.as_tensor(freq, dtype=torch.float32).reshape(-1)
     ref._offsets = torch.as_tensor([(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)])
+    ref._offsets_hi = ref._offsets.bool()
+    ref._top = torch.as_tensor([n - 1 for n in ref.shape])
     got = ref.frequency(torch.as_tensor(cmds, dtype=torch.float32)).numpy()
     assert np.allclose(got, g["expected"], atol=1e-5)
 

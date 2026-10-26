@@ -1,6 +1,7 @@
 import torch
 from isaaclab.utils.math import wrap_to_pi, quat_from_euler_xyz, quat_apply
 from isaaclab.markers import VisualizationMarkers
+from utils.command_limit import limit_command, sample_in_limit, validate_shape
 
 class UniformVelocityCommand:
     def __init__(self, cfg, num_envs, device, step_dt):
@@ -31,6 +32,9 @@ class UniformVelocityCommand:
         # error * stiffness, so with a wide ang_vel_z range (+-1.2 for turn-in-place) most moving
         # envs would spend the first seconds of every command turning at the limit.
         self.heading_max_ang_vel = None
+        # "box" (per-axis ranges, the historical sampler) or "ellipse_xy": (vx, vy) uniform inside the
+        # ellipse spanned by the ranges. The config is the source of truth (utils/command_limit.py).
+        self.limit_shape = "box"
         self.ranges = {}
 
         if hasattr(cfg, "commands") and isinstance(cfg.commands, dict):
@@ -42,6 +46,7 @@ class UniformVelocityCommand:
             self.rel_turn_in_place_envs = base_vel_cfg.get("rel_turn_in_place_envs",
                                                            self.rel_turn_in_place_envs)
             self.heading_max_ang_vel = base_vel_cfg.get("heading_max_ang_vel", self.heading_max_ang_vel)
+            self.limit_shape = validate_shape(base_vel_cfg.get("limit_shape", self.limit_shape))
             self.ranges = base_vel_cfg.get("ranges", {})
         
     def update_ranges(self, ranges: dict) -> None:
@@ -75,16 +80,23 @@ class UniformVelocityCommand:
              r_head = (-3.14159, 3.14159)
 
         # 3. Sample Velocities (x, y, ang_z)
-        self.commands[env_ids, 0] = torch.empty(len(env_ids), device=self.device).uniform_(*r_x)
-        self.commands[env_ids, 1] = torch.empty(len(env_ids), device=self.device).uniform_(*r_y)
-        self.commands[env_ids, 2] = torch.empty(len(env_ids), device=self.device).uniform_(*r_z)
+        if self.limit_shape == "box":
+            self.commands[env_ids, 0] = torch.empty(len(env_ids), device=self.device).uniform_(*r_x)
+            self.commands[env_ids, 1] = torch.empty(len(env_ids), device=self.device).uniform_(*r_y)
+            self.commands[env_ids, 2] = torch.empty(len(env_ids), device=self.device).uniform_(*r_z)
+        else:
+            # (vx, vy) uniform inside the ellipse by rejection from the box (no sync, bounded rounds);
+            # wz independent and uniform in its range, as above. The CURRENT ranges (curriculum) are used.
+            self.commands[env_ids] = sample_in_limit(
+                len(env_ids), {"lin_vel_x": r_x, "lin_vel_y": r_y, "ang_vel_z": r_z},
+                self.limit_shape, device=self.device)
         
         # 4. Heading Mode Logic
         is_standing = torch.rand(len(env_ids), device=self.device) < self.rel_standing_envs
         is_heading = torch.rand(len(env_ids), device=self.device) < self.rel_heading_envs
         
-        # Standing envs have zero command
-        self.commands[env_ids[is_standing], :] = 0.0
+        # Standing envs have zero command (masked select: boolean indexing env_ids would sync)
+        self.commands[env_ids] = torch.where(is_standing.unsqueeze(-1), 0.0, self.commands[env_ids])
 
         # Turn-in-place envs, disjoint from standing: no translation, a yaw rate drawn from
         # the top of the range with a random sign.
@@ -128,26 +140,32 @@ class UniformVelocityCommand:
         ang_vel_z range, and until the next compute() a freshly reset env (and the reference
         state it is initialised on) would see that draw instead of its heading-control rate.
         """
-        if torch.any(self.in_heading_mode):
-            q = base_quat
-            w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
-            current_yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-            
-            heading_error = wrap_to_pi(self.heading_target - current_yaw)
-            # Clamp to the configured yaw range. Without this, a heading error near +-pi with
-            # stiffness 0.5 commands +-1.57 rad/s -- over 5x the configured +-0.3 -- which is
-            # unreachable, and track_ang_vel_z_exp (std=0.15) returns numerically zero there,
-            # so those envs get no yaw reward and no gradient while still paying the stability
-            # penalties. Upstream Isaac Lab clamps this the same way.
-            r_z = self.ranges.get("ang_vel_z", (-1.0, 1.0))
-            lo, hi = float(r_z[0]), float(r_z[1])
-            if self.heading_max_ang_vel is not None:
-                lo, hi = max(lo, -float(self.heading_max_ang_vel)), min(hi, float(self.heading_max_ang_vel))
-            target_ang_vel_z = torch.clamp(heading_error * self.heading_control_stiffness, min=lo, max=hi)
+        # Computed for every env and selected with the mask: `if torch.any(mask)` and boolean-mask
+        # indexing each synced the GPU, every step. Non-heading envs keep their command exactly.
+        q = base_quat
+        w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        current_yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 
-            # Apply to commands
-            self.commands[self.in_heading_mode, 2] = target_ang_vel_z[self.in_heading_mode]
-            
+        heading_error = wrap_to_pi(self.heading_target - current_yaw)
+        # Clamp to the configured yaw range. Without this, a heading error near +-pi with
+        # stiffness 0.5 commands +-1.57 rad/s -- over 5x the configured +-0.3 -- which is
+        # unreachable, and track_ang_vel_z_exp (std=0.15) returns numerically zero there,
+        # so those envs get no yaw reward and no gradient while still paying the stability
+        # penalties. Upstream Isaac Lab clamps this the same way.
+        r_z = self.ranges.get("ang_vel_z", (-1.0, 1.0))
+        lo, hi = float(r_z[0]), float(r_z[1])
+        if self.heading_max_ang_vel is not None:
+            lo, hi = max(lo, -float(self.heading_max_ang_vel)), min(hi, float(self.heading_max_ang_vel))
+        target_ang_vel_z = torch.clamp(heading_error * self.heading_control_stiffness, min=lo, max=hi)
+
+        # Apply to commands
+        self.commands[:, 2] = torch.where(self.in_heading_mode, target_ang_vel_z, self.commands[:, 2])
+
+        if self.limit_shape != "box":
+            # Guard: a no-op for (vx, vy) (sampled inside the limit, wz is not part of the ellipse),
+            # kept so nothing that rewrites commands can leave the limit. Box: nothing to do, bit-identical.
+            self.commands[:] = limit_command(self.commands, self.ranges, self.limit_shape)
+
         return self.commands
 
     def _update_arrow(self, marker: VisualizationMarkers, velocity_w: torch.Tensor, root_pos_w: torch.Tensor, offset: list[float], scale: list[float]):

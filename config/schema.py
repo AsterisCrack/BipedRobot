@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Union, Dict, Any
+from typing import List, Literal, Optional, Union, Dict, Any
 from enum import Enum
 class NetworkType(str, Enum):
     MLP = "mlp"
@@ -108,11 +108,17 @@ class EnvConfig(BaseModel):
     
     enable_physics_randomization: bool = False
     events: Optional[Dict[str, Any]] = None
+    # MuJoCo eval/gate env: sliding friction of every geom (MuJoCo combines contacts by max). None = the MJCF values (1.0).
+    mujoco_ground_friction: Optional[float] = None
     
     # Noise
     # Per-channel observation noise std. Keys must match biped_env_cfg.observation_noise_std;
     # anything listed here overrides that default, anything omitted keeps it.
     observation_noise_std: Optional[Dict[str, float]] = None
+    # Band-limited 'vibration' noise (narrow-band resonator per dim, random centre frequency per env),
+    # std upper bounds per channel (imu_acc / gyro / joint_vel); see biped_env_cfg. Empty = off.
+    observation_vibration_std: Optional[Dict[str, float]] = None
+    observation_vibration_hz: List[float] = Field(default_factory=lambda: [3.0, 10.0])
     action_noise_model: Optional[Dict[str, float]] = None
     quantize_joint_obs: bool = True
 
@@ -140,15 +146,28 @@ class EnvConfig(BaseModel):
     action_map: str = "absolute"
     # action_map: residual -> target = clamp(home + scale*a, limits). Dicts keyed by joint type
     # (hip_yaw, hip_roll, hip_pitch, knee, ankle_roll, ankle_pitch); l/r share a value.
-    action_home_deg: Optional[Dict[str, float]] = None
-    action_scale_rad: Optional[Dict[str, float]] = None
-    spawn_height_m: Optional[float] = None
+    # Each may also be the string "auto" (utils/residual_home.py): home = the gait table's stand pose, scale = the narrowest
+    # 0.05 step that covers every baked cell inside the command ranges with scale_headroom, spawn_height_m = forward
+    # kinematics of the home with the lowest sole point spawn_clearance_m above the floor. train.py freezes the numbers
+    # into the run config before saving it, so a saved config.yaml never says "auto".
+    # action_scale_rad[type] is a number (symmetric) or {pos: x, neg: y} (asymmetric: x scales a > 0, y scales a < 0, e.g. the
+    # knee bends far one way from the stand pose and little the other); action_scale_mode picks how `auto` sizes it.
+    action_home_deg: Optional[Union[Literal["auto"], Dict[str, float]]] = None
+    action_scale_rad: Optional[Union[Literal["auto"], Dict[str, Union[float, Dict[str, float]]]]] = None
+    action_scale_mode: Literal["symmetric", "asymmetric"] = "symmetric"   # auto action_scale_rad: one scale per type, or one per side
+    spawn_height_m: Optional[Union[Literal["auto"], float]] = None
+    spawn_clearance_m: float = 0.0054        # lowest sole point above the floor at the spawn pose (auto spawn_height_m)
+    scale_headroom: float = 0.96             # auto action_scale_rad: max|a| + rsi_joint_noise / scale <= this
 
     # Gait clock without a gait table. speed_proportional: rate = gait_clock_base_freq * |v_xy|.
     # fixed_period: constant rate 2*pi/gait_clock_period_s, held while |v_xy| and |wz| are both
     # below gait_clock_stand_threshold. A gait table (reference) always uses its own period.
     gait_clock_mode: str = "speed_proportional"
     gait_clock_period_s: float = 0.7
+    # cadence_law (no table): period from max (slow, just above the stand threshold) to min (fastest command),
+    # linear in the elliptic command magnitude (utils/cadence_law.py).
+    gait_clock_period_min_s: float = 0.6
+    gait_clock_period_max_s: float = 0.9
     gait_clock_stand_threshold: float = 0.05
 
     # Gait-table imitation (see utils/motion_reference.py GaitTableReference). None = off.
@@ -198,6 +217,8 @@ class EnvConfig(BaseModel):
     # and the optional overlap termination (s of continuous footprint overlap; 0 = off)
     foot_sole_half_extents_m: List[float] = Field(default_factory=lambda: [0.0450, 0.0186])
     foot_proximity_margin_m: float = 0.006
+    # foot_drag (E25): clearance [m] below which an unloaded, moving foot counts as dragged (linear fade to 0 at this height)
+    foot_drag_height_m: float = 0.005
     foot_overlap_termination_s: float = 0.0
 
     class Config:
@@ -243,7 +264,13 @@ class TrainConfig(BaseModel):
     # gaussian_multivariate head. Default off = plain actor. Saved with the run config, so play / export /
     # sim2real / policy_gate rebuild the same actor.
     equivariant_actor: bool = False
-    
+    # TF32 tensor-core matmuls for the networks (10-bit mantissa inputs, fp32 accumulation). About 2x
+    # faster learner GEMMs on RTX 30xx+; false = exact fp32.
+    tf32: bool = True
+    # Write TensorBoard scalars every N iterations, as means over those iterations (episode stats: over
+    # the episodes finished in them). Per-iteration logging cost ~100 host-device syncs. 1 = old cadence.
+    log_interval: int = 10
+
     class Config:
         extra = "ignore"
 

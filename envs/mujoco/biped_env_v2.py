@@ -28,6 +28,7 @@ from envs.mujoco.base_env import BaseEnv
 from envs.utils.randomizer import Randomizer
 from envs.isaaclab.rewards import rewards as R
 from utils import NoConfig
+from utils.command_limit import limit_command, sample_in_limit, validate_shape
 from utils.motion_reference import CadenceGrid
 
 # ---------------------------------------------------------------------------
@@ -94,8 +95,8 @@ STEP_DT: float    = PHYSICS_DT * DECIMATION
 # DETERMINISTIC on purpose -- MuJoCo is the sim-to-real validation path standing in for one
 # physical robot, so it gets a fixed lag rather than Isaac's per-episode draw. Isaac samples
 # the IMU lag from [0, 1]; 1 is the conservative end of that range. Set either to 0 to A/B the
-# effect of lag on a trained policy.
-SERVO_OBS_DELAY: int = 1
+# effect of lag on a trained policy. 2026-10-24: encoders 0 (read in the same Jetson tick, servo_obs_delay_steps 0).
+SERVO_OBS_DELAY: int = 0
 IMU_OBS_DELAY: int   = 1
 
 # Actuator model -- the SAME BAM kernel Isaac trains with (actuator/bam_kernel.py), read from
@@ -112,6 +113,14 @@ _XML_DEFAULT = os.path.join(
     os.path.dirname(__file__),
     "../../envs/assets/robotV2/robot_v2.xml",
 )
+
+class _GlobalRng:
+    """np.random.Generator-like view of the global numpy RNG (what reset(seed) seeds)."""
+
+    @staticmethod
+    def random(size):
+        return np.random.random_sample(size)
+
 
 _DEFAULT_CMD_RANGES = {
     "lin_vel_x": (-0.3,  0.5),
@@ -144,8 +153,14 @@ def gait_clock_from_config(env_config) -> tuple[CadenceGrid | None, float]:
                 raise ValueError(f"gait_clock_period_s {period!r} s is implausible (expected 0.2-5 s)")
             constant = CadenceGrid([0.0], [0.0], [0.0], [[[1.0 / period]]])
             return constant, float(getattr(env_config, "gait_clock_stand_threshold", 0.05))
+        if mode == "cadence_law":      # config-defined cadence (utils/cadence_law.py), same grid as Isaac / export
+            from utils.cadence_law import cadence_grid
+            ranges = env_config.commands["base_velocity"]["ranges"]
+            grid = cadence_grid(ranges, float(getattr(env_config, "gait_clock_period_min_s", 0.6)),
+                                float(getattr(env_config, "gait_clock_period_max_s", 0.9)))
+            return grid, float(getattr(env_config, "gait_clock_stand_threshold", 0.05))
         if mode != "speed_proportional":
-            raise ValueError(f"gait_clock_mode {mode!r}: expected speed_proportional | fixed_period")
+            raise ValueError(f"gait_clock_mode {mode!r}: expected speed_proportional | fixed_period | cadence_law")
         return None, 0.05
     full = path if os.path.isabs(path) else os.path.join(_PROJECT_ROOT, path)
     with np.load(full, allow_pickle=False) as z:
@@ -202,6 +217,11 @@ class BipedEnvV2(BaseEnv):
         self._init_residual(self.config)
         self._lash_deg = (float(lash_cfg.get("mujoco_lash_deg", 0.0))
                           if lash_cfg.get("enabled", False) else 0.0)
+        # backlash.encoder_side: "output" = the encoder reads servo + lash hinge (the link); "servo" = the
+        # servo shaft only, so the firmware and the policy do not see the play (as on the hardware).
+        self._encoder_side = str(lash_cfg.get("encoder_side", "output"))
+        if self._encoder_side not in ("output", "servo"):
+            raise ValueError(f"backlash.encoder_side {self._encoder_side!r}: expected output | servo")
         if self._lash_deg > 0.0:
             # Faithful backlash: a passive hinge in series with each servo (actuator/backlash.py).
             # Written next to the source so relative mesh paths still resolve.
@@ -235,6 +255,13 @@ class BipedEnvV2(BaseEnv):
                               kp=float(act_cfg.get("kp_fw", DEFAULT_KP_FW)),
                               vin=DEFAULT_VIN, backlash=False, dtype=torch.float64)
         self.servo.kernel.torque_scale[:] = float(act_cfg.get("torque_scale", 1.0))
+        # Ground friction for the eval/gate env: MuJoCo combines a contact pair by MAX, so set every geom's
+        # sliding friction (2026-10-25: the real soles measure ~0.30-0.38 on hardwood; the MJCF floor is 1.0).
+        mu = getattr(self.config, "mujoco_ground_friction", None)
+        if mu is not None:
+            self.model.geom_friction[:, 0] = float(mu)
+        # Firmware dead zone (nominal deadband_counts; Isaac draws deadband_counts_range per servo).
+        self.servo.kernel.deadband[:] = float(act_cfg.get("deadband_counts", 0)) * (2.0 * math.pi / 4096.0)
         # The kernel owns all servo friction, so MJCF frictionloss must be 0 or it's counted
         # twice. Rotor armature comes from the identified params, on the SERVO joint only
         # (the lash hinge keeps its own small conditioning armature). ctrlrange +-2.94 was a
@@ -376,38 +403,47 @@ class BipedEnvV2(BaseEnv):
         return np.asarray(self.data.qvel).reshape(-1)
 
     def _jpos(self) -> np.ndarray:
-        """Output-side joint angles (12, Isaac order): what the encoder reads.
+        """Joint angles (12, Isaac order) as the encoder reads them (observations, rewards, the firmware's error).
 
-        With backlash this is servo + lash hinge. The magnetic sensor sits after the gear
-        play, so everything that stands for "the joint angle" (observations, rewards, the
-        firmware's own error) must use the sum.
+        backlash.encoder_side "output": servo + lash hinge (the sensor after the play). "servo": the servo
+        shaft alone; the play is then invisible (the 2026-10-25 hardware traces: encoders explained only
+        29-44% of the standing body motion).
         """
         q = self._qpos()[self._qpos_ids]
-        if self._lash_qpos_ids is not None:
+        if self._lash_qpos_ids is not None and self._encoder_side == "output":
             q = q + self._qpos()[self._lash_qpos_ids]
         return q
 
     def _jvel(self) -> np.ndarray:
-        """Output-side joint velocities. The firmware derives speed from the encoder, so it sees lash motion too."""
+        """Joint velocities as the encoder reads them (same side rule as _jpos)."""
         v = self._qvel()[self._qvel_ids]
-        if self._lash_qvel_ids is not None:
+        if self._lash_qvel_ids is not None and self._encoder_side == "output":
             v = v + self._qvel()[self._lash_qvel_ids]
         return v
 
     def _init_residual(self, config) -> None:
         """action_map residual: home / scales from the SAME env_config keys Isaac reads
         (action_home_deg, action_scale_rad, spawn_height_m), via utils.residual_action."""
-        from utils.residual_action import RESIDUAL_SPAWN_HEIGHT_M, check_residual_map, home_rad, scale_rad
-        self._residual_home = self._residual_scale = None
+        from utils.residual_action import RESIDUAL_SPAWN_HEIGHT_M, check_residual_map, home_rad, scale_pair_rad
+        from utils.residual_home import is_auto, resolve_if_auto
+        self._residual_home = self._residual_scale = self._residual_scale_neg = None    # scale = s_pos; neg None = symmetric
         self._spawn_dz = 0.0
         height = getattr(config, "spawn_height_m", None)
+        home_cfg, scale_cfg = getattr(config, "action_home_deg", None), getattr(config, "action_scale_rad", None)
+        # `auto` is normally frozen into numbers at the entry point (train.py); resolve it here only as a loud fallback.
+        auto = resolve_if_auto(config, "BipedEnvV2._init_residual", _PROJECT_ROOT)
+        if auto is not None:
+            home_cfg = auto[0] if is_auto(home_cfg) else home_cfg
+            scale_cfg = auto[1] if is_auto(scale_cfg) else scale_cfg
+            height = auto[2] if is_auto(height) else height
         height = float(height) if isinstance(height, (int, float)) else None
         if self.action_map == "residual":
-            home_cfg, scale_cfg = getattr(config, "action_home_deg", None), getattr(config, "action_scale_rad", None)
             if not home_cfg or not scale_cfg:
                 raise ValueError("action_map 'residual' needs env_config.action_home_deg and action_scale_rad")
-            self._residual_home, self._residual_scale = home_rad(dict(home_cfg)), scale_rad(dict(scale_cfg))
-            check_residual_map(self._residual_home, self._residual_scale, JLIM_MIN, JLIM_MAX)
+            self._residual_home = home_rad(dict(home_cfg))
+            self._residual_scale, self._residual_scale_neg = scale_pair_rad(dict(scale_cfg))
+            check_residual_map(self._residual_home, self._residual_scale, JLIM_MIN, JLIM_MAX,
+                               scale_neg=self._residual_scale_neg)
             if height is None:
                 height = RESIDUAL_SPAWN_HEIGHT_M
         if height is not None:
@@ -416,6 +452,10 @@ class BipedEnvV2(BaseEnv):
     def _actions_to_targets(self, action: np.ndarray) -> np.ndarray:
         """Same map as BipedEnv.actions_to_targets (Isaac) for the configured action_map."""
         if self.action_map == "residual":
+            if self._residual_scale_neg is not None:         # asymmetric: s_pos for a >= 0, s_neg for a < 0
+                a = np.clip(action, -1.0, 1.0)
+                return np.clip(self._residual_home + np.where(a >= 0.0, self._residual_scale, self._residual_scale_neg) * a,
+                               JLIM_MIN, JLIM_MAX)
             return np.clip(self._residual_home + self._residual_scale * np.clip(action, -1.0, 1.0),
                            JLIM_MIN, JLIM_MAX)
         if self.action_map == "centered":
@@ -739,25 +779,40 @@ class BipedEnvV2(BaseEnv):
     # Commands
     # ------------------------------------------------------------------
 
-    def _sample_commands(self) -> None:
+    def command_limit(self) -> tuple[dict, str]:
+        """(ranges, shape) of the command limit: the run config's commands.base_velocity.ranges / limit_shape
+        (the training config is the source of truth); default ranges and "box" without a config."""
         try:
-            ranges = self.config.commands["base_velocity"]["ranges"]
-            xr = tuple(ranges.get("lin_vel_x", _DEFAULT_CMD_RANGES["lin_vel_x"]))
-            yr = tuple(ranges.get("lin_vel_y", _DEFAULT_CMD_RANGES["lin_vel_y"]))
-            wr = tuple(ranges.get("ang_vel_z", _DEFAULT_CMD_RANGES["ang_vel_z"]))
+            bv = self.config.commands["base_velocity"]
+            ranges = bv["ranges"]
+            shape = validate_shape(bv.get("limit_shape"))
         except (AttributeError, KeyError, TypeError):
-            xr = _DEFAULT_CMD_RANGES["lin_vel_x"]
-            yr = _DEFAULT_CMD_RANGES["lin_vel_y"]
-            wr = _DEFAULT_CMD_RANGES["ang_vel_z"]
-        self.commands[:] = [
-            np.random.uniform(*xr),
-            np.random.uniform(*yr),
-            np.random.uniform(*wr),
-        ]
+            ranges, shape = {}, "box"
+        return {k: tuple(ranges.get(k, _DEFAULT_CMD_RANGES[k])) for k in _DEFAULT_CMD_RANGES}, shape
 
-    def set_command(self, vx: float, vy: float, wz: float) -> None:
-        """Override the velocity command (useful for manual testing)."""
-        self.commands[:] = [vx, vy, wz]
+    def _sample_commands(self) -> None:
+        ranges, shape = self.command_limit()
+        if shape == "box":
+            xr, yr, wr = ranges["lin_vel_x"], ranges["lin_vel_y"], ranges["ang_vel_z"]
+            self.commands[:] = [
+                np.random.uniform(*xr),
+                np.random.uniform(*yr),
+                np.random.uniform(*wr),
+            ]
+        else:
+            # (vx, vy) uniform inside the ellipse; the global numpy RNG, so reset(seed) still seeds it
+            self.commands[:] = sample_in_limit(1, ranges, shape, rng=_GlobalRng())[0]
+
+    def set_command(self, vx: float, vy: float, wz: float) -> np.ndarray:
+        """Override the velocity command (useful for manual testing). With limit_shape ellipse_xy the command
+        is limited exactly as in training (utils/command_limit.py); a box config keeps it as given.
+        Returns the command actually set."""
+        cmd = np.array([vx, vy, wz], dtype=np.float64)
+        ranges, shape = self.command_limit()
+        if shape != "box":
+            cmd = limit_command(cmd, ranges, shape)
+        self.commands[:] = cmd
+        return self.commands.copy()
 
     # ------------------------------------------------------------------
     # Gymnasium interface

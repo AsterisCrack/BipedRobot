@@ -13,7 +13,8 @@
 # a per-command freq grid, cadence following the command as in humans; held below reference.stand_threshold;
 # gait_clock_* keys are ignored when a reference is set), foot clearance, stance width,
 # posture and contact timing. The imitation targets are ABSOLUTE joint angles from the table, so the residual
-# home below is the table's stand pose (a = 0 is the reference stand; max |a| over all 819 baked cells <= 0.85).
+# home below is the table's stand pose (a = 0 is the reference stand); home, scales and spawn height are `auto`
+# (derived from the table at train start and frozen into the run's config.yaml, see action_map below).
 #
 # Watch in TensorBoard:
 #   Reward_Terms/imitation_joint_pos, _foot_pos, _contact, _orientation, _lin_vel (should climb fast; RSI starts 80% of
@@ -114,7 +115,29 @@ train:
       # must exceed ~0.5 just to break even; 1.5 gives a 3x margin.
       # (The old "was encouraging unnecessary foot lifting" note predates the 4 cm cap.)
       swing_foot_height: 0.0
-      feet_slide: -0.7                 # flat foot contact (keep)
+      # E25: feet_slide OFF (kept in the code, set it back to e.g. -0.7 to restore). It penalised the planar speed of the foot
+      # COM frame (robot.data.body_lin_vel_w) of every foot whose soft contact score is > 0: with the table's heel-toe rocker
+      # that moves 2-5x faster than the sole slips, so the term fought the reference (MuJoCo, run gaitref_2026-10-22_18-48-09 at
+      # vx 0.1 / 0.2 / vy 0.1: 76 / 79 / 79 mm/s measured vs true contact-point slip 17 / 19 / 29 mm/s; on the table itself
+      # 16 / 52 / 61 mm/s). Replaced by foot_slip + foot_drag below.
+      # E28 (supersedes the E25 note above): feet_slide back ON at -0.7, the 10-22_18-48 setup; foot_slip / foot_drag below are OFF.
+      feet_slide: -0.7
+      # E25 foot_slip: per loaded foot, the planar speed of the SOLE at the contact (lowest sole corners, rolling excluded), summed
+      # over the feet [m/s]. MuJoCo calibration on the 368M policy (sum over feet, mm/s): vx 0.1 22.5, vx 0.2 25.7, vx -0.1 8.2,
+      # vy 0.1 33.4, wz 0.6 5.3, stand 0.6 (true force-weighted contact-point slip 16.6 / 18.5 / 6.4 / 29.0 / 4.9 / 0.6);
+      # on the gait table kinematics 6.4 / 12.6 / 4.2 / 5.5 / 4.1. -10 => 0.22 / 0.26 / 0.08 / 0.33 / 0.05 per step for the policy,
+      # 0.06 / 0.13 / 0.04 / 0.06 / 0.04 for the reference.
+      # E28: foot_slip OFF (0.0), back to the 10-22_18-48 setup: at -10 (with foot_drag -5) the two terms cost the policy ~0.37/step, more than
+      # joint + foot imitation (~0.24/step), and the reference itself pays a large share, so the gait drifted from the table. The E25 code and
+      # Diagnostics/foot_slip_mms stay for logging.
+      foot_slip: -4.0
+      # E25 foot_drag: scuffing = an UNLOADED foot whose lowest sole corner is below foot_drag_height_m (env_config below) and moving:
+      # sum (1 - clearance/h) x sole speed [m/s]. It cannot be ~0 on the reference (the table's own swing start and end pass
+      # through < 2 mm at 0.1-0.3 m/s), so it is a small tie-breaker: at -5 and h = 2 mm the policy pays 0.11 / 0.09 / 0.04 / 0.17 /
+      # 0.06 per step (vx 0.1 / 0.2 / -0.1, vy 0.1, wz 0.6), the reference 0.05 / 0.12 / 0.08 / 0.07 / 0.02.
+      # E28: foot_drag OFF (0.0), same reason as foot_slip above (Diagnostics/foot_drag_mms stays for logging).
+      # 2026-10-24: foot_drag back ON at -2 (40% of the E25 -5: ~0.04-0.07/step for the policy, well below imitation).
+      foot_drag: -2.0
       step_length: 0.0
       knee_bend_touchdown: 0.0
 
@@ -150,7 +173,10 @@ train:
       # backstop only: the baked gait keeps 0.05-0.16 m (stand 0.090), so the band is widened below.
       foot_separation: -0.1
       # roll tilt of each foot in contact (sin^2 of the sole normal's lateral component). Table stance tilt < 3.3 deg.
-      foot_flat_l2: 0   # penalty: must be <= 0; +1.0 rewarded edge standing in run gaitref_2026-10-19_20-20-42
+      foot_flat_l2: -1.0   # 2026-10-24 back ON (the E22 value; stops standing on the foot edges). penalty: must be <= 0; +1.0 rewarded edge standing in run gaitref_2026-10-19_20-20-42
+      # 2026-10-25 edge-stance fix: |sin(sole roll)| per foot in contact, -3. sin^2 (foot_flat_l2) has no gradient near
+      # flat, so the policy kept a 5 deg outer-edge stance that tips on the real EVA soles. 5 deg -> ~0.5/step, 21 deg -> ~2.2.
+      foot_flat_l1: -3.0
       # legs bracing on each other: non-foot leg links (+ feet on flat terrain), saturates at 5 N
       leg_contact_l2: -0.5
       # E19: non-saturating anchor to the table's stand-frame joints, only while the command is ~0 (run gaitref_2026-10-21_07-17-11 braced: knees on the stop, legs pressing, every other stand term flat)
@@ -220,10 +246,15 @@ train:
         # vx = vy = 0 with |wz| in [0.4*max, max]. Uniform sampling makes spin-on-the-spot
         # ~2% of data, so it is otherwise never trained.
         rel_turn_in_place_envs: 0.15
+        # "ellipse_xy": (vx/vx_max)^2 + (vy/vy_max)^2 <= 1 (vx_max = forward or backward bound by sign),
+        # wz keeps its own box. The combined vx+vy corners are much harder than the axes (the full
+        # diagonal is 71% of each axis). "box" = per-axis ranges only. This config is the source of
+        # truth for the limit (sampler, tracking, export, Jetson); Gait Studio only mirrors it.
+        limit_shape: ellipse_xy
         ranges:
-          lin_vel_x: [-0.3, 0.3]       # inside the v2 bake grid (+-0.3)
-          lin_vel_y: [-0.2, 0.2]     # inside the bake grid
-          ang_vel_z: [-1.5, 1.5]       # inside the bake grid
+          lin_vel_x: [-0.2, 0.2]       # inside the v2 bake grid (+-0.3)
+          lin_vel_y: [-0.15, 0.15]     # inside the bake grid
+          ang_vel_z: [-1.2, 1.2]       # inside the bake grid
           heading: [-3.14159, 3.14159]
 
     # Per-channel observation noise std, in each channel's own units. The previous single
@@ -240,6 +271,15 @@ train:
                                 # tools/speed_register_check.py once real data exists
       previous_actions: 0.0     # not a sensor
       gait_clock: 0.0           # generated
+    # 2026-10-26 hardware traces: walking on the robot carries 3-4x the sim's 3-10 Hz sensor content (gear/structure
+    # play): +0.4-0.9 rad/s gyro, +0.5-1.3 m/s^2 accel, +0.3-0.8 rad/s knee/hip joint vel. In MuJoCo that much makes
+    # this policy chatter (da 0.13, 18% rate-limited) and fall 1 in 4 -- the hardware failure. Band-limited resonator
+    # noise, per-env amplitude U(0,1) x these upper bounds, centre frequency per dim in observation_vibration_hz.
+    observation_vibration_std:
+      imu_acc: 1.5              # m/s^2
+      gyro: 1.0                 # rad/s
+      joint_vel: 0.8            # rad/s
+    observation_vibration_hz: [3.0, 10.0]
     # Round joint_pos and joint_vel onto the STS3215's 4096-counts/rev grid, so the policy
     # sees the same resolution floor in sim as the servo gives on hardware.
     quantize_joint_obs: true
@@ -247,18 +287,20 @@ train:
       mean: 0.0
       std: 0.01
 
-    # Actuator delay, in 50 Hz control steps, drawn per env at reset. Ramped 0 -> [0, 3] by the DR curriculum
-    # (curriculum_dr_events "action_delay"): full width from step 0 made walking too hard to discover
-    # (2026-10-12). Same as config.yaml.
-    action_delay_steps_range: [0, 3]
+    # Actuator delay, in 50 Hz control steps, drawn per env at reset, ramped 0 -> [0, 1] by the DR curriculum
+    # (curriculum_dr_events "action_delay"). 2026-10-24 Jetson trace (servo_bus_manager.py): SYNC_READ, inference and
+    # SYNC_WRITE run in the same tick, so sensor sample -> goal on the wire is ~3 ms (+1-3 ms scheduling jitter). The
+    # servo's own 5.6 ms command delay is already inside the BAM model (m6 command_delay). So 0 steps is the real robot;
+    # 1 step (20 ms) is margin for jitter and the unknown servo return-delay register. The old "+20 ms was what the
+    # Jetson had" (2026-10-12) was the write-before-hook order (23 ms late), since fixed.
+    action_delay_steps_range: [0, 1]
 
     # Sensor lag (observation side), in 50 Hz control steps.
-    # Servo encoders report one step stale, same for every env.
-    servo_obs_delay_steps: 1
-    # IMU (accel + gyro + projected gravity) lags 1-2 steps, drawn per-env at reset and held
-    # for the episode, so the policy must be robust to an unknown but fixed lag.
-    # [1, 2]: the BNO055 NDOF fusion output plus the I2C reader thread add ~10-25 ms, never 0.
-    imu_obs_delay_steps_range: [1, 2]
+    # Encoders are read at the start of the same tick the policy runs in (~0.5-2 ms old), so no delay.
+    servo_obs_delay_steps: 0
+    # IMU (accel + gyro + projected gravity) lags 0-1 steps, drawn per-env at reset and held for the episode.
+    # The reader thread's sample is ~2-6 ms old at inference, plus the BNO055 fusion latency (unmeasured, <~10 ms).
+    imu_obs_delay_steps_range: [0, 1]
 
     # Per-episode CONSTANT sensor biases, drawn uniformly in +-range at each reset. These are
     # deliberately different from observation_noise_std: that resamples every step, so across
@@ -273,7 +315,7 @@ train:
     # (the servo drives its own offset encoder, so the true joint ends up displaced). It
     # replaces encoder_offset_rad, which was observation-only and redrawn every reset.
     mount_offset_rad: 0.0175   # ~1 deg; STS3215 resolution is 0.088 deg, so this is assembly error
-    imu_misalignment_deg: 6.0  # residual IMU board tilt, random axis, angle in [0, 6] deg
+    imu_misalignment_deg: 4.0  # residual IMU board tilt, random axis, angle in [0, 4] deg (was 6; measure it: gravity reading at rest)
 
     # ---- Servo model (TODO_SIM2REAL.md, Target A) ---------------------------------------
     # params_file is the ONE place the servo identification lives. It is a BAM params JSON;
@@ -291,8 +333,8 @@ train:
       kp_fw: 32                     # firmware P register; must match the Jetson's config/robot.yaml
       # Sim-only DR of the firmware P (per robot), ramped from 32 by the DR curriculum ("servo_stiffness"). The stall cap
       # halves the model's small-signal stiffness (17 vs 37 N*m/rad uncapped), and the bench validated the uncapped fit,
-      # so the real servo is likely stiffer than the capped model. [32, 70] spans both. The robot still runs P = kp_fw.
-      kp_fw_range: [32, 70]
+      # so the real servo is likely stiffer than the capped model. [32, 50] (was [32, 70]): the most gait-sensitive servo knob in the 2026-10-24 MuJoCo sweep. Verify with an actuator replay. The robot still runs P = kp_fw.
+      kp_fw_range: [32, 40]
       vin_range: [11.1, 12.6]       # ASSUMED 3S pack -- set to the real battery's range.
                                     # The SysID bench measured 11.49 V at the servo.
       # 2026-10-10: widened from [0.9, 1.1]. The identified m6 model has a measured
@@ -312,6 +354,11 @@ train:
       # cap is the conservative read. Applied by raising R, so no-load speed is unaffected.
       stall_torque_cap_nm: 2.94
       tau_ext_source: observer      # or "gravity" to debug the external-torque estimate
+      # 2026-10-25: STS3215 firmware dead zone (CW/CCW_DEADBAND, 0x1A/0x1B) in encoder counts (0.088 deg): no drive
+      # while |goal - encoder| <= it. Hardware: the servos ignored the policy's 0.1-0.3 deg standing corrections.
+      # Read the real value with BipedRobotJetson/tools/servo_registers.py. Nominal (MuJoCo) / per-servo draw (Isaac).
+      deadband_counts: 1
+      deadband_counts_range: [1, 1]   # measured 2026-10-25: CW/CCW_DEADBAND = 1 on all 12 servos
 
     # ---- Backlash (Target B) -----------------------------------------------------------
     # Total gear play per joint, drawn per servo at startup. Isaac uses the lost-motion model
@@ -319,7 +366,13 @@ train:
     # Replace the range with the 12-joint screen's measurements when you have them.
     backlash:
       enabled: true
-      lash_deg_range: [0.5, 2.5]
+      lash_deg_range: [1.0, 2.5]    # 2026-10-25 tap test (stand_record, servos holding, pushes): best fit 1.5-2.0 deg per joint
+      # 2026-10-25 tap test: with servos holding the home pose, pushes make the robot rock at 2.2-3.0 Hz, zeta
+      # 0.02-0.07, +-1.4-2.5 deg, encoders seeing ~55% of it. MuJoCo with the play READ BY the encoder (output side)
+      # and 1.5-2.0 deg of play reproduces it (1.5-2.2 Hz, +-1.8-2.9 deg, encoders 82-96%); with the encoder before the
+      # play (servo side) the encoders see only 1-8%, so output is the measured side. (An earlier servo-side switch rested
+      # on base-velocity kicks that the foot contacts cancel; invalid.)
+      encoder_side: output
       mujoco_lash_deg: 1.5
       impulse_cap: 2.94              # N*m cap on the re-engagement knock = the capped stall (clamped to it in bam_actuator)
 
@@ -327,43 +380,27 @@ train:
     # residual: target = clamp(home + scale*a, limits). CHANGING THE MAP INVALIDATES EVERY EXISTING CHECKPOINT AND
     # BUNDLE -- export_onnx records it, and the Jetson refuses a mismatch. The home is also the reset pose,
     # the joint_pos_rel origin and the (zeroed here) deviation-reward target.
-    # REFERENCE: unlike config.yaml (crouch -10/-26/-16), the home here is the baked table's STAND pose, rounded
-    # (v2 table stand, deg, L = R: hip_yaw 2.10, hip_roll -6.18, hip_pitch -17.72, knee -36.55, ankle_roll 6.53,
-    # ankle_pitch -18.71; stand base_height 0.2745 m). The imitation targets are absolute table angles, so a = 0 is the
-    # reference stand (|a_stand| < 0.002 with these values) and standing costs no stand_pose_l2 / joint_pos error at a = 0.
-    # Left/right share one value. Flat sole: hip_pitch - knee + ankle_pitch = -17.7 + 36.6 - 18.7 = 0.2 deg and
-    # hip_roll + ankle_roll = 0.3 deg.
-    # Scales (set by hand): hip_yaw 0.55, hip_roll 0.55, hip_pitch 0.95, knee 0.90, ankle_roll 0.60, ankle_pitch 0.45 rad.
-    # The training command ranges (commands.base_velocity.ranges above: vx +-0.3, vy +-0.2, wz +-1.5) are the WHOLE v2 bake
-    # grid, so the map must express every baked cell (16 x 12 x 16, both legs, table clamped to the joint limits). Max |a| over
-    # all of them: yaw 0.84, roll 0.89, hip_pitch 0.83, knee 0.81, ankle_roll 0.90, ankle_pitch 0.63 (no cell clips). With RSI's
-    # joint noise (reference.rsi_joint_noise, 0.05 rad, divided by the scale) added: 0.93 / 0.98 / 0.88 / 0.86 / 0.98 / 0.74, so
-    # RSI never needs a clamped action; tests/test_residual_action_map.py asserts max |a| + noise / scale < 1.0 per joint
-    # from these values. hip_roll and ankle_roll have the least headroom (0.02): re-baking a wider style needs larger scales there.
-    # ankle_pitch is a deliberate 0.45 floor (the table alone needs only 0.35): it keeps balance authority beyond the table.
-    # 0.1 of action = 2.6-5.4 deg. The lower ankle_pitch limit (-35 deg) and the knee upper limit (+5 deg) are exactly the
-    # table's min / max there, so those cells are expressible.
+    # REFERENCE: all three keys are `auto` (utils/residual_home.py), derived at train start from the baked table, so a
+    # re-bake in Gait Studio needs no hand-editing here:
+    #   action_home_deg  = the table's `stand` frame joint_pos (L = R; per joint type, rounded to 0.1 deg; warns if L != R).
+    #   action_scale_rad = per joint type the narrowest 0.05 rad value with max|a| + reference.rsi_joint_noise / scale <=
+    #                      scale_headroom (0.96) over every baked cell inside commands.base_velocity.ranges below (both legs,
+    #                      table clamped to the joint limits).
+    #   spawn_height_m   = Isaac root z that puts the lowest sole point spawn_clearance_m (0.0054) above the floor with the
+    #                      robot standing at the home joints (forward kinematics of envs/assets/robotV2/robot_v2.xml). It depends
+    #                      on the home only, so it also works for config.yaml's hand-set crouch. Used by non-RSI resets and
+    #                      play (MuJoCo's XML root sits 10 mm higher); RSI resets take the base height from the table.
+    # train.py FREEZES the numbers: they replace `auto` in the config saved to checkpoints/<run>/config.yaml (and in the env
+    # built from it), so export_onnx, policy_gate, sim2real and play read plain numbers and a later re-bake can never change an
+    # existing run's map. Write explicit numbers here instead of `auto` to pin the map (config.yaml does).
     # CHANGING THE MAP INVALIDATES EVERY EXISTING CHECKPOINT AND BUNDLE (see above).
     action_map: residual
-    action_home_deg:
-      hip_yaw: 2.1
-      hip_roll: -6.2
-      hip_pitch: -17.7
-      knee: -36.6
-      ankle_roll: 6.5
-      ankle_pitch: -18.7
-    action_scale_rad:
-      hip_yaw: 0.55
-      hip_roll: 0.55
-      hip_pitch: 0.95
-      knee: 0.90
-      ankle_roll: 0.60
-      ankle_pitch: 0.45
-    # Non-RSI resets (20%) and play spawn here: the home sole is flat, so the same ~5.4 mm foot clearance as the previous home
-    # (Isaac base z = this value; in MuJoCo the XML root sits 10 mm higher, so the same clearance reads 15.4 mm there).
-    # RSI resets take the base height from the table (stand 0.2745 + 0.005 = 0.2795), so the two agree to 0.5 mm.
-    # base_height_l2 (weight 0) would target this value.
-    spawn_height_m: 0.28
+    action_home_deg: auto
+    action_scale_rad: auto
+    action_scale_mode: symmetric     # auto scale: symmetric = one scale per joint type; asymmetric = separate +/- scales sized to the gait's max/min (e.g. the knee bends far one way from the stand pose and little the other). Explicit action_scale_rad per type: a number or {pos: x, neg: y}
+    spawn_height_m: auto
+    spawn_clearance_m: 0.0054
+    scale_headroom: 0.96
     # Gait clock: with a reference it is the table's (its period or freq grid, held below reference.stand_threshold), so
     # gait_clock_mode / gait_clock_period_s / gait_clock_stand_threshold are NOT set here (they would be ignored).
     # Ramps in common_step_counter units (control steps), the same unit as curriculum_dr_*.
@@ -437,8 +474,15 @@ train:
     # and the gap below which the penalty starts. 6 mm = the largest whole mm below the gait table's footprint gap over the cells
     # the command ranges above select (the whole 16x12x16 grid, 196,608 poses): min 6.4 mm (vx -0.3, vy -0.018, wz -1.3) /
     # p1 11.4 / p5 17.1 mm (stand 32.8 mm), so the reference is never penalised. Narrower command ranges would allow a larger margin.
+    # NOTE (table re-baked 2026-10-23 23:51, style "stable"): that no longer holds. Min footprint gap -7.65 mm (vx +-0.022, vy +-0.15,
+    # wz +-1.2), p1 -3.5 / p5 +3.9 / stand 42.8 mm; 344 of 1040 cells dip below 6 mm and 144 overlap, so 6.7% of the table frames (2.4%
+    # overlapping) are penalised at this margin. tests/test_foot_proximity.py::test_gait_table_reference_gap_is_not_penalised fails.
     foot_sole_half_extents_m: [0.0450, 0.0186]
     foot_proximity_margin_m: 0.006
+    # E25 foot_drag: clearance [m] of the lowest sole corner (above its height at the last loaded step) below which an unloaded, moving
+    # foot is penalised. 2 mm (cfg default 5 mm): at 5 mm the reference's own swing costs as much as the policy's (drag 34-73 mm/s on the
+    # table vs 29-53 for the policy); at 1-2 mm the policy exceeds the reference at vx 0.1, vy 0.1 and wz 0.6 (by 2-4x).
+    foot_drag_height_m: 0.002
     # Optional termination: end the episode (as a fall, termination_penalty applies) after this many seconds of continuous
     # footprint overlap (gap <= 0). 0 = off. 0.25 is the suggested value if the penalty alone does not stop the feet pressing together.
     foot_overlap_termination_s: 0.0
@@ -451,15 +495,24 @@ train:
     # Set either to false to genuinely disable that group — useful for A/B debugging.
     enable_perturbations: true          # push_robot
     enable_physics_randomization: true  # mass / friction / com / payload / joint armature / BAM servo population
+    # 2026-10-25: foot-ground friction measured on the robot (tilt test on hardwood): bare plastic ~0.30, duct tape ~0.38
+    # (tan 16-17 / 21 deg). The old training range (static 0.6-1.1, dynamic 0.5-1.0) never saw that, and the push
+    # falls showed the feet pivoting (yaw 2-9 rad/s). Overrides events.randomize_friction (biped_env_cfg.py).
+    events:
+      randomize_friction:
+        params:
+          static_friction_range: [0.25, 0.8]
+          dynamic_friction_range: [0.2, 0.7]
+    mujoco_ground_friction: 0.35   # MuJoCo gate: the real soles (tape ~0.38, plastic ~0.30)
 
     # Curriculum — randomize_com and randomize_payload scale from 0→100% over dr_full_steps
     curriculum_enabled: true
     curriculum_dr_start_steps: 0        # start DR from step 0
-    curriculum_dr_full_steps:  10000    # reach full COM/payload DR (and delay / servo gain) at 20k control steps
+    curriculum_dr_full_steps:  10000    # reach full COM/payload DR (and delay / servo gain) at 10k control steps (~40M env steps)
     curriculum_cmd_ramp_steps:  0       # full command range from the start
     curriculum_init_ramp_steps: 0       # full init range from the start
     # "action_delay" and "servo_stiffness" are ramped in code (BipedEnv._dr_ramp): both at full width from step 0 made
-    # walking too hard to discover. They start at 0 delay / P = 32 and reach [0, 3] / kp_fw_range at curriculum_dr_full_steps.
+    # walking too hard to discover. They start at 0 delay / P = 32 and reach action_delay_steps_range / kp_fw_range at curriculum_dr_full_steps.
     curriculum_dr_events: ["randomize_com", "randomize_payload", "action_delay", "servo_stiffness"]
 
 model:

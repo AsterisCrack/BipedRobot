@@ -178,6 +178,8 @@ class BamKernel:
         vin            supply voltage [V], shape (N, 1)
         friction_scale multiplies the whole friction budget (DR)
         torque_scale   TORQUE_LIMIT/1000: scales the duty ceiling
+        deadband       firmware dead zone [rad] (CW/CCW_DEADBAND registers 0x1A/0x1B, in encoder counts
+                       on the servo): no drive while |q_smooth - q| <= deadband. 0 = off (exact no-op).
     """
 
     def __init__(
@@ -201,6 +203,7 @@ class BamKernel:
         self.vin = _full((num_envs, 1), vin, self.device, dtype)
         self.friction_scale = torch.ones(shape, device=self.device, dtype=dtype)
         self.torque_scale = torch.ones(shape, device=self.device, dtype=dtype)
+        self.deadband = torch.zeros(shape, device=self.device, dtype=dtype)
 
         self.q_smooth = torch.zeros(shape, device=self.device, dtype=dtype)
         self.duty = torch.zeros(shape, device=self.device, dtype=dtype)
@@ -217,6 +220,9 @@ class BamKernel:
         # Every env starts "pending": its slew state and delay history are seeded from
         # the first motor() call, the way the servo behaves when it powers on.
         self._pending = torch.ones(num_envs, dtype=torch.bool, device=self.device)
+        # Host-side "some env may be pending" flag, so motor() needs no `_pending.any()` (a
+        # host-device sync on every physics substep).
+        self._any_pending = True
 
     # ------------------------------------------------------------------------------
     def reset(self, env_ids=None) -> None:
@@ -229,6 +235,7 @@ class BamKernel:
             self._pending[:] = True
         else:
             self._pending[env_ids] = True
+        self._any_pending = True
 
     # ------------------------------------------------------------------------------
     def motor(self, q_goal: torch.Tensor, q: torch.Tensor, dq: torch.Tensor,
@@ -239,11 +246,13 @@ class BamKernel:
         the output-side angle; the caller handles that distinction.
         """
         p = self.p
-        if self._pending.any():
-            idx = self._pending
-            self.q_smooth[idx] = q[idx]
-            self._ring[:, idx] = q_goal[idx]
-            self._pending[idx] = False
+        if self._any_pending:
+            # Seed the pending envs (masked select, no sync; same values as indexing them).
+            idx = self._pending.unsqueeze(-1)
+            self.q_smooth = torch.where(idx, q, self.q_smooth)
+            self._ring = torch.where(idx.unsqueeze(0), q_goal.unsqueeze(0), self._ring)
+            self._pending.zero_()
+            self._any_pending = False
 
         # Command delay (bam/simulate.py fractional_delay_shift, causal form).
         self._head = (self._head + 1) % self._ring_len
@@ -260,7 +269,12 @@ class BamKernel:
         self.q_smooth = torch.clamp(goal, self.q_smooth - max_step, self.q_smooth + max_step)
 
         # P-only position loop to PWM duty. Same operand order as BAM, for float parity.
-        duty = (self.q_smooth - q) * self.kp * ERROR_GAIN * p.error_gain_ratio
+        # Firmware dead zone: inside +-deadband the servo does not drive (2026-10-25: on hardware the
+        # servos ignored the policy's 0.1-0.3 deg standing corrections, small-signal gain 0.3-0.7 vs ~0.95
+        # on large moves). deadband 0: where() only zeroes an error that is already exactly 0, a no-op.
+        err = self.q_smooth - q
+        err = torch.where(torch.abs(err) <= self.deadband, torch.zeros_like(err), err)
+        duty = err * self.kp * ERROR_GAIN * p.error_gain_ratio
         lim = MAX_PWM * self.torque_scale
         self.duty = torch.clamp(duty, -lim, lim)
         volts = self.vin * self.duty
@@ -364,9 +378,16 @@ class LostMotion:
         the full motor torque is transmitted;
       * at the moment of contact the rotor's excess momentum, J*(omega_m - dq)/dt, goes
         to the output as an impulse torque, capped at `impulse_cap` for stability.
-    The encoder is on the output side, so the firmware never sees the rotor winding
-    through the gap. This is the effect that matters for a 50 Hz position policy: a
-    reversal costs a torque-free dead time, followed by a knock.
+    ENCODER SIDE (``encoder_side``)
+    ------------------------------
+      * "output" (the original model): the encoder reads the output link, so the firmware
+        and the policy both see the play; a reversal costs a torque-free dead time, followed
+        by a knock.
+      * "servo": the encoder reads the servo shaft, the ROTOR side of the gap (``encoder_state``):
+        the firmware regulates its own shaft and the link floats inside the play, invisible to the
+        policy. Kept as an option; the 2026-10-25 hardware tap test (servos holding, torso pushes)
+        rules it out for this robot: the encoders saw ~55% of the body rocking, the servo-side model
+        1-8%, the output-side model with 1.5-2 deg of play 82-96%.
 
     KNOWN APPROXIMATION
     -------------------
@@ -388,23 +409,37 @@ class LostMotion:
         self.contact = torch.ones(shape, dtype=torch.bool, device=device)
         self.side = torch.ones(shape, device=device, dtype=dtype)   # +1 upper edge, -1 lower
         self._pending = torch.ones(num_envs, dtype=torch.bool, device=device)
+        self._any_pending = True     # host-side, see BamKernel._any_pending
         self.impulse_cap = impulse_cap
+        self.encoder_side = "output"
+
+    def encoder_state(self, q: torch.Tensor, dq: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """(angle, velocity) of the servo shaft (rotor side of the gap): what a servo-side encoder reads.
+        In contact the rotor sits half a lash past the output on the pushing side; in free play it is
+        the tracked rotor state. Envs not yet seeded since a reset read the output (lash centred)."""
+        half = 0.5 * self.lash
+        pend = self._pending.unsqueeze(-1)
+        pos = torch.where(self.contact, q + self.side * half, self.theta_m)
+        vel = torch.where(self.contact, dq, self.omega_m)
+        return torch.where(pend, q, pos), torch.where(pend, dq, vel)
 
     def reset(self, env_ids=None) -> None:
         if env_ids is None or (isinstance(env_ids, slice) and env_ids == slice(None)):
             self._pending[:] = True
         else:
             self._pending[env_ids] = True
+        self._any_pending = True
 
     def emf_velocity(self, q: torch.Tensor, dq: torch.Tensor) -> torch.Tensor:
         """Rotor velocity, which is what generates back-EMF. Call before motor()."""
-        if self._pending.any():
-            idx = self._pending
-            self.theta_m[idx] = q[idx]
-            self.omega_m[idx] = dq[idx]
-            self.contact[idx] = True
-            self.side[idx] = 1.0
-            self._pending[idx] = False
+        if self._any_pending:
+            idx = self._pending.unsqueeze(-1)
+            self.theta_m = torch.where(idx, q, self.theta_m)
+            self.omega_m = torch.where(idx, dq, self.omega_m)
+            self.contact = self.contact | idx
+            self.side = torch.where(idx, torch.ones_like(self.side), self.side)
+            self._pending.zero_()
+            self._any_pending = False
         # In contact the rotor rides on the output, so its velocity is the output's
         # CURRENT velocity. omega_m holds last step's value, and using it there would
         # put a one-step lag on back-EMF.
@@ -459,11 +494,16 @@ class BamServo:
 
     def __init__(self, params: BamParams, num_envs: int, num_joints: int, dt: float,
                  kp=32.0, vin: float = 12.0, backlash: bool = False,
-                 impulse_cap: float = 6.0, device="cpu", dtype=torch.float32):
+                 impulse_cap: float = 6.0, device="cpu", dtype=torch.float32,
+                 encoder_side: str = "output"):
         self.kernel = BamKernel(params, num_envs, num_joints, dt, kp=kp, vin=vin,
                                 device=device, dtype=dtype)
         self.lost_motion = (LostMotion(num_envs, num_joints, device, dtype, impulse_cap)
                             if backlash else None)
+        if encoder_side not in ("output", "servo"):
+            raise ValueError(f"encoder_side {encoder_side!r}: expected output | servo")
+        if self.lost_motion is not None:
+            self.lost_motion.encoder_side = encoder_side
         self.armature = params.armature
         self.dt = float(dt)
         shape = (num_envs, num_joints)
@@ -486,7 +526,9 @@ class BamServo:
             return self.tau_total
 
         emf_vel = lm.emf_velocity(q_enc, dq)
-        self.tau_motor = k.motor(q_goal, q_enc, emf_vel, torque_enable)
+        # A servo-side encoder: the firmware regulates its own shaft (the rotor), not the output link.
+        q_fw = lm.encoder_state(q_enc, dq)[0] if lm.encoder_side == "servo" else q_enc
+        self.tau_motor = k.motor(q_goal, q_fw, emf_vel, torque_enable)
         # Gearbox friction on the rotor alone, in case it is in free play this step.
         rotor_friction = k.stop_clip(self.tau_motor, torch.zeros_like(dq), lm.omega_m, self.armature)
         tau_tx = lm.transmit(self.tau_motor, rotor_friction, q_enc, dq, self.armature, self.dt)

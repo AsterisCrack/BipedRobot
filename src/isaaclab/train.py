@@ -49,6 +49,7 @@ from torch_rl_algorithms.algorithms.mpo.model import MPO
 from torch_rl_algorithms.algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
+from utils.residual_home import freeze_residual_map
 from src.isaaclab.common import BaseIsaacLabWrapper
 from src.isaaclab.env_config import build_env_cfg, describe as describe_env_cfg
 from envs.isaaclab.biped_env import BipedEnv
@@ -95,7 +96,14 @@ def train():
             return
 
     config = Config(args_cli.config_path)
-    
+    # action_home_deg / action_scale_rad / spawn_height_m may say `auto` (derived from the gait table and the robot model):
+    # freeze the numbers into this config NOW, before the env is built and before the config is saved to
+    # checkpoints/<run>/config.yaml, so a later re-bake cannot change an existing run's map. No-op for explicit numbers.
+    freeze_residual_map(config)
+    # TF32 matmuls (train.tf32): the learner is ~90 ms/it of fp32 GEMM at batch 2048.
+    torch.backends.cuda.matmul.allow_tf32 = bool(config.train.tf32)
+    torch.backends.cudnn.allow_tf32 = bool(config.train.tf32)
+
     # Initialize Isaac Lab Environment. All config.yaml -> BipedEnvCfg mapping lives in
     # src/isaaclab/env_config.py, shared with play.py, so the two cannot drift apart again.
     env_cfg = build_env_cfg(config, BipedEnvCfg, training=True, num_envs=args_cli.num_envs)

@@ -576,6 +576,29 @@ def foot_flat_roll_l2(
 
 
 @torch.jit.script
+def foot_flat_roll_l1(
+    foot_quat_w: torch.Tensor,
+    root_quat_w: torch.Tensor,
+    in_contact: torch.Tensor,
+) -> torch.Tensor:
+    """|sin(sole roll)| summed over feet in contact (same geometry as foot_flat_roll_l2). Returns (N,).
+
+    Why L1 (2026-10-25): sin^2 has no gradient near flat, so at weight -5 a 5 deg outer-edge stance cost only
+    ~0.04/step and the policy kept riding the edge (the ankle axis sits over the sole's inner edge, so the outer
+    edge is a rigid line support in sim; the real EVA-foam sole edge creeps and the robot tipped). |sin| pulls with
+    the same force at 1 deg as at 20 deg, all the way to flat."""
+    qw = foot_quat_w[..., 0]; qx = foot_quat_w[..., 1]
+    qy = foot_quat_w[..., 2]; qz = foot_quat_w[..., 3]
+    n_x = 2.0 * (qx * qz + qw * qy)
+    n_y = 2.0 * (qy * qz - qw * qx)
+    by = _body_y_w(root_quat_w)                             # (N, 3)
+    lat = torch.stack([by[:, 0], by[:, 1]], dim=-1)
+    lat = lat / torch.norm(lat, dim=-1, keepdim=True).clamp(min=1e-6)
+    tilt = n_x * lat[:, 0:1] + n_y * lat[:, 1:2]            # (N, F) = sin(roll)
+    return torch.sum(torch.abs(tilt) * in_contact.float(), dim=1)
+
+
+@torch.jit.script
 def foot_sole_centre_lateral_sep(
     feet_pos_w: torch.Tensor,
     foot_quat_w: torch.Tensor,
@@ -595,11 +618,11 @@ def foot_sole_centre_lateral_sep(
     (index 1), -1 for right (index 0). Positive result = left foot on the left, as expected;
     crossed feet read negative.
     """
-    sign = torch.tensor([-1.0, 1.0], device=feet_pos_w.device, dtype=feet_pos_w.dtype)
-    off = torch.zeros_like(feet_pos_w)
-    off[:, :, 0] = sole_x
-    off[:, :, 1] = sign.unsqueeze(0) * sole_lat
-    off[:, :, 2] = sole_z
+    # Built with full_like/stack: a torch.tensor(...) constant or a scripted `off[...] = float` each
+    # copies a CPU value to the device, which syncs (this runs every step). Same values: right -lat, left +lat.
+    one = feet_pos_w[:, 0, 0]
+    lat = torch.stack([torch.full_like(one, -sole_lat), torch.full_like(one, sole_lat)], dim=1)   # (N, 2)
+    off = torch.stack([torch.full_like(lat, sole_x), lat, torch.full_like(lat, sole_z)], dim=-1)  # (N, 2, 3)
     centres = feet_pos_w + _quat_rotate(foot_quat_w, off)
     vec = centres[:, 1, :] - centres[:, 0, :]
     return torch.sum(vec * _body_y_w(root_quat_w), dim=-1)
@@ -640,10 +663,9 @@ def _planar_obb(pos_w: torch.Tensor, quat_w: torch.Tensor, centre_offset: List[f
     The axes come from the foot's YAW (atan2 of the link +X axis projected to the floor), so a
     pitched or rolled foot still yields an orthonormal planar frame (atan2(0, 0) = 0 is the
     harmless fallback for a foot standing on its toe)."""
-    off = torch.zeros_like(pos_w)
-    off[:, 0] = centre_offset[0]
-    off[:, 1] = centre_offset[1]
-    off[:, 2] = centre_offset[2]
+    one = pos_w[:, 0]   # full_like/stack, not `off[:, k] = float` (a scripted CPU->device copy = a sync)
+    off = torch.stack([torch.full_like(one, centre_offset[0]), torch.full_like(one, centre_offset[1]),
+                       torch.full_like(one, centre_offset[2])], dim=-1)
     centre = (pos_w + _quat_rotate(quat_w, off))[:, 0:2]
     w = quat_w[:, 0]
     x = quat_w[:, 1]
@@ -729,6 +751,93 @@ def foot_proximity_penalty(gap: torch.Tensor, margin_m: float) -> torch.Tensor:
     """clamp((margin - gap) / margin, 0, 2)^2 (N,): 0 for gap >= margin, 1 when touching, up to 4
     when overlapping by one margin or more. Meant for a NEGATIVE weight (foot_proximity)."""
     return torch.square(torch.clamp((margin_m - gap) / max(margin_m, 1e-6), min=0.0, max=2.0))
+
+@torch.jit.script
+def feet_loaded_flag(force_history: torch.Tensor) -> torch.Tensor:
+    """(N, F) bool: foot carries load, |F| > 1 N at any history step and any filter body. Same
+    quantity as the contact flag inside feet_slide. force_history = contact sensor
+    force_matrix_w_history[:, :, feet_ids, :], (N, T, F, M, 3) (flat terrain). On rough terrain
+    (no filter prims) the env uses the net force instead: |net_forces_w| > 1 N."""
+    return torch.max(torch.max(torch.norm(force_history, dim=-1), dim=1)[0], dim=-1)[0] > 1.0
+
+@torch.jit.script
+def foot_sole_slip_speed(
+    pos_w: torch.Tensor,
+    quat_w: torch.Tensor,
+    lin_vel_w: torch.Tensor,
+    ang_vel_w: torch.Tensor,
+    centre_offset: List[float],
+    half_extents: List[float],
+    tau_m: float = 0.002,
+):
+    """(slip_speed (N, F), sole_low_z (N, F)): planar speed [m/s] of each foot's SOLE at the contact, rolling
+    excluded, and the world height [m] of its lowest sole corner.
+
+    pos_w, lin_vel_w, ang_vel_w (N, F, 3) and quat_w (N, F, 4) [w, x, y, z]: world pose and
+    velocity of the foot LINK ORIGIN (the ankle-pitch frame, 31.6 mm above the sole), feet ordered
+    [right, left] (F = 2). centre_offset = [x, lateral magnitude, z] of the sole centre in the foot
+    frame (cfg.foot_sole_offset_m; lateral sign -1 right / +1 left, as foot_footprint_gap and
+    foot_sole_centre_lateral_sep), half_extents = [hx, hy] of the sole rectangle (cfg.foot_sole_half_extents_m).
+
+    The 4 sole corners have world velocity v_c = v_origin + w x (p_c - p_origin). They are weighted
+    toward the lowest ones, w_c = exp(-(z_c - min_c z_c) / tau_m), and
+    slip = sum_c w_c |v_c,xy| / sum_c w_c. A flat foot weighs all 4 equally (= the sole-centre
+    speed); a foot rolling on its heel or toe edge is represented by that edge's corners, which
+    stay ~still when it rolls without slipping (a corner 1 mm higher still counts 61 %, 5 mm 8 %).
+    sole_low_z = min_c z_c is the pitch-independent foot height (a foot on its toe edge reads 0 above the floor,
+    while the link origin rises 18 mm, 31.6 -> 49.7 mm at the table's vx 0.2 toe-off): the env keeps its last
+    loaded value as a datum and uses the difference as the clearance of foot_drag.
+
+    Why not the link origin (feet_slide): with the gait table's heel-toe rocker the origin moves at
+    omega * 31.6 mm even when the sole rolls without slipping. MuJoCo, policy
+    gaitref_2026-10-22_18-48-09: true contact-point slip (force-weighted) ~15 mm/s mean at vx 0.1-0.2 and
+    20 mm/s at vy 0.1, origin speed 25-30 mm/s: about half of the old "slip" was rolling. (Isaac's feet_slide
+    measured 76-79 mm/s: robot.data.body_lin_vel_w is the foot COM frame, and the soft contact score also counts
+    unloaded feet within a few mm of the floor.) Calibration table: CHANGES.md, "Feet sliding" (2026-10-23).
+    """
+    assert pos_w.shape[1] == 2
+    one = pos_w[:, :, 0]                                                  # (N, F)
+    sign = torch.stack([-torch.ones_like(one[:, 0]), torch.ones_like(one[:, 0])], dim=1)   # right -, left +
+    ox = centre_offset[0]
+    oy = centre_offset[1]
+    oz = centre_offset[2]
+    hx = half_extents[0]
+    hy = half_extents[1]
+    cx = torch.stack([torch.full_like(one, ox + hx), torch.full_like(one, ox + hx),
+                      torch.full_like(one, ox - hx), torch.full_like(one, ox - hx)], dim=-1)   # (N, F, 4)
+    cy = torch.stack([sign * oy + hy, sign * oy - hy, sign * oy - hy, sign * oy + hy], dim=-1)
+    cz = torch.full_like(cx, oz)
+    local = torch.stack([cx, cy, cz], dim=-1)                                                # (N, F, 4, 3)
+    q = quat_w.unsqueeze(2).expand(-1, -1, 4, -1)
+    r = _quat_rotate(q, local)                                                               # corner - origin, world
+    v = lin_vel_w.unsqueeze(2) + torch.cross(ang_vel_w.unsqueeze(2).expand(-1, -1, 4, -1), r, dim=-1)
+    speed = torch.norm(v[..., :2], dim=-1)                                                   # (N, F, 4)
+    z = pos_w[:, :, 2:3] + r[..., 2]                                                         # corner heights
+    z_low = z.amin(dim=-1, keepdim=True)
+    w = torch.exp(-(z - z_low) / max(tau_m, 1e-6))
+    return torch.sum(w * speed, dim=-1) / torch.sum(w, dim=-1), z_low[..., 0]
+
+@torch.jit.script
+def foot_slip(slip_speed: torch.Tensor, loaded: torch.Tensor) -> torch.Tensor:
+    """foot_slip penalty (N,) [m/s] = sum over feet of sole slip speed x load flag.
+    slip_speed (N, F) from foot_sole_slip_speed, loaded (N, F) bool/float. Negative weight."""
+    return torch.sum(slip_speed * loaded.to(slip_speed.dtype), dim=1)
+
+@torch.jit.script
+def foot_drag(slip_speed: torch.Tensor, clearance: torch.Tensor, loaded: torch.Tensor,
+              h_drag_m: float) -> torch.Tensor:
+    """foot_drag penalty (N,) [m/s]: scuffing = a foot that is NOT loaded, low and moving.
+    sum over feet of (1 - clamp(clearance / h_drag, 0, 1)) x slip_speed x (1 - loaded).
+    clearance (N, F): lowest sole corner above its height at the foot's last loaded step (foot_sole_slip_speed's
+    sole_low_z minus the env's datum); factor 1 at or below the floor, linear to 0 at h_drag_m. slip_speed is the
+    lowest-corner-weighted sole speed (foot_sole_slip_speed). Negative weight.
+
+    Why not the env's swing clearance (link origin above its last in-contact height, as swing_foot_height /
+    imitation_foot_height): the gait table's toe-off pitches the foot, the origin is 49.7 mm high at the last loaded
+    step (31.6 flat) and then reads -5..-11 mm for most of the swing, i.e. permanently "low": measured on the table
+    kinematics (vx 0.2) that gave 270-350 mm/s of drag on the reference itself. The sole-corner height has no such bias."""
+    low = 1.0 - torch.clamp(clearance / max(h_drag_m, 1e-6), min=0.0, max=1.0)
+    return torch.sum(low * slip_speed * (1.0 - loaded.to(slip_speed.dtype)), dim=1)
 
 
 @torch.jit.script
@@ -905,10 +1014,13 @@ REWARD_WEIGHT_SIGN: dict[str, int] = {
     "angular_momentum": -1,
     "base_height_l2": -1,               # squared height error
     "feet_slide": -1,                   # contact * foot speed
+    "foot_slip": -1,                    # sum over loaded feet of the planar sole slip speed [m/s]
+    "foot_drag": -1,                    # sum over unloaded low feet of the planar sole speed, clearance-weighted
     "undesired_contacts": -1,           # clamp(., 0, 1) per body
     "leg_contact_l2": -1,
     "stand_pose_l2": -1,                # sum of squared joint error to the table stand frame, only while standing
     "foot_flat_l2": -1,                 # sin^2(sole roll) over feet in contact
+    "foot_flat_l1": -1,                 # |sin(sole roll)| over feet in contact (no dead zone near flat)
     "foot_separation": -1,              # both modes: origin_one_sided clamp(min_sep - sep, 0), sole_band squared
     "foot_proximity": -1,               # clamp((margin - footprint gap)/margin, 0, 2)^2: feet pressing together
     "joint_deviation_hip": -1,          # L1 |q - q_default|

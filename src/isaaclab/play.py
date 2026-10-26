@@ -51,6 +51,7 @@ from torch_rl_algorithms.algorithms.mpo.model import MPO
 from torch_rl_algorithms.algorithms.ppo.model import PPO
 from config.schema import ModelType
 from utils import Config
+from utils.residual_home import freeze_residual_map
 from src.isaaclab.common import BaseIsaacLabWrapper
 from src.isaaclab.env_config import build_env_cfg, describe as describe_env_cfg
 from envs.isaaclab.biped_env import BipedEnv
@@ -90,6 +91,7 @@ def play():
             return
 
     config = Config(args_cli.config_path)
+    freeze_residual_map(config, warn_unfrozen=True)     # a run's own config.yaml is already numbers; a repo config may say auto
     
     # Same builder as train.py, with pushes and physics DR off: playback runs the NOMINAL
     # robot through the identical observation/actuation pipeline (action map, servo model,

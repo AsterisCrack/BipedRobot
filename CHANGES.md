@@ -4,6 +4,104 @@ These changes were first written against the old checkout. Everything outside
 `robot_motion_reference/` is listed here. The retargeting submodule's changes (the `gait_studio/`
 package, a README note, and the baked table in `processed/`) live in that repo.
 
+## Elliptical (vx, vy) command limit (2026-10-24)
+
+Commands were limited per axis (a box: vx +-0.2, vy +-0.15, wz +-1.2). The combined corners are much harder
+than the axes: the table cell (0.2, 0.15) moves the foot 107 mm forward and 101 mm sideways per cycle against
+106 / 35 mm at (0.2, 0), with a ZMP margin of -24 mm against -4 mm. Commands are now limited to an ellipse in
+(vx, vy), `(vx/vx_b)^2 + (vy/vy_b)^2 <= 1` (`vx_b` = the forward bound for vx >= 0, the backward one otherwise,
+same for vy); an over-limit command is scaled down along its direction; wz keeps its own box.
+
+**The TRAINING config is the source of truth.** New key `commands.base_velocity.limit_shape: ellipse_xy | box`
+(code default `box`, i.e. an old config behaves as before), set to `ellipse_xy` in `config.yaml` (no table) and
+`config_gait_reference.yaml`; the ranges stay where they were. Gait Studio never defines it: it has its own
+mirror setting (below), the table only carries what it was baked with, and training checks that against the config.
+
+- **`utils/command_limit.py`**: `limit_command(cmd, ranges, shape)` (numpy and torch, same maths: per-axis clamp,
+  then scale onto the ellipse; a zero bound is guarded) and `sample_in_limit(n, ranges, shape, rng | device)`
+  (uniform inside the shape by rejection from the box; torch version has a fixed number of rounds, no host sync,
+  leftovers projected). Golden vectors: `tests/data/command_limit_golden.json`, regenerated from a fixed input set by
+  `tests/data/make_command_limit_golden.py` (the Gait Studio copy has the same file; the Jetson copy is meant to).
+- **Config plumbing**: `src/isaaclab/env_config.py` (`_COMMAND_KEYS`, a typo in `limit_shape` raises),
+  `envs/isaaclab/biped_env_cfg.py` class default `"box"`; `src/isaaclab/jitter_probe.py` forces `box` (it collapses the
+  ranges onto the probe command, which an ellipse would scale by 1/sqrt(2) for a vx+vy probe).
+- **Isaac sampler** (`envs/isaaclab/mdp/commands.py`): with `ellipse_xy`, (vx, vy, wz) come from `sample_in_limit` on the
+  CURRENT ranges (the curriculum ramps the ellipse with them); standing / turn-in-place / heading buckets unchanged;
+  `apply_heading` ends with a `limit_command` guard. With `box` the code path and RNG call order are the old ones
+  (bit-identical for a fixed seed, tested).
+- **Gait table path only**: `GaitTableReference.set_command_limit(ranges, shape)` (called by the env from the CONFIG)
+  makes `corners()` (hence `sample()`, `frequency()`) read the projected command; box = no change. At env init
+  `check_command_limit` compares the npz metadata (v3) with the config and prints a WARNING on a shape or range mismatch;
+  a v1/v2 table has no metadata (silent for box, a one-line note for ellipse: boundary cells are interpolated).
+- **MuJoCo** (`envs/mujoco/biped_env_v2.py`): `command_limit()` reads the run config; `_sample_commands` uses
+  `sample_in_limit` (global numpy RNG, so `reset(seed)` still seeds it; the box branch is unchanged);
+  `set_command` applies `limit_command` for an ellipse config (a box config keeps it as given, as before) and returns the
+  command set. `policy_gate.py` / `sim2real.py` print one line when it differs from the requested one. The gait clock
+  already reads `env.commands`, so it sees the limited command.
+- **Export**: `deploy_config.json` gets `command_limit: {shape, lin_vel_x, lin_vel_y, ang_vel_z}` from the run config
+  (absent shape in an old run config = `box`). Optional key, `format_version` NOT bumped; a runtime that ignores it keeps
+  clamping per axis, i.e. a box.
+- **Gait Studio** (submodule): `configs/robot_v2.yaml command_limit_shape: ellipse_xy` (its own setting; training checks, never
+  reads it), `gait_studio/command_limit.py` (numpy copy), `bake.py` bakes cells outside the ellipse at the projected
+  command and writes npz **version 3** (`command_limit_shape`, `command_ranges_x/y/z`, `cmd_baked`; `utils/motion_reference.py`
+  accepts v1/v2/v3), the report counts projected cells and the status inside vs projected; Drive tab applies the limit to the
+  drive command and shows the effective command.
+- **Tests**: `tests/test_command_limit.py` (golden, sampler inside + boundary coverage for both configs, box bit-identical,
+  table mismatch warning, MuJoCo `set_command(0.2, 0.15, 0)` -> (0.1414, 0.1061, 0), export, table projection);
+  `gait_studio/tests/test_command_limit.py`.
+
+## Training speed: 2.26 -> 4.48 it/s at 4096 envs (2026-10-22)
+
+The step was CPU-bound: ~740 host-device syncs and ~11.6k kernel launches per iteration, GPU ~50% busy.
+Measured with the new `src/isaaclab/profile_train.py` (per-phase sync-bracketed times, sync call sites,
+torch.profiler), 4096 envs, flat terrain, `config_gait_reference.yaml`:
+
+| | before | after |
+|---|---|---|
+| iteration | 442.8 ms (2.26 it/s) | 223.0 ms (4.48 it/s) |
+| SAC update (10 x 2048) | 193 ms | 93 ms |
+| `_reset_idx` (incl. physics DR) | 103 ms | 29 ms |
+| rewards / sensors / actuator / logging | 25 / 10 / 16 / 10 ms | 11 / 5 / 12 / 1 ms |
+| PhysX `sim_step` (unchanged) | 64 ms | 63 ms |
+| host syncs per iteration | 740 | 76 |
+
+Nothing changes what is trained, except three things, each listed in the bullets below: TF32 matmuls,
+the RNG stream, and ulp-level DR property values (the PhysX cache).
+A fixed-seed 300-step rollout (256 envs, DR on, ~1200 resets) is bit-identical to the old code in obs,
+rewards, dones and every Reward_Terms sum (contact forces wobble 3e-4 N run to run on both) once the
+reset-event RNG change and the PhysX cache are switched off for the comparison.
+- **Learner** (`torch_rl_algorithms`): `Normal(validate_args=False)` (the check synced ~250x/it);
+  no `loss.item()` / alpha `.item()` (alpha stays a device tensor); the equivariant actor runs f(s), f(Ms)
+  as one batch, and the actor loss runs s, s', s+eps (CAPS) as one batch; `_foreach_lerp_` target update;
+  **TF32 matmuls** (`train.tf32`, default true, GEMM 88 -> 30 ms/it). Tests: `tests_caps/test_perf_equivalence.py`.
+- **TensorBoard**: written every `train.log_interval` iterations (default 10) as window means, one
+  device->host copy per window; episode score/length are means over the episodes finished in it.
+  Undefined values (e.g. `Diagnostics/*_moving_*` when no env moved) come as nan and are skipped, which
+  is what omitting the key used to do.
+- **Env**: the scene's own sensors (the contact sensor was built twice, both updated every substep);
+  device index tensors instead of Python lists; one `contact_sensor.data` read per step; `torch.where`
+  / `index_fill_` instead of masked writes and `if x.any()`; one `[terms, envs]` episode-sum matrix;
+  gait-table corners computed once per step; zero-weight reward terms are not computed (logged as 0);
+  the never-printed `logging.info` dump in `_reset_idx` (~80 tensor formats = syncs per step) is gone.
+  `reset_base` / `reset_robot_joints` no longer also run in the EventManager (the explicit calls in
+  `_reset_idx` overwrote them): same distribution, **different RNG stream**.
+- **BAM actuator**: host-side pending flag + `torch.where` seeding (was 2 `.any()` syncs per substep),
+  `linalg.inv_ex`. `actuator.parity.test_kernel_vs_bam`: worst 1.1e-16 rad.
+- **PhysX property cache** (`envs/isaaclab/physx_cache.py`): masses / inertias / COMs / materials are
+  read from PhysX once, then served from a write-through cache (the reads cost ~60 ms/it). PhysX does
+  not round-trip them bit-exactly (6e-8 kg, 1.8e-6 m), so DR values differ from the old run at that
+  level; `PhysxPropertyCache.verify()` compares against a fresh readback.
+
+Still open (behaviour or algorithm changes, not done): `randomize_friction`'s `set_material_properties`
+costs 15 ms/it by itself; the learner is launch-bound (~3.5k kernels/it, CUDA graphs would cut most of
+it); `batch_iterations`/`batch_size` (UTD) is the other learner lever.
+
+**Bug found, not fixed:** the DR curriculum never reached `randomize_com` / `randomize_payload`.
+Isaac Lab's EventManager deep-copies `cfg.events`, and `_apply_curriculum` writes `self.cfg.events[...]`,
+so those terms run at their full cfg ranges (payload 0-0.1 kg, COM +-1 cm) from step 0 although
+`Curriculum/dr_scale` ramps. (Checked at runtime. The joint-reset range is read from `self.cfg` by the
+explicit call, so it works; action delay and servo kp are ramped in code and work.)
+
 ## Sim-to-real: shakes and falls after 3-4 s (2026-10-12, run `BipedV2_SAC_2026-10-11_19-07-51`)
 
 The policy was stable in both sims. On the robot at zero command it stood, shook harder and harder,
@@ -700,3 +798,89 @@ Pipeline (the cycle length now depends on the command):
 - **Margin.** Footprint gap over the gait table itself (`gait_table.npz` v2): every cell the config's command ranges select. `config_gait_reference.yaml` now trains on the whole bake grid (vx +-0.3, vy +-0.2, wz +-1.5 = 16 x 12 x 16 cells; an earlier pass of this entry used |vx| <= 0.2, |vy| <= 0.15, |wz| <= 1.2 and got min 8.8 mm), all 64 phase frames = 196,608 poses, set through MuJoCo FK (table `joint_pos`, base at the table base height with the `projected_gravity` orientation, yaw 0; checked against the table's own `foot_pos_b` to 1e-4 m): min 6.39 mm, p0.1 9.12, p1 11.37, p5 17.05, median 49.1, stand frame 32.8 mm (worst cell vx -0.3, vy -0.018, wz -1.3; per-cell minimum p1 8.2, p5 10.0). The margin is the largest whole mm (<= 10 mm) that penalises no reference frame: `foot_proximity_margin_m = 0.006` (7 mm would penalise 16 frames, 10 mm 0.48% of frames). The test reads the ranges from the yaml and fails if the margin is not exactly that value, so narrowing or widening the ranges forces a re-derivation.
 - **Tests.** `tests/test_foot_proximity.py` (22 tests, command ranges read from the yaml): exact axis-aligned gaps, brute-force check on 250 random tilted / rotated poses (direction sweep for the signed value, sampled points for the distance), overlap <= 0, penalty values, cfg vs MJCF within 1 mm, the table's reference gap >= margin, sign guard, config values (-2.0, 0.0), source-level wiring (fresh `robot.data` pose, [right, left] order, counter written once per step and only in `_get_dones` / `_reset_idx`). Suite (`tests`, excluding `test_env.py`, `test_transformer.py`): 183 passed, 0 failed. `test_residual_action_map.py` was updated to the yaml's deliberate scales (hip_pitch 0.95, knee 0.90) and its coverage test now asserts the real constraint, per joint max |a| + `rsi_joint_noise` / scale < 1.0 over the cells the config's ranges select (whole grid: max |a| yaw 0.84, roll 0.89, hip_pitch 0.83, knee 0.81, ankle_roll 0.90, ankle_pitch 0.63; with noise 0.93 / 0.98 / 0.88 / 0.86 / 0.98 / 0.74), instead of the fixed 0.86 bound.
 - **Needs a fresh run:** the penalty is new, so the existing checkpoints do not contain it. No other weight changed.
+
+## v2 table investigation: cadence vs style, edge standing (2026-10-22)
+
+- **Command ranges** (wide vs reverted runs): within a few % of each other in TB, minor.
+- **New runs vs the v1-table run 07-17-11 at 36M, per step:** imitation_joint_pos -10%, foot_pos -13%, orientation -11%, foot_height -7%; falls per episode 2.13 vs 1.51.
+- **Open-loop MuJoCo replay** (BAM servo, no feedback): the v2 table falls at slow commands (0.07: 3.9 s, -0.1: 1.5 s, wz 0.6: 1.2 s; 0.1 marginal, 9.8 s) where the same style baked at a fixed 0.84 s survives.
+  - Re-timing v2's own shapes to 0.84 s does NOT fix -0.1 / wz 0.6: it is the shapes the cadence law bakes at long periods (v2 period 2.0 s near zero, 1.27 s at 0.1; single support 0.56-0.88 s vs 0.36 s), not the clock rate itself.
+  - A bake with period_min 0.6 / period_max 0.9 replays like the 0.84 bake: survives 0.07, 0.1 and wz 0.6; -0.1 marginal (2.3 s), survives with a 2-step lead.
+  - Sideways (vy 0.1) falls with every v2 bake (1.6 s) and not with v1: a style issue (70 mm stance vs ~90 mm, 16 deg ankle-roll swing).
+- **Closed loop (MuJoCo):** run 16-31-44 at step 61.4M imitates its table at joint_pos kernel ~0.15 at every speed, vs 0.35-0.54 at step 36.9M and 0.34-0.49 for the v1 run.
+  - About half of the remaining error is a hip-pitch flexion bias of -17 deg with +6 deg forward trunk lean (non-monotone over training: 49M -13, 61M -18, 74M -8 deg); the rest is shape / timing.
+  - At command 0 all new checkpoints stand on their outer foot edges (ankle roll -16..-33 deg): `foot_flat_l2` was 0.
+- **Applied:** `foot_flat_l2` -1.0 in `config_gait_reference.yaml` (roll-only; costs ~0.23/step at the edge pose, the table's stand and stance soles score 0; the first run that transferred to the robot, gaitref_2026-10-18_17-42-34, used -3.0). `test_reward_sign_guard.py` now requires it strictly negative; `test_foot_reward_shaping.py` gains a 20 deg roll / rocker pitch / flat-feet check.
+- **Recommended (user's bake in Gait Studio):** period_max ~0.9 s, period_min ~0.6 s. The stand frame does not depend on the period (bit-identical across bakes), so home / spawn stay. Rerun the test suite after the bake (coverage and foot_proximity margin tests read the table).
+- **Scratch evidence:** `C:\Users\pablo\AppData\Local\Temp\claude\c--Users-pablo-Desktop-Projects-isaac-env\b1adf490-1699-4c7a-8581-bf7206cafbd6\scratchpad\e22_replay`, `C:\Users\pablo\AppData\Local\Temp\claude\c--Users-pablo-Desktop-Projects-isaac-env\b1adf490-1699-4c7a-8581-bf7206cafbd6\scratchpad\e22_imit`, `C:\Users\pablo\AppData\Local\Temp\claude\c--Users-pablo-Desktop-Projects-isaac-env\b1adf490-1699-4c7a-8581-bf7206cafbd6\scratchpad\verify_E22`.
+
+## Feet sliding: contact-point slip + drag penalties (2026-10-23)
+
+- **Diagnosis (run gaitref_2026-10-22_18-48-09, 368M steps):** the feet slide on the real robot. `feet_slide` (weight -0.7) is negligible in the reward (-0.07/step vs +3.9 positive) and measures the wrong thing. `robot.data.body_lin_vel_w` is the velocity of the foot COM frame in this Isaac Lab (`body_lin_vel_w` = `body_com_lin_vel_w`; the link-frame velocity is `body_link_lin_vel_w`), the weight is the soft contact score (an unloaded foot within 6 mm counts as in contact), and the gait table's heel-toe rocker moves the foot frame (31.6 mm above the sole; 49.7 mm at the table's vx 0.2 toe-off) even when the sole rolls without slipping. `Diagnostics/dragged_foot_frac` 0.195: ~20% of foot-steps unloaded, low and moving, swing clearance 7.5 mm vs the table's 10-21 mm.
+- **New `foot_slip` (penalty, `rewards.foot_sole_slip_speed` + `foot_slip`):** per foot, the planar speed of the sole at the contact: the 4 corners of the sole rectangle (`foot_sole_offset_m`, `foot_sole_half_extents_m`, lateral sign -1 right / +1 left as `foot_footprint_gap`) with velocity v_origin + w x r from the FRESH `body_link_*` state, weighted toward the lowest corners (w = exp(-(z - z_min)/2 mm)). A flat foot averages all 4, a foot rolling on its heel/toe edge is represented by that still edge. Gated by load: `|F| > 1 N` (the `feet_slide` flag, `force_matrix_w_history` max on flat terrain, `net_forces_w` on rough). Reward = sum over loaded feet [m/s].
+- **New `foot_drag` (penalty, `rewards.foot_drag`):** unloaded foot, low and moving: sum (1 - clamp(clearance/h, 0, 1)) x lowest-corner sole speed x (1 - loaded), `foot_drag_height_m` (cfg / schema default 0.005, gait-reference yaml 0.002). Clearance = lowest sole CORNER above its height at the foot's last loaded step (`foot_sole_ground_z`, seeded like `foot_ground_z`), NOT the env's `clearance` (see below). Diagnostics: `foot_slip_mms` (mean loaded-foot slip, mm/s), `foot_drag_mms` (the drag term, mm/s, all steps).
+- **Why not the existing clearance for drag (deviation from the brief):** the origin-based swing clearance is relative to the origin height at the last in-contact step, which is 49.7 mm after a table toe-off (31.6 flat), so it reads -5..-11 mm for most of the swing: on the table at vx 0.2 that gave 270-350 mm/s of "drag" on the reference itself (vs 24-77 with the sole-corner height). This also means `Diagnostics/swing_clearance_mm` and the origin-based `swing_foot_height` / `imitation_foot_height` clearance under-read the sole lift of a pitched foot (table at vx 0.2: sole lowest vertex peaks at 9.5 mm; origin-based 6.7 mm). Not changed here.
+- **MuJoCo calibration, policy 368M, delay 0, rate 0.5, 5 seeds x 10 s, window 2 s..end, no falls (mm/s, sums over the loaded feet = the reward terms; `policy_gate.FootSlipProbe`, same `rewards.py` functions fed with `mj_objectVelocity(mjOBJ_XBODY, world)` + `xpos` / `xquat`, load = env force flag):**
+
+| cmd | loaded frac | true contact slip | new foot_slip | old origin speed (loaded) | old feet_slide as Isaac computes it (COM speed x soft contact) | foot_drag (h 2 mm / 5 mm) | corr new/true | corr origin/true | corr old/true |
+|---|---|---|---|---|---|---|---|---|---|
+| 0,0,0 | 1.00 | 0.6 | 0.6 | 0.5 | 0.5 | 0 / 0 | 1.00 | 1.00 | 1.00 |
+| 0.1,0,0 | 0.52 | 16.6 | 22.5 | 25.9 | 75.7 | 22.5 / 52.6 | 0.96 | 0.95 | 0.46 |
+| 0.2,0,0 | 0.52 | 18.5 | 25.7 | 34.4 | 79.4 | 16.9 / 53.1 | 0.96 | 0.93 | 0.50 |
+| -0.1,0,0 | 0.53 | 6.4 | 8.2 | 15.7 | 45.7 | 8.2 / 29.2 | 0.85 | 0.85 | 0.30 |
+| 0,0.1,0 | 0.81 | 29.0 | 33.4 | 42.6 | 78.5 | 33.6 / 47.3 | 0.98 | 0.93 | 0.26 |
+| 0,0,0.6 | 0.52 | 4.9 | 5.3 | 15.6 | 36.3 | 11.6 / 28.0 | 0.99 | 0.78 | 0.34 |
+
+  The new term follows the true slip (r 0.85-0.99, ~1.3x high: lowest-corner weighting also picks up the foot's yaw and the start of the roll); the old Isaac term sits at 3-4x the true slip with r 0.26-0.50. The old term's cost at -0.7: 0.05/step. MuJoCo reproduces the brief's numbers (true slip ~15 mm/s at vx 0.1-0.2, origin speed 25-34).
+- **Reference (gait table kinematics, no dynamics):** each table frame set in MuJoCo (joint_pos, base orientation from projected_gravity, base height, base planar pose integrated from base_lin_vel_b / base_ang_vel_b), corner velocities by central finite differences of the corner positions over dt = 1/(freq x 64), stance = the table `contact` field. Check: the stance sole lowest vertex is within 0.1 mm of the floor in stance frames. mm/s, sums over feet:
+
+| cmd | foot_slip | old origin speed | old Isaac feet_slide | foot_drag (h 2 mm / 5 mm) |
+|---|---|---|---|---|
+| 0.1,0,0 | 6.4 | 18.4 | 16.4 | 9.5 / 33.9 |
+| 0.2,0,0 | 12.6 | 69.0 | 51.7 | 24.0 / 73.1 |
+| -0.1,0,0 | 4.2 | 21.2 | 26.5 | 15.0 / 39.9 |
+| 0,0.1,0 | 5.5 | 6.7 | 61.3 | 14.6 / 50.8 |
+| 0,0,0.6 | 4.1 | 5.3 | 14.6 | 4.3 / 13.0 |
+
+  The reference is not slip-free (a few mm/s, 12.6 at vx 0.2 around touchdown / toe-off), but 2-5x below the policy, while the OLD term charged the reference up to 69 mm/s at vx 0.2 (origin speed). Drag cannot be ~0 on the reference: its own swing start and end pass through < 2 mm at 0.1-0.3 m/s, and 13-24% of its foot-steps are unloaded, < 4 mm (sole) and moving > 0.05 m/s (the policy: 13-23%), so a `dragged_foot_frac` of ~0.2 is not by itself evidence of scuffing. At h = 5 mm the reference costs as much drag as the policy (34-73 vs 29-53 mm/s); at 1-2 mm the policy exceeds it at vx 0.1, vy 0.1 and wz 0.6 (2-4x) and not at vx 0.2 / -0.1.
+- **Weights (`config_gait_reference.yaml`):** `feet_slide` 0.0 (code kept), `foot_slip` -10.0, `foot_drag` -5.0 with `foot_drag_height_m` 0.002. Expected cost per step, policy at vx 0.1 / 0.2 / -0.1 / vy 0.1 / wz 0.6 / stand: slip 0.225 / 0.257 / 0.082 / 0.334 / 0.053 / 0.006 (the brief's 0.2-0.35 target), drag 0.11 / 0.08 / 0.04 / 0.17 / 0.06 / 0; reference: slip 0.064 / 0.126 / 0.042 / 0.055 / 0.041, drag 0.05 / 0.12 / 0.08 / 0.07 / 0.02. So the slip gradient favours the table by ~0.16/step at vx 0.1-0.2 and 0.28 at vy 0.1; drag is a small tie-breaker, deliberately not scaled to 0.2-0.35 because the reference pays about the same.
+- **`policy_gate.py`:** `FootSlipProbe` (per-step true / new / old terms for any run) and a report-only line in the pose report: mean true contact-point slip (mm/s, force-weighted MuJoCo contacts, mean over loaded feet) and the foot_drag term. No verdict change. Gate on the 368M checkpoint (1 seed): cmd0 true slip 0.6 mm/s, drag 0; walk 14.0 / 50.2 (drag at h 5 mm: that run's config has no foot_drag_height_m).
+- **Tests:** new `tests/test_foot_slip_drag.py` (19: heel / toe edge rolling without slip -> < 0.5 mm/s while the origin speed is > 20 mm/s; flat foot translating at v -> v; vertical motion 0; slip when the edge really slides; corner velocity vs a finite difference of the rigid motion; float32 / batched / jit; unloaded -> 0; drag 0 above h, 0 loaded, linear in speed and clearance; load flag = the feet_slide flag; sign guard; yaml weights; cfg / schema / env_config agree; source-level wiring (fresh `body_link_*` state, `rewards.get` forms, diagnostics, datum seeding); MuJoCo: corners on the sole of both feet, XBODY velocity = origin velocity (BODY = COM), probe on a standing env). `test_foot_agg_soft_contact.py` expected `feet_slide == -0.7`: now 0.0. Suite (`tests`, excluding `test_env.py`, `test_transformer.py`): 202 passed, 1 failed (`test_imitation_foot_height.py::test_env_cfg_defaults_keep_old_behaviour`: `reference_std.foot_height` is 0.015 in the cfg, the test expects 0.004; pre-existing, not touched).
+- **Isaac smoke test** (copy, headless, flat terrain, training=True config, 16 envs, 200 steps, episodes shortened to 2 s so every env resets twice, zero then random actions): no exceptions; finite `Reward_Terms/foot_slip`, `foot_drag`, `foot_proximity` (first Isaac run of E21), `feet_slide` (0); `Diagnostics/foot_slip_mms`, `foot_drag_mms`, `foot_gap_mm`, `foot_overlap_frac`, `dragged_foot_frac` all present and finite. (With `training=False` `BipedEnv.reset` fails: `DirectRLEnv` has no `event_manager`, pre-existing and unrelated.)
+- **Needs a fresh run:** the weights change the reward; the existing checkpoints were not trained with them.
+- **Scratch evidence:** `C:\Users\pablo\AppData\Local\Temp\claude\c--Users-pablo-Desktop-Projects-isaac-env\b1adf490-1699-4c7a-8581-bf7206cafbd6\scratchpad\calib_policy.py`, `calib_ref.py`, `hsweep.py`, `final_tab.py`, `isaac_smoke.py` (+ `isaac_smoke.log`, `ser_*.npy`, `calib_policy.json`, `calib_ref.json`).
+
+## Residual map auto-derived from the gait table (2026-10-23)
+
+- **Why.** `action_home_deg`, `action_scale_rad` and `spawn_height_m` were recomputed by hand after every Gait Studio re-bake. Each of the three may now be the string `auto` (independently; explicit numbers behave exactly as before, so `config.yaml` and old run configs are unchanged). `config_gait_reference.yaml` uses `auto` for all three; new keys `spawn_clearance_m` (0.0054) and `scale_headroom` (0.96).
+- **Rules** (`utils/residual_home.py`, `resolve_residual_map(env_config, root_dir) -> (home_deg, scale_rad, spawn_m, report)`):
+  - home = the table's `stand` frame joint_pos (policy joint order by joint name), per joint type the mean of L and R rounded to 0.1 deg; a warning if |L - R| > 0.05 deg. Needs `env_config.reference.npz_path`.
+  - scale = per joint type the narrowest value on a 0.05 rad grid with `max|a| + rsi_joint_noise / scale <= scale_headroom`, `a = (q - home) / scale`, over every baked cell inside `commands.base_velocity.ranges` (|g| <= bound plus the first grid point beyond a bound that is not a grid point; both legs; table joint_pos clamped to `_JOINT_LIMITS_DEG`). Needs the table and uses the resolved home.
+  - spawn height = Isaac root z at which the lowest foot-mesh vertex is `spawn_clearance_m` above the floor with the robot upright at the home joints (MuJoCo FK of `robot_v2.xml`, rounded to 0.1 mm; the sole-rectangle corners agree to 0.03 mm). Depends on the home only, so it also serves a hand-set crouch. Isaac frame; the MuJoCo env still adds `height - 0.29` to its 0.30 XML root (reads 10 mm higher).
+- **Freezing.** `train.py` (and `play.py`, `check_actuator.py`, `jitter_probe.py`, `profile_train.py`, `sim2real.py`) call `freeze_residual_map(config)` right after loading the `Config`: the numbers replace `auto` in the config object before the env is built and before `copy_in_file` writes `checkpoints/<run>/config.yaml`. Export, policy gate, sim2real and play therefore read plain numbers and a later re-bake cannot change an existing run's map. Train prints one line (`[residual-map] frozen into the run config: ...`). The low-level consumers (`env_config._apply_action_home`, `BipedEnvV2._init_residual`, `export_onnx._load_policy_contract`) resolve `auto` themselves if they ever get it, with a loud "NOT frozen" warning on stderr.
+- **Current bake (2026-10-23 23:51, style `stable`, digest 68ece5b158)** vs the previous hand values:
+  - home deg (yaw / roll / hip_pitch / knee / ankle_roll / ankle_pitch): 0.8 / -4.3 / -3.0 / -13.7 / 4.4 / -10.7 (was 1.5 / -6.8 / -6.5 / -19.2 / 6.9 / -12.6). Stand 0.82 / -4.32 / -2.98 / -13.71 / 4.39 / -10.70, L = R exactly. Flat sole: hip_pitch - knee + ankle_pitch = 0.0 deg, hip_roll + ankle_roll = 0.1 deg.
+  - scale rad: 0.65 / 0.60 / 0.90 / 1.15 / 0.60 / 0.50 (was 0.60 / 0.55 / 0.75 / 0.95 / 0.60 / 0.50). max deviation from home 31.2 / 28.3 / 44.2 / 59.4 / 29.2 / 24.3 deg; max |a| 0.838 / 0.823 / 0.856 / 0.901 / 0.850 / 0.848, with RSI noise 0.915 / 0.906 / 0.912 / 0.945 / 0.933 / 0.948. The old hand home and scales would need |a| + noise of 1.01 / 1.07 / 1.01 / 1.04 / 1.01 / 0.98 on this bake (clamped actions).
+  - spawn_height_m 0.2876 (was 0.286): lowest sole point 5.44 mm above the floor (rectangle corners 5.42 mm); the table's stand base_height 0.2822 + 5 mm agrees to 0.4 mm. MuJoCo `BipedEnvV2` built from the frozen config: reset joints = home exactly, lowest sole point 15.44 mm after reset (5.44 + 10), zero action holds the pose for 1 s.
+- **FK validation** (Isaac frame, clearance at the stated height): hand home of the 17:36 bake at 0.286 5.66 mm; the pre-v2 home (0 / -2.5 / -8 / -22 / 2.5 / -14) at 0.286 5.43 mm (CHANGES: "reads 15.43 mm" in MuJoCo); the 2026-10-21 v2 home at 0.28 5.41 mm; straight legs at 0.29 5.46 mm. Note `config.yaml`'s crouch (-10 / -26 / -16) at 0.286 is 6.67 mm, not 5.4 (that figure belongs to the pre-v2 home); `auto` would give 0.2847 for it. `config.yaml` keeps its explicit 0.286.
+- **Tests.** New `tests/test_residual_home_resolver.py`; `tests/test_residual_action_map.py` no longer pins hand values, it asserts the yaml says `auto` and the invariants of the resolver output (|a_stand| < 0.05, coverage with noise <= headroom, flat sole, L/R symmetric, scales minimal).
+- **Table-dependent tests on this bake** (`test_foot_agg_soft_contact`, `test_imitation_foot_height` x2, `test_track_lin_reference_target` made bake-relative; `test_foot_proximity::test_gait_table_reference_gap_is_not_penalised` fails: min footprint gap -7.65 mm, 6.7% of table frames under the 6 mm margin, 2.4% overlapping; see the NOTE in `config_gait_reference.yaml`). Every one of the 1040 cells of this bake has Gait Studio status `fail`.
+
+## E28: back to the 10-22_18-48 slip setup; config.yaml (no reference) readiness check (2026-10-24)
+
+- **Why.** Run `gaitref_2026-10-24_10-10-51` imitates worse and rocks fore-aft (body pitch std 3.4-3.7 deg vs 1.1-2.1 deg, pitch rate rms 0.87-0.93 vs 0.34-0.60 rad/s in the 10-22_18-48 run). With the E25 weights `foot_slip` -10 and `foot_drag` -5 the two terms cost the policy ~0.37/step, more than `imitation_joint_pos` + `imitation_foot_pos` together (~0.24/step), and the reference itself pays a large share of them (table liftoff / touchdown counts as drag, part of the heel-toe roll as slip), so the policy was paid for moving differently from the table.
+- **Change (config only).** `config/config_gait_reference.yaml` reward_weights: `foot_slip` -10.0 -> 0.0, `foot_drag` -5.0 -> 0.0, `feet_slide` 0.0 -> -0.7 (the 10-22_18-48 setup). Nothing else in the config changed, so the next run isolates E25. The E25 code, `foot_drag_height_m`, the sign guard entries and `Diagnostics/foot_slip_mms` / `foot_drag_mms` stay (computed always, so the logging continues).
+- **Tests.** `tests/test_foot_slip_drag.py` (yaml weights test: feet_slide -0.7, foot_slip = foot_drag = 0.0; sign-guard test also accepts the E28 values and still rejects wrong-signed foot_slip / foot_drag) and `tests/test_foot_agg_soft_contact.py` (feet_slide -0.7) assert the new values.
+- **config.yaml readiness (no table), no code change needed.** Static load (`utils.Config`, `freeze_residual_map` = no-op, `src/isaaclab/env_config.py` applied on a mock env_cfg built from the `BipedEnvCfg` defaults, schema, the env `__init__` validators): `limit_shape: ellipse_xy` plumbs through (ranges +-0.2 / +-0.2 / +-1.2 rad/s), `track_lin_target` = command, `reference_npz_path` None, `fixed_period` clock (0.7 s, stand threshold 0.05), no `foot_slip` / `foot_drag` / `foot_proximity` / `stand_pose_l2` weights (the env reads them with `.get(..., 0.0)`), E21 / E25 cfg keys have defaults (`foot_sole_half_extents_m`, `foot_proximity_margin_m` 6 mm, `foot_overlap_termination_s` 0, `foot_drag_height_m` 5 mm). `biped_env.py` dereferences `self.gait_ref` only behind `is not None` guards. MuJoCo `BipedEnvV2` from config.yaml (backlash disabled): reset, 200 random-action steps all finite, `set_command(0.2, 0.2, 0)` -> (0.1414, 0.1414, 0), fixed-period phase +0.1795 rad/step and held at command 0. Export helpers (`_load_policy_contract`, `_load_gait_clock`, `_load_command_ranges`, `_load_command_limit`, `_format_version`) on config.yaml and on a trainer-dumped copy: residual map, fixed_period 0.7 s, ellipse_xy, format v4. `policy_gate.run_case` runs with config.yaml.
+
+## Asymmetric residual action scales, OFF by default (2026-10-24)
+
+- **Why.** One scale per joint type is sized to the larger side of the gait's excursion from the stand pose, so the other side gets more authority (and more action range wasted on it) than the gait needs. The scales may now be separate for `a > 0` and `a < 0`, with `a = 0` still the stand pose. Nothing is switched on: `config_gait_reference.yaml` has `action_scale_mode: symmetric` (and `auto` scales), `config.yaml` is untouched.
+- **Map.** `target = clamp(home + s_pos*a, limits)` for `a >= 0`, `clamp(home + s_neg*a, limits)` for `a < 0` (a clipped to [-1, 1] first, per joint type, L = R). Inverse (RSI previous action, `previous_actions`): `a = (q - home)/s_pos` if `q >= home` else `(q - home)/s_neg`, clipped to [-1, 1]. "pos" is the joint angle increasing above home: knee `a > 0` = toward straight (limit +5 deg), hip_pitch `a > 0` = extension (foot back), ankle_pitch `a > 0` = toe down, hip_roll `a > 0` = left foot out; yaw / ankle_roll by angle only. Mirror signs are +1 per type, so mirror augmentation and the exported mirror table are unaffected.
+- **Config.** `env_config.action_scale_rad[type]` is a number (symmetric, as before) or `{pos: x, neg: y}`; `action_scale_mode: symmetric | asymmetric` (default `symmetric`) only matters for `action_scale_rad: auto` and picks how the resolver sizes it (explicit scales are used as written, with a note in the report). `config/schema.py` accepts both forms and the mode. A type whose two sides are equal collapses to the plain number everywhere (so `{pos: 0.6, neg: 0.6}` is the symmetric map, bit for bit).
+- **Resolver** (`utils/residual_home.py`, `required_scales_asym`). Same rule as before, applied per side on that side's own max deviation of the table (clamped to the limits, both legs, cells inside the command ranges): `max|a_side| + rsi_joint_noise/s_side <= scale_headroom`, narrowest 0.05 step (floor 0.05). `freeze_residual_map` writes `{pos, neg}` dicts into the run config; the training log prints `+pos/-neg`.
+- **Consumers.** `utils/residual_action.py`: `scale_pair_rad` (pos, neg-or-None), `split_scale`, `plain_scale_cfg`, `actions_to_targets_np` / `targets_to_actions_np` / `check_residual_map` take `scale_neg=`; `scale_rad` stays the symmetric accessor and raises for a real pair. Isaac `biped_env.py`: `action_scale` (= s_pos) plus `action_scale_neg` (`None` when symmetric); `actions_to_targets` / `targets_to_actions` use `torch.where(a >= 0, s_pos, s_neg)` (vectorised, no host sync) and keep the original expression when symmetric; RSI's `targets_to_actions` call needed no change. `env_config._apply_action_home` passes pairs through. MuJoCo `BipedEnvV2._residual_scale_neg`. `check_actuator.py` also checks `a = -1`.
+- **Export / Jetson.** Symmetric run: `deploy_config.json` unchanged (`action_scale_rad`, format 4/5), byte-identical to before (real checkpoints `gaitref_2026-10-22_18-48-09` step 245760000 and `gaitref_2026-10-24_10-10-51` step 98304000: `deploy_config.json` and `policy.onnx` identical, old vs new `export_onnx`). Asymmetric run: `action_scale_pos_rad` + `action_scale_neg_rad` (no `action_scale_rad`), `format_version` 6 (also with a cadence-grid clock), notes text extended. Jetson `deploy_config.py` parses v6 (refuses > 6, refuses pos/neg keys below v6, both key styles at once, a missing side, non-positive values) and maps piecewise; v4/v5 bundles take the old expression (checked bit-identical on the two real v5 bundles, old vs new runtime). An old runtime refuses a v6 bundle ("newer than this runtime understands (5)"). README / CLAUDE.md note.
+- **Resolver on the table in this tree (digest 4a8cd15438, scale rad, +pos / -neg, vs the symmetric value):** hip_yaw +0.45 / -0.65 (sym 0.65), hip_roll +0.65 / -0.20 (0.65), hip_pitch +1.00 / -0.85 (1.00), knee +0.95 / -0.90 (0.95), ankle_roll +0.20 / -0.65 (0.65), ankle_pitch +0.55 / -0.30 (0.55). Max excursion from home (deg, +/-): yaw 19.3/30.3, roll 32.3/7.8, hip_pitch 50.0/43.0, knee 48.6/45.5, ankle_roll 8.1/32.7, ankle_pitch 25.2/11.5. This table's deep stand crouch (knee -43.6) leaves the knee nearly symmetric (+48.6 deg is the +5 deg limit). On the table re-baked afterwards (digest bc541a4c9c, home 0.7 / -2.7 / -8.2 / -21.7 / 2.8 / -13.5) the knee is the strongly asymmetric joint: +0.55 / -0.95 (sym 0.95), hip_roll +0.45 / -0.20, ankle_roll +0.20 / -0.45, yaw +0.40 / -0.45, ankle_pitch +0.40 / -0.45, hip_pitch 0.75 both.
+- **Caution when switching it on.** A side with little table excursion gets a small scale (0.20 rad for hip_roll neg here), which is also all the authority the policy has on that side for balance corrections beyond the table; the rule keeps only the noise + 4% headroom there. Changing the map invalidates existing checkpoints, as always.
+- **Tests.** New `tests/test_asymmetric_action_scale.py` (parsing, forward/inverse round trip on both sides incl. clamp, symmetric bit-identical for numpy / lifted Isaac methods / MuJoCo env, Isaac `_init_residual_map`, env_config plumbing, resolver per-side minimality and coverage on synthetic and the real table, freeze + saved run config + export contract, schema); Jetson `tests/test_asymmetric_scale_deploy.py` (v6 parse and mapping, v4/v5 unchanged, v7 refused); `test_residual_action_map.py` stand-in gets `action_scale_neg=None`, Jetson `test_residual_deploy.py` "newer" case moves from v6 to v7.

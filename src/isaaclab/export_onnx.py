@@ -357,15 +357,28 @@ def _load_policy_contract(ckpt_dir: str, explicit_cfg: str | None, explicit_map:
                                "action_scale_rad; none found beside the checkpoint")
         if _PROJECT_ROOT not in sys.path:
             sys.path.insert(0, _PROJECT_ROOT)
-        from utils.residual_action import check_residual_map, home_rad, scale_rad
+        from utils.residual_action import check_residual_map, home_rad, scale_pair_rad
         home_deg, scale = _scan_dict(paths[0], "action_home_deg"), _scan_dict(paths[0], "action_scale_rad")
+        from utils.residual_home import is_auto, resolve_if_auto
+        if is_auto(home_deg) or is_auto(scale):
+            # A run's saved config.yaml is frozen by train.py and never says auto; a hand-made one might.
+            import yaml
+            with open(paths[0], "r", encoding="utf-8") as fh:
+                doc = yaml.safe_load(fh) or {}
+            env_conf = ((doc.get("train") or {}).get("env_config")) or doc
+            auto = resolve_if_auto(env_conf, "export_onnx", _PROJECT_ROOT)
+            if auto is None:
+                raise RuntimeError(f"{paths[0]}: action_home_deg / action_scale_rad are 'auto' but could not be resolved")
+            home_deg = auto[0] if is_auto(home_deg) else home_deg
+            scale = auto[1] if is_auto(scale) else scale
         if not home_deg or not scale:
             raise RuntimeError(f"{paths[0]}: action_map residual but action_home_deg / action_scale_rad missing")
-        home, sc = home_rad(home_deg), scale_rad(scale)
+        home, (sc, sc_neg) = home_rad(home_deg), scale_pair_rad(scale)      # sc_neg None = symmetric
         robot_py = os.path.join(_PROJECT_ROOT, "envs/assets/robotV2/biped_robot.py")
         limits = np.radians(np.asarray(_literal_from_module(robot_py, "_JOINT_LIMITS_DEG"), dtype=np.float64))
-        check_residual_map(home, sc, limits[:, 0], limits[:, 1])
-        contract["residual"] = {"home_rad": [float(x) for x in home], "scale_rad": [float(x) for x in sc]}
+        check_residual_map(home, sc, limits[:, 0], limits[:, 1], scale_neg=sc_neg)
+        contract["residual"] = {"home_rad": [float(x) for x in home], "scale_rad": [float(x) for x in sc],
+                                "scale_neg_rad": None if sc_neg is None else [float(x) for x in sc_neg]}
     if "params_file" in found:
         pf = found["params_file"]
         full = pf if os.path.isabs(pf) else os.path.join(_PROJECT_ROOT, pf)
@@ -423,7 +436,11 @@ def _format_version(contract: dict, gait_clock: dict) -> int:
     that predates it would run the clock at one rate, so it must refuse v5. v5 may also carry
     the residual map. v4 = residual action map (home pose in default_joint_pos +
     action_scale_rad); a runtime that predates it would treat the action as centered/absolute,
-    so it must refuse v4. Otherwise unchanged: v3 for a fixed-period gait clock, else v2."""
+    so it must refuse v4. v6 = asymmetric residual scales (action_scale_pos_rad / action_scale_neg_rad instead of
+    action_scale_rad; a v5 runtime would read no scale at all), whatever the gait clock. A symmetric map never gets
+    v6, so those bundles stay byte-identical. Otherwise unchanged: v3 for a fixed-period gait clock, else v2."""
+    if contract["action_map"] == "residual" and (contract.get("residual") or {}).get("scale_neg_rad") is not None:
+        return 6
     if gait_clock["mode"] == "cadence_grid":
         return 5
     if contract["action_map"] == "residual":
@@ -466,6 +483,18 @@ def _load_gait_clock(ckpt_dir: str, explicit_cfg: str | None, ckpt_path: str, sp
             if not (0.2 < period < 5.0):
                 raise RuntimeError(f"gait_clock_period_s {period} s is outside the 0.2-5 s the Jetson accepts")
             return {"mode": "fixed_period", "period": period, "stand_threshold": thr}
+        if cfg and _scan_scalar(cfg, "gait_clock_mode") == "cadence_law":
+            # Config-defined cadence (utils/cadence_law.py): exported as the same cadence grid a v2 table gives (v5).
+            from utils.cadence_law import cadence_grid
+            ranges = (_scan_block(cfg, "commands").get("base_velocity") or {}).get("ranges") or {}
+            t_min = float(_scan_scalar(cfg, "gait_clock_period_min_s") or 0.6)
+            t_max = float(_scan_scalar(cfg, "gait_clock_period_max_s") or 0.9)
+            grid = cadence_grid(ranges, t_min, t_max)
+            return {"mode": "cadence_grid",
+                    "grid_vx": [float(v) for v in grid.axes[0]], "grid_vy": [float(v) for v in grid.axes[1]],
+                    "grid_wz": [float(v) for v in grid.axes[2]], "freq": grid.freq.round(6).tolist(),
+                    "period": t_max, "stand_threshold": float(_scan_scalar(cfg, "gait_clock_stand_threshold") or 0.05),
+                    "cadence_law": {"period_min_s": t_min, "period_max_s": t_max}}
         return {"mode": "speed_proportional", "freq": speed_freq}
     table = ref["npz_path"]
     full = table if os.path.isabs(table) else os.path.join(_PROJECT_ROOT, table)
@@ -510,6 +539,17 @@ def _load_command_ranges(ckpt_dir: str, explicit_cfg: str | None) -> dict:
         for k in missing:
             out[k] = _LEGACY_COMMAND_RANGES[k]
     return out
+
+
+def _load_command_limit(ckpt_dir: str, explicit_cfg: str | None, command_ranges: dict) -> dict:
+    """The command limit the policy was trained under: shape (commands.base_velocity.limit_shape of the run
+    config; absent = "box", the pre-limit behaviour) plus the ranges. Written to deploy_config.json as an
+    optional key (no format bump): a runtime that does not know it keeps clamping per axis, which is a box."""
+    from utils.command_limit import validate_shape
+    cfg = _run_config(ckpt_dir, explicit_cfg)
+    bv = (_scan_block(cfg, "commands").get("base_velocity") or {}) if cfg else {}
+    shape = validate_shape(bv.get("limit_shape"))
+    return {"shape": shape, **{k: list(command_ranges[k]) for k in ("lin_vel_x", "lin_vel_y", "ang_vel_z")}}
 
 
 def main() -> int:
@@ -570,7 +610,9 @@ def main() -> int:
     print(f"[export] action_map = {contract['action_map']}, actuator = {contract['actuator']}")
     gait_clock = _load_gait_clock(ckpt_dir, args.config_path, ckpt_path, env["gait_clock_freq"])
     command_ranges = _load_command_ranges(ckpt_dir, args.config_path)
-    print(f"[export] gait_clock = {gait_clock}, command_ranges = {command_ranges}")
+    command_limit = _load_command_limit(ckpt_dir, args.config_path, command_ranges)
+    print(f"[export] gait_clock = {gait_clock}, command_ranges = {command_ranges}, "
+          f"command_limit shape = {command_limit['shape']}")
     proprio_dim = in_dim // history_size
 
     # -- stage-1 normalizer ---------------------------------------------------
@@ -662,7 +704,7 @@ def main() -> int:
         # v3 = a fixed-period gait_clock (table-trained policy). A runtime that only knows
         # gait_clock_freq would clock the policy wrongly, so it must refuse v3 as well. Bundles
         # without a table stay v2.
-        # v4 = residual action map, v5 = cadence-grid gait clock (see _format_version).
+        # v4 = residual action map, v5 = cadence-grid gait clock, v6 = asymmetric residual scales (see _format_version).
         "format_version": _format_version(contract, gait_clock),
         "action_map": contract["action_map"],
         "actuator": contract["actuator"],
@@ -678,8 +720,10 @@ def main() -> int:
         # Every V2 default is 0.0 except the residual map's home pose (rad, policy order).
         "default_joint_pos": (contract["residual"]["home_rad"] if contract["action_map"] == "residual"
                               else [0.0] * act_dim),
-        **({"action_scale_rad": contract["residual"]["scale_rad"]}
-           if contract["action_map"] == "residual" else {}),
+        **({} if contract["action_map"] != "residual"
+           else {"action_scale_rad": contract["residual"]["scale_rad"]} if contract["residual"].get("scale_neg_rad") is None
+           else {"action_scale_pos_rad": contract["residual"]["scale_rad"],
+                 "action_scale_neg_rad": contract["residual"]["scale_neg_rad"]}),
         "obs_mean": obs_mean.tolist(),
         "obs_var": obs_var.tolist(),
         "obs_epsilon": 1e-4,
@@ -690,6 +734,9 @@ def main() -> int:
         "gait_clock": gait_clock,
         "gait_clock_freq": env["gait_clock_freq"],   # legacy runtimes; ignored unless gait_clock.mode is speed_proportional
         "command_ranges": command_ranges,
+        # Optional (no format bump; absent = "box" = clamp per axis only): the training limit shape, so the
+        # runtime scales (vx, vy) onto the ellipse exactly as training/MuJoCo do (utils/command_limit.py).
+        "command_limit": command_limit,
         "tilt_fault_rad": 0.784,  # matches biped_env._tilt_exceeded
         "notes": {
             "normalizer": "stage 1 (obs_mean/obs_var) applied by runtime; "
@@ -699,7 +746,11 @@ def main() -> int:
                       "a * (max - default) for a >= 0, default + a * (default - min) for a < 0. "
                       "'residual' (format 4): target = clip(default_joint_pos + action_scale_rad * a, "
                       "min, max), default_joint_pos being the crouched home pose; joint_pos_rel = "
-                      "joint_pos - default_joint_pos, and arming ramps to that pose",
+                      "joint_pos - default_joint_pos, and arming ramps to that pose"
+                      + ("" if contract["action_map"] != "residual" or contract["residual"].get("scale_neg_rad") is None else
+                         ". format 6: the scale is asymmetric, target = clip(default_joint_pos + "
+                         "action_scale_pos_rad * a, min, max) for a >= 0 and clip(default_joint_pos + "
+                         "action_scale_neg_rad * a, min, max) for a < 0 (no action_scale_rad key)"),
             "ema": "apply action_filter_applications_per_step times per control step",
         },
     }

@@ -43,11 +43,12 @@ def _check_keys(block: str, given: dict, allowed: set[str]) -> None:
 
 
 _COMMAND_KEYS = {"resampling_time_range", "heading_control_stiffness", "rel_standing_envs",
-                 "rel_heading_envs", "rel_turn_in_place_envs", "heading_max_ang_vel", "ranges"}
+                 "rel_heading_envs", "rel_turn_in_place_envs", "heading_max_ang_vel", "limit_shape", "ranges"}
 _RANGE_KEYS = {"lin_vel_x", "lin_vel_y", "ang_vel_z", "heading"}
 _ACTUATOR_KEYS = {"params_file", "kp_fw", "kp_fw_range", "vin_range", "friction_scale_range", "torque_scale",
-                  "tau_ext_source", "stall_torque_cap_nm"}
-_BACKLASH_KEYS = {"enabled", "lash_deg_range", "impulse_cap", "mujoco_lash_deg"}
+                  "tau_ext_source", "stall_torque_cap_nm", "deadband_counts_range"}
+_ACTUATOR_EXTRA_KEYS = {"deadband_counts"}       # MuJoCo / nominal value, mapped to deadband_rad below
+_BACKLASH_KEYS = {"enabled", "lash_deg_range", "impulse_cap", "mujoco_lash_deg", "encoder_side"}
 _REFERENCE_KEYS = {"npz_path", "stand_threshold", "rsi_prob", "rsi_joint_noise", "std"}
 
 # Plain scalar/list fields copied verbatim when present.
@@ -56,8 +57,8 @@ _SCALAR_FIELDS = (
     "curriculum_cmd_ramp_steps", "curriculum_init_ramp_steps", "curriculum_dr_events",
     "action_delay_steps_range", "servo_obs_delay_steps", "imu_obs_delay_steps_range",
     "imu_accel_bias", "imu_gyro_bias", "mount_offset_rad", "imu_misalignment_deg",
-    "quantize_joint_obs", "action_map",
-    "gait_clock_mode", "gait_clock_period_s", "gait_clock_stand_threshold",
+    "quantize_joint_obs", "action_map", "observation_vibration_hz",
+    "gait_clock_mode", "gait_clock_period_s", "gait_clock_stand_threshold", "gait_clock_period_min_s", "gait_clock_period_max_s",
     "standing_envs_start", "standing_envs_end", "standing_envs_ramp_steps",
     "action_rate_weight_start", "action_rate_weight_end", "action_rate_ramp_steps",
     "swing_min_clearance", "swing_max_clearance", "swing_max_time_s", "contact_height_thresh_m",
@@ -68,7 +69,7 @@ _SCALAR_FIELDS = (
     "foot_separation_mode", "foot_sep_target_m", "foot_sep_tol_m", "foot_sep_scale_m",
     "foot_sole_offset_m", "undesired_contacts_sat_n", "undesired_contacts_thresh_n",
     "leg_contact_thresh_n", "leg_contact_sat_n",
-    "foot_sole_half_extents_m", "foot_proximity_margin_m", "foot_overlap_termination_s",
+    "foot_sole_half_extents_m", "foot_proximity_margin_m", "foot_overlap_termination_s", "foot_drag_height_m",
     "reward_scale",
 )
 
@@ -154,11 +155,20 @@ def _apply_action_home(env_cfg, env_conf) -> None:
     pose, joint_pos_rel and every deviation reward follow it) and the base spawns at
     spawn_height_m. Nothing happens for centered/absolute unless spawn_height_m is given."""
     from utils.residual_action import (JOINT_TYPES, RESIDUAL_SPAWN_HEIGHT_M, check_residual_map,
-                                       expand_by_type, home_rad, scale_rad)
+                                       expand_by_type, home_rad, plain_scale_cfg, scale_pair_rad)
+    from utils.residual_home import is_auto, resolve_if_auto
     action_map = getattr(env_conf, "action_map", None) or "absolute"
-    home_deg = _as_dict(getattr(env_conf, "action_home_deg", None))
-    scale = _as_dict(getattr(env_conf, "action_scale_rad", None))
+    home_deg = getattr(env_conf, "action_home_deg", None)
+    scale = getattr(env_conf, "action_scale_rad", None)
     height = getattr(env_conf, "spawn_height_m", None)
+    # `auto` is normally frozen into plain numbers by train.py (utils.residual_home.freeze_residual_map) before we get here;
+    # a config that still says auto is resolved now from the CURRENT gait table, with a loud warning.
+    auto = resolve_if_auto(env_conf, "env_config._apply_action_home")
+    if auto is not None:
+        home_deg = auto[0] if is_auto(home_deg) else home_deg
+        scale = auto[1] if is_auto(scale) else scale
+        height = auto[2] if is_auto(height) else height
+    home_deg, scale = _as_dict(home_deg), _as_dict(scale)
     if action_map != "residual":
         if home_deg or scale:
             raise ValueError("env_config.action_home_deg / action_scale_rad only apply to "
@@ -167,13 +177,15 @@ def _apply_action_home(env_cfg, env_conf) -> None:
         if not home_deg or not scale:
             raise ValueError("action_map: residual needs env_config.action_home_deg and "
                              "action_scale_rad (dicts keyed by joint type)")
-        home, sc = home_rad(home_deg), scale_rad(scale)
+        home = home_rad(home_deg)
+        sc, sc_neg = scale_pair_rad(scale)               # sc_neg None = symmetric (every type pos == neg)
         lim = env_cfg.joint_limits
         check_residual_map(home, sc, [x[0] for x in lim], [x[1] for x in lim],
                            getattr(env_cfg, "mirror_joint_perm", None),
-                           getattr(env_cfg, "mirror_joint_signs", None))
+                           getattr(env_cfg, "mirror_joint_signs", None), scale_neg=sc_neg)
         env_cfg.action_home_deg = {k: float(v) for k, v in home_deg.items()}
-        env_cfg.action_scale_rad = {k: float(v) for k, v in scale.items()}
+        # per type: a number, or {pos, neg} when the two sides differ (utils/residual_action.py)
+        env_cfg.action_scale_rad = plain_scale_cfg(scale)
         # Same regex keys as the asset's init_state ("l_knee.*", ...), one per leg and type.
         joint_pos = {}
         for t, deg in zip(JOINT_TYPES, expand_by_type(home_deg, "action_home_deg")[::2]):
@@ -231,6 +243,9 @@ def _apply_commands(env_cfg, env_conf) -> None:
     bv = cmds.get("base_velocity") or {}
     _check_keys("commands.base_velocity", bv, _COMMAND_KEYS)
     target = env_cfg.commands["base_velocity"]
+    if "limit_shape" in bv:
+        from utils.command_limit import validate_shape
+        validate_shape(bv["limit_shape"])   # raises on a typo instead of silently training a box
     for key in _COMMAND_KEYS - {"ranges"}:
         if key in bv:
             val = bv[key]
@@ -245,7 +260,7 @@ def _apply_actuator(env_cfg, env_conf) -> None:
     """actuator/backlash blocks -> the robot's BamActuatorCfg and its startup DR event."""
     act = _as_dict(getattr(env_conf, "actuator", None))
     lash = _as_dict(getattr(env_conf, "backlash", None))
-    _check_keys("actuator", act, _ACTUATOR_KEYS)
+    _check_keys("actuator", act, _ACTUATOR_KEYS | _ACTUATOR_EXTRA_KEYS)
     _check_keys("backlash", lash, _BACKLASH_KEYS)
     actuators = getattr(env_cfg.scene.robot, "actuators", {}) or {}
     bam_cfgs = [c for c in actuators.values() if hasattr(c, "params_file")]
@@ -267,6 +282,12 @@ def _apply_actuator(env_cfg, env_conf) -> None:
             cfg.backlash_nominal_rad = math.radians(0.5 * (lo_deg + hi_deg)) if cfg.backlash_enabled else 0.0
             if "impulse_cap" in lash:
                 cfg.backlash_impulse_cap = float(lash["impulse_cap"])
+            side = str(lash.get("encoder_side", "output"))
+            if side not in ("output", "servo"):
+                raise ValueError(f"backlash.encoder_side {side!r}: expected output | servo")
+            cfg.backlash_encoder_side = side
+        if "deadband_counts" in act:
+            cfg.deadband_rad = float(act["deadband_counts"]) * (2.0 * math.pi / 4096.0)
 
     ev = env_cfg.events.get("randomize_bam_actuator")
     if ev is not None:
@@ -278,6 +299,8 @@ def _apply_actuator(env_cfg, env_conf) -> None:
             ev.params["lash_range_rad"] = (math.radians(lo_deg), math.radians(hi_deg))
         else:
             ev.params["lash_range_rad"] = None
+        rng = getattr(first, "deadband_counts_range", None)
+        ev.params["deadband_counts_range"] = tuple(int(v) for v in rng) if rng else None
 
 
 def _apply_noise(env_cfg, env_conf) -> None:
@@ -288,6 +311,11 @@ def _apply_noise(env_cfg, env_conf) -> None:
             raise ValueError(f"unknown observation_noise_std channels: {sorted(unknown)}; "
                              f"expected a subset of {sorted(env_cfg.observation_noise_std)}")
         env_cfg.observation_noise_std = {**env_cfg.observation_noise_std, **obs_noise}
+
+    vib = {k: float(v) for k, v in _as_dict(getattr(env_conf, "observation_vibration_std", None)).items()}
+    if vib:
+        _check_keys("observation_vibration_std", vib, {"imu_acc", "gyro", "joint_vel"})
+        env_cfg.observation_vibration_std = vib
 
     act_noise = _as_dict(getattr(env_conf, "action_noise_model", None))
     if act_noise and env_cfg.action_noise_model and env_cfg.action_noise_model.noise_cfg:

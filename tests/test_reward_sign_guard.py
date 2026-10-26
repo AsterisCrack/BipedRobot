@@ -112,9 +112,10 @@ def test_repo_config_passes(path):
 
 def test_fixed_gait_reference_config_has_non_positive_foot_flat():
     weights, _ = _weights_and_schedule(_load_env_config(os.path.join(ROOT, "config", "config_gait_reference.yaml")))
-    # 0 (switched off on purpose: the table stance tilt is < 3.3 deg) or negative; never the +1.0 sign error that
-    # rewarded edge standing in run gaitref_2026-10-19_20-20-42
+    # never the +1.0 sign error that rewarded edge standing in run gaitref_2026-10-19_20-20-42
     assert weights["foot_flat_l2"] <= 0.0
+    # E22: the guard is on (runs with 0 stood on their outer foot edges at command 0); strictly negative
+    assert weights["foot_flat_l2"] < 0.0
 
 
 def test_old_run_value_is_rejected_on_real_config():

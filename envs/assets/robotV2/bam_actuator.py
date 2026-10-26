@@ -78,8 +78,10 @@ class BamActuator(ActuatorBase):
             backlash=cfg.backlash_enabled,
             impulse_cap=min(cfg.backlash_impulse_cap, self.params.stall_torque),
             device=self._device,
+            encoder_side=cfg.backlash_encoder_side,
         )
         self.servo.kernel.torque_scale[:] = cfg.torque_scale
+        self.servo.kernel.deadband[:] = cfg.deadband_rad
         if cfg.backlash_enabled:
             self.servo.lost_motion.lash[:] = cfg.backlash_nominal_rad
 
@@ -118,10 +120,11 @@ class BamActuator(ActuatorBase):
         """1 / (M^-1)_ii per actuated joint, armature included (see module docstring)."""
         M = self._mass_matrix()
         if not self._armature_in_mass_matrix:
-            arm = torch.zeros(M.shape[:2], device=M.device, dtype=M.dtype)
-            arm[:, self._dof_offset:] = self._articulation.data.joint_armature.to(M.dtype)
+            arm = torch.nn.functional.pad(self._articulation.data.joint_armature.to(M.dtype), (self._dof_offset, 0))
             M = M + torch.diag_embed(arm)
-        inv_diag = torch.diagonal(torch.linalg.inv(M), dim1=-2, dim2=-1)[:, self._dof_offset:]
+        # inv_ex, not inv: same result, but inv checks its error codes with a host-device sync
+        # (every physics substep). M is a mass matrix (SPD), so it is always invertible here.
+        inv_diag = torch.diagonal(torch.linalg.inv_ex(M).inverse, dim1=-2, dim2=-1)[:, self._dof_offset:]
         return 1.0 / inv_diag[:, self._joint_ids()]
 
     def _sim_armature(self) -> torch.Tensor:
@@ -189,6 +192,17 @@ class BamActuator(ActuatorBase):
     def duty_saturated(self) -> torch.Tensor:
         return self.servo.duty_saturated
 
+    @property
+    def servo_side_encoder(self) -> bool:
+        return self.servo.lost_motion is not None and self.servo.lost_motion.encoder_side == "servo"
+
+    def encoder_reading(self, joint_pos: torch.Tensor, joint_vel: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """What the servos' encoders read for these output-link states (this actuator's joints, (N, J)):
+        the output itself, or with ``backlash_encoder_side: servo`` the servo shaft (rotor side of the gap)."""
+        if not self.servo_side_encoder:
+            return joint_pos, joint_vel
+        return self.servo.lost_motion.encoder_state(joint_pos, joint_vel)
+
 
 @configclass
 class BamActuatorCfg(ActuatorBaseCfg):
@@ -237,3 +251,10 @@ class BamActuatorCfg(ActuatorBaseCfg):
     """Total lash until randomize_bam_actuator draws per-joint values."""
     backlash_impulse_cap: float = 6.0
     """Cap on the re-engagement impulse torque [N*m], roughly the 12 V stall torque."""
+    backlash_encoder_side: str = "output"
+    """'output': the encoder reads the output link through the lash (firmware and policy see the play).
+    'servo': it reads the servo shaft (rotor side of the gap): the play is invisible to both."""
+    deadband_rad: float = 0.0
+    """Firmware dead zone [rad] until randomize_bam_actuator draws per-joint values (0 = off)."""
+    deadband_counts_range: tuple[int, int] | None = None
+    """Per-servo draw of the firmware dead zone in encoder counts (2*pi/4096 rad), at startup. None = deadband_rad."""
