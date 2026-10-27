@@ -5,7 +5,7 @@ Everything in this repo was written from scratch: the RL algorithms, the network
 environments, the reward functions, the servo model and the gait generator.
 
 <p align="center">
-  <img src="media/robot.jpg" alt="The physical robot" width="23%"/>
+  <img src="media/robot.jpeg" alt="The physical robot" width="23%"/>
   &nbsp;
   <img src="media/RobotTraining.gif" alt="Thousands of robots training in parallel in Isaac Lab" width="72%"/>
 </p>

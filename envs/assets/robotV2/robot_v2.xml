@@ -1,19 +1,19 @@
 <mujoco model="Robot">
   <compiler angle="radian" />
   <asset>
-    <mesh name="base_link" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001" />
-    <mesh name="l_hip_lower_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_hip_lower_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="r_hip_lower_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_hip_lower_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="r_thigh_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_thigh_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="l_thigh_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_thigh_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="r_calf_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_calf_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="l_calf_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_calf_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="r_ankle_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_ankle_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="l_ankle_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_ankle_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="r_foot_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_foot_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="l_foot_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_foot_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="r_hip_upper_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/r_hip_upper_link_1.stl" scale="0.001 0.001 0.001" />
-    <mesh name="l_hip_upper_link_1" content_type="model/stl" file="C:/Users/pablo/Desktop/Projects/isaac_env/BipedRobot/envs/assets/robotV2/Robot_description/meshes/l_hip_upper_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="base_link" content_type="model/stl" file="Robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_hip_lower_link_1" content_type="model/stl" file="Robot_description/meshes/l_hip_lower_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_hip_lower_link_1" content_type="model/stl" file="Robot_description/meshes/r_hip_lower_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_thigh_link_1" content_type="model/stl" file="Robot_description/meshes/r_thigh_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_thigh_link_1" content_type="model/stl" file="Robot_description/meshes/l_thigh_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_calf_link_1" content_type="model/stl" file="Robot_description/meshes/r_calf_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_calf_link_1" content_type="model/stl" file="Robot_description/meshes/l_calf_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_ankle_link_1" content_type="model/stl" file="Robot_description/meshes/r_ankle_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_ankle_link_1" content_type="model/stl" file="Robot_description/meshes/l_ankle_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_foot_link_1" content_type="model/stl" file="Robot_description/meshes/r_foot_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_foot_link_1" content_type="model/stl" file="Robot_description/meshes/l_foot_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="r_hip_upper_link_1" content_type="model/stl" file="Robot_description/meshes/r_hip_upper_link_1.stl" scale="0.001 0.001 0.001" />
+    <mesh name="l_hip_upper_link_1" content_type="model/stl" file="Robot_description/meshes/l_hip_upper_link_1.stl" scale="0.001 0.001 0.001" />
   </asset>
   <worldbody>
     <geom name="floor" type="plane" size="0 0 0.05" condim="3" friction="1 0 0" rgba="0.8 0.8 0.8 1" />

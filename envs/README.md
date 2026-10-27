@@ -277,12 +277,11 @@ all); nothing ramps unless `curriculum_enabled` is true. `action_delay` and `ser
 upper end of their ranges in code through `BipedEnv._dr_ramp`. `standing_envs_*` and
 `action_rate_weight_*` are separate linear schedules that do not need `curriculum_enabled`.
 
-**Known limitation.** `_apply_curriculum` writes the ramped values into `cfg.events`, but Isaac Lab's
-event manager works on its own deep copy made at construction. The ramps of event-managed terms
-(`push_robot`, `randomize_mass`, `randomize_friction`, `randomize_com`, `randomize_payload`) never
-reach the simulation: those events run at their configured range from the start, and listing them in
-`curriculum_dr_events` has no effect. The code-side ramps (`action_delay`, `servo_stiffness`), the
-command ramp and the joint-init ramp do work.
+For a ramped event (`push_robot`, `randomize_mass`, `randomize_friction`, `randomize_com`,
+`randomize_payload`), the range comes from the `curriculum_dr_*` constants in `biped_env_cfg.py`, not
+from the event term or an `events:` override. Isaac Lab's event manager keeps its own copy of the event
+configs, so `_apply_curriculum` pushes each rewrite into it through `_sync_event_term`. For
+`randomize_friction`, which samples its friction buckets once, that also re-draws the buckets.
 
 ---
 
@@ -351,9 +350,8 @@ the generated `robot_v2.backlash.xml`, `Robot_description/` (URDF and meshes), `
 (`ArticulationCfg`, `_JOINT_LIMITS_DEG`) and `bam_actuator.py` (`BamActuator`, the servo model as an
 Isaac Lab actuator).
 
-The mesh paths inside `robot_v2.xml` are absolute (`C:/Users/...`) and the generated backlash file copies
-them. After cloning elsewhere, rewrite them to your checkout's `assets/robotV2/Robot_description/meshes/`,
-or MuJoCo cannot load the model.
+Mesh paths in `robot_v2.xml` are relative to the file (`Robot_description/meshes/...`), and the generated
+`robot_v2.backlash.xml` is written next to it, so both load from any checkout.
 
 ---
 
