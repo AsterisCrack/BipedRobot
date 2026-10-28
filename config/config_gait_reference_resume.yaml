@@ -96,6 +96,8 @@ train:
       lin_vel_z_l2: -2
       ang_vel_xy_l2: -0.05             # was -0.15 — damp pitch/roll oscillation (flowy body)
       angular_momentum: -0.02
+      flight: -1.0                    # both feet off the ground. 2026-10-27: push recovery hopped (4-8 steps airborne,
+                                      # whole body yawing 5-6 rad/s), landed in sim, fell on hardware. The table has no flight phase.
       # upright 0.5 -> 0.2: it was ~95% saturated (raw episode logs) -- a near-constant alive bonus rather than a shaping
       # term; imitation_orientation and flat_orientation_l2 also cover tilt.
       upright: 0.2
@@ -284,11 +286,17 @@ train:
     # play): +0.4-0.9 rad/s gyro, +0.5-1.3 m/s^2 accel, +0.3-0.8 rad/s knee/hip joint vel. In MuJoCo that much makes
     # this policy chatter (da 0.13, 18% rate-limited) and fall 1 in 4 -- the hardware failure. Band-limited resonator
     # noise, per-env amplitude U(0,1) x these upper bounds, centre frequency per dim in observation_vibration_hz.
+    # 2026-10-27 re-measure (real vs MuJoCo, same checkpoint, calm walking, per band): joints match the sim, the IMU does
+    # not -- gyro 2.4-3.1x the sim at 3-10 Hz AND 2-2.6x at 10-25 Hz (gyro x has 42% of its power above 10 Hz), accel z
+    # 10-25 Hz 2.7 vs 1.4 m/s^2 (harder foot impacts). Not gear play: a partial-encoder-visibility model fits the tap test
+    # (v~0.6) but adds no walking IMU content. Band widened to 3-20 Hz, levels = the measured excess, and the amplitude
+    # floor raised so most envs see a realistic level (with U(0,1) half of them saw under half of it).
     observation_vibration_std:
-      imu_acc: 1.5              # m/s^2
-      gyro: 1.0                 # rad/s
+      imu_acc: 2.0              # m/s^2
+      gyro: 1.2                 # rad/s
       joint_vel: 0.8            # rad/s
-    observation_vibration_hz: [3.0, 10.0]
+    observation_vibration_hz: [3.0, 20.0]
+    observation_vibration_amp_range: [0.3, 1.0]
     # Round joint_pos and joint_vel onto the STS3215's 4096-counts/rev grid, so the policy
     # sees the same resolution floor in sim as the servo gives on hardware.
     quantize_joint_obs: true
@@ -302,7 +310,8 @@ train:
     # servo's own 5.6 ms command delay is already inside the BAM model (m6 command_delay). So 0 steps is the real robot;
     # 1 step (20 ms) is margin for jitter and the unknown servo return-delay register. The old "+20 ms was what the
     # Jetson had" (2026-10-12) was the write-before-hook order (23 ms late), since fixed.
-    action_delay_steps_range: [0, 1]
+    action_delay_steps_range: [0, 2]   # 2026-10-27 fit on hardware traces: 1 step (with P ~24) explains the real lag;
+                                        # [0, 2] puts it mid-range (was [0, 1], real at its edge).
 
     # Sensor lag (observation side), in 50 Hz control steps.
     # Encoders are read at the start of the same tick the policy runs in (~0.5-2 ms old), so no delay.
@@ -342,9 +351,13 @@ train:
       kp_fw: 32                     # firmware P register; must match the Jetson's config/robot.yaml
       # Sim-only DR of the firmware P (per robot), ramped from 32 by the DR curriculum ("servo_stiffness"). The stall cap
       # halves the model's small-signal stiffness (17 vs 37 N*m/rad uncapped), and the bench validated the uncapped fit,
-      # so the real servo is likely stiffer than the capped model. [32, 50] (was [32, 70]): the most gait-sensitive servo knob in the 2026-10-24 MuJoCo sweep. Verify with an actuator replay. The robot still runs P = kp_fw.
-      kp_fw_range: [32, 40]
-      vin_range: [11.1, 12.6]       # ASSUMED 3S pack -- set to the real battery's range.
+      # so the real servo was ASSUMED stiffer than the capped model. The 2026-10-27 trace fit says the opposite (see kp_fw_range).
+      # The most gait-sensitive servo knob in the 2026-10-24 MuJoCo sweep. The robot still runs P = kp_fw.
+      kp_fw_range: [20, 34]         # 2026-10-27 fit on hardware traces (lag profile at vx 0.1): the real servo tracks like the
+                                    # model at P ~24 with 1 step of delay, i.e. SOFTER than the model (was [32, 40]). Widens out
+                                    # from kp_fw = 32 under the curriculum. The robot still runs P = kp_fw.
+      vin_range: [10.2, 12.6]       # 2026-10-27 traces: the supply sags to 10.0-10.5 V during recoveries (28% of the last 1 s
+                                    # before falls was below the old 11.1 floor). Walking stays >= 11.1 V.
                                     # The SysID bench measured 11.49 V at the servo.
       # 2026-10-10: widened from [0.9, 1.1]. The identified m6 model has a measured
       # 4.4 mrad mean / 14.4 mrad p95 residual against our own hardware on smooth

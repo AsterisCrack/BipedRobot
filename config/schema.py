@@ -119,6 +119,7 @@ class EnvConfig(BaseModel):
     # std upper bounds per channel (imu_acc / gyro / joint_vel); see biped_env_cfg. Empty = off.
     observation_vibration_std: Optional[Dict[str, float]] = None
     observation_vibration_hz: List[float] = Field(default_factory=lambda: [3.0, 10.0])
+    observation_vibration_amp_range: List[float] = Field(default_factory=lambda: [0.0, 1.0])   # per-env amplitude x std
     action_noise_model: Optional[Dict[str, float]] = None
     quantize_joint_obs: bool = True
 

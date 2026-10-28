@@ -533,7 +533,7 @@ constants in `biped_env_cfg.py` (`curriculum_dr_*`), so editing it under `events
 | `curriculum_dr_start_steps`, `curriculum_dr_full_steps` | `3_000_000`, `20_000_000` | Linear ramp of the listed randomization from 0 to 100% (control steps) |
 | `curriculum_cmd_ramp_steps` | `5_000_000` | Ramp from a small forward-only command range to the configured `ranges`; 0 = full range at once |
 | `curriculum_init_ramp_steps` | `5_000_000` | Ramp of the initial joint noise; 0 = full at once |
-| `curriculum_dr_events` | `[]` | Which randomization is ramped: event names, plus `action_delay` (action delay grows from 0 to `action_delay_steps_range`) and `servo_stiffness` (firmware gain grows from `kp_fw` to `kp_fw_range`). **Empty means everything the curriculum knows is ramped**: `push_robot`, `randomize_mass`, `randomize_friction`, `randomize_com`, `randomize_payload`, `action_delay` and `servo_stiffness`. The startup events (`randomize_joint_params`, `randomize_bam_actuator`) are never ramped |
+| `curriculum_dr_events` | `[]` | Which randomization is ramped: event names, plus `action_delay` (action delay grows from 0 to `action_delay_steps_range`) and `servo_stiffness` (the sim gain widens out from `kp_fw` to `kp_fw_range` on both sides). **Empty means everything the curriculum knows is ramped**: `push_robot`, `randomize_mass`, `randomize_friction`, `randomize_com`, `randomize_payload`, `action_delay` and `servo_stiffness`. The startup events (`randomize_joint_params`, `randomize_bam_actuator`) are never ramped |
 
 Those `curriculum_dr_*` sizes (centre of mass, payload, and the ranges used if you list mass, friction
 or `push_robot`) are constants in `biped_env_cfg.py`, not YAML keys. To control friction, mass or pushes
@@ -560,8 +560,8 @@ a BAM actuator (`BipedRobotV2`). Method, parameters and validation are in
     actuator:
       params_file: actuator/params/sts3215_12v/m6.json
       kp_fw: 32
-      kp_fw_range: [32, 40]
-      vin_range: [11.1, 12.6]
+      kp_fw_range: [20, 34]
+      vin_range: [10.2, 12.6]
       friction_scale_range: [0.8, 1.2]
       torque_scale: 1.0
       stall_torque_cap_nm: 2.94

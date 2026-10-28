@@ -206,7 +206,7 @@ The command limit is exported with the policy, so the robot clamps commands the 
       imu_acc: 1.5
       gyro: 1.0
       joint_vel: 0.8
-    action_delay_steps_range: [0, 1]  # control steps, drawn per episode
+    action_delay_steps_range: [0, 2]  # control steps, drawn per episode
     imu_obs_delay_steps_range: [0, 1]
     imu_accel_bias: 0.2               # constant per episode
     mount_offset_rad: 0.0175          # servo zero error, constant per robot
@@ -228,7 +228,7 @@ Terrain is set with `train.use_rough_terrain`.
     actuator:
       params_file: actuator/params/sts3215_12v/m6.json   # identified BAM parameters
       kp_fw: 32                       # firmware P gain; must match the robot
-      kp_fw_range: [32, 40]           # randomized per robot
+      kp_fw_range: [20, 34]           # randomized per robot
       vin_range: [11.1, 12.6]         # supply voltage
       stall_torque_cap_nm: 2.94
     backlash:

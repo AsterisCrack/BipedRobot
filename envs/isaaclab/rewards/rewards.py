@@ -887,6 +887,16 @@ def angular_momentum_l2(body_ang_vel_w: torch.Tensor, body_mass: torch.Tensor) -
     ang_vel_sq = torch.sum(torch.square(body_ang_vel_w), dim=-1)  # (N, num_bodies)
     return torch.sum(ang_vel_sq * body_mass, dim=-1)
 
+def flight(feet_contact: torch.Tensor) -> torch.Tensor:
+    """1 while neither foot touches the ground (product of the per-foot no-contact scores), else 0.
+
+    feet_contact: (N, F) bool or float in [0, 1] (the reward-side contact flag / soft score).
+    The gait table has no flight phase, so walking pays nothing. Targets the hop-and-twist push
+    recovery (both feet off for 4-8 steps, whole body yawing 5-6 rad/s) that lands in sim and
+    fell on hardware 2026-10-27.
+    """
+    return torch.prod(1.0 - feet_contact.float(), dim=1)
+
 @torch.jit.script
 def upright(projected_gravity_b: torch.Tensor, std: float = 0.3) -> torch.Tensor:
     """Reward uprightness: 1.0 when perfectly vertical, decays with tilt.
@@ -1012,7 +1022,8 @@ REWARD_WEIGHT_SIGN: dict[str, int] = {
     "dof_pos_l2": -1,
     "ankle_torques_l2": -1,
     "angular_momentum": -1,
-    "base_height_l2": -1,               # squared height error
+    "flight": -1,                       # 0/1 (or soft): both feet off the ground
+    "base_height_l2": -1,              # squared height error
     "feet_slide": -1,                   # contact * foot speed
     "foot_slip": -1,                    # sum over loaded feet of the planar sole slip speed [m/s]
     "foot_drag": -1,                    # sum over unloaded low feet of the planar sole speed, clearance-weighted

@@ -106,8 +106,8 @@ train:
     actuator:
       params_file: actuator/params/sts3215_12v/m6.json
       kp_fw: 32                    # firmware P register; must equal the robot's
-      kp_fw_range: [32, 40]        # sim only: per-robot draw, per episode
-      vin_range: [11.1, 12.6]      # supply voltage, drawn per robot at startup
+      kp_fw_range: [20, 34]        # sim only: per-robot draw, per episode
+      vin_range: [10.2, 12.6]      # supply voltage, drawn per robot at startup
       friction_scale_range: [0.8, 1.2]
       torque_scale: 1.0            # TORQUE_LIMIT / 1000 on the servos
       stall_torque_cap_nm: 2.94    # cap the stall torque (null = trust the params)

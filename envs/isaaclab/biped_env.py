@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import re
@@ -335,7 +336,7 @@ class BipedEnv(DirectRLEnv):
 
         # Band-limited sensor vibration (cfg.observation_vibration_std): a resonator per env and dim,
         # y_t = a1*y_{t-1} - r^2*y_{t-2} + w_t, normalised to unit variance, at a centre frequency and
-        # an amplitude U(0, 1) redrawn at reset. Zero std on every dim = off (no state, no cost).
+        # an amplitude U(observation_vibration_amp_range) redrawn at reset. Zero std on every dim = off (no state, no cost).
         _vib = dict(getattr(self.cfg, "observation_vibration_std", {}) or {})
         self.vib_std = torch.cat([
             torch.full((n,), float(_vib.get(k, 0.0)), device=self.device) for k, n in [
@@ -348,6 +349,7 @@ class BipedEnv(DirectRLEnv):
         if self.vib_enabled:
             self.vib_hz = tuple(float(v) for v in getattr(self.cfg, "observation_vibration_hz", (3.0, 10.0)))
             self.vib_r = 0.9
+            self.vib_amp = tuple(float(v) for v in getattr(self.cfg, "observation_vibration_amp_range", (0.0, 1.0)))
             _d = self.obs_proprio_dim
             self.vib_y1 = torch.zeros(self.num_envs, _d, device=self.device)
             self.vib_y2 = torch.zeros(self.num_envs, _d, device=self.device)
@@ -1362,6 +1364,7 @@ class BipedEnv(DirectRLEnv):
             "stand_pose_l2": r_stand_pose * self.cfg.rewards.get("stand_pose_l2", 0.0),
             "upright": r_upright * self.cfg.rewards.get("upright", 0.0),
             "angular_momentum": r_angular_momentum * self.cfg.rewards.get("angular_momentum", 0.0),
+            "flight": rewards.flight(feet_contact_rw) * self.cfg.rewards.get("flight", 0.0),
         }
         
         if self.gait_ref is not None:
@@ -1699,7 +1702,8 @@ class BipedEnv(DirectRLEnv):
         a1 = 2.0 * r * torch.cos(2.0 * math.pi * hz * self.step_dt)
         a2 = -r * r
         var = (1.0 - a2) / ((1.0 + a2) * ((1.0 - a2) ** 2 - a1 * a1))   # stationary AR(2) variance, unit innovations
-        amp = torch.rand(n, 1, device=self.device)
+        lo, hi = self.vib_amp
+        amp = lo + (hi - lo) * torch.rand(n, 1, device=self.device)
         self.vib_a1[env_ids] = a1
         self.vib_gain[env_ids] = amp * self.vib_std / torch.sqrt(var)
         self.vib_y1[env_ids] = 0.0
@@ -1848,12 +1852,14 @@ class BipedEnv(DirectRLEnv):
                 int(lo), hi_now + 1, (len(env_ids),), device=self.device
             )
 
-        # Servo-stiffness DR: per-episode firmware P IN SIM. The stall cap is applied by raising
-        # R, which halves the model's small-signal stiffness (17 vs 37 N*m/rad), and the bench
-        # validated the uncapped fit, so the real servo is likely stiffer than the capped model.
-        # One value per robot (the model error is systematic). The robot still runs P = kp_fw.
+        # Servo-stiffness DR: per-episode firmware P IN SIM (the model's effective stiffness). One value per robot
+        # (the model error is systematic). The robot still runs P = kp_fw.
+        # 2026-10-27 hardware traces: the real servos track like the model at P ~24 with 1 step of action delay
+        # (fitted on the lag profile at vx 0.1), so the real servo is SOFTER than the model, not stiffer.
         # Ramped by the curriculum ("servo_stiffness"): drawn from scratch at full width, this and
         # the action delay together made walking too hard to discover (2026-10-12 run stood still).
+        # The range widens out from the nominal kp_fw on both sides ([kp_fw, kp_fw] -> kp_fw_range), so a
+        # range below kp_fw still starts at the nominal servo; with lo == kp_fw this is the old [lo, ramp] rule.
         if self.bam_actuators and getattr(self.cfg, "enable_physics_randomization", False):
             for act in self.bam_actuators:
                 rng = getattr(act.cfg, "kp_fw_range", None)
@@ -1861,9 +1867,11 @@ class BipedEnv(DirectRLEnv):
                     continue
                 k = act.servo.kernel
                 lo, hi = float(rng[0]), float(rng[1])
-                hi_now = lo + (hi - lo) * self._dr_ramp("servo_stiffness")
+                k0 = min(max(float(getattr(act.cfg, "kp_fw", lo)), lo), hi)
+                s = self._dr_ramp("servo_stiffness")
+                lo_now, hi_now = k0 + (lo - k0) * s, k0 + (hi - k0) * s
                 k.kp[env_ids] = torch.empty(len(env_ids), 1, device=k.kp.device, dtype=k.kp.dtype).uniform_(
-                    lo, hi_now).expand(len(env_ids), k.num_joints)
+                    lo_now, hi_now).expand(len(env_ids), k.num_joints)
 
         # Seed the servo lag buffer with the post-reset encoder reading in every slot, so a
         # freshly reset env doesn't observe pre-reset joint state for its first few steps.
@@ -1983,6 +1991,38 @@ class BipedEnv(DirectRLEnv):
             self.cfg.rewards["action_rate_l2"] = w
             self.extras.setdefault("log", {})["Curriculum/action_rate_weight"] = w
 
+    def _sync_event_term(self, name: str) -> None:
+        """Copy self.cfg.events[name].params into the EventManager's own term cfg (no-op if the term is not in it).
+
+        Class-based terms that sample at construction need more: randomize_rigid_body_material draws its friction
+        buckets once in __init__ and ignores the ranges passed per call, so its buckets are re-drawn here.
+        """
+        em = getattr(self, "event_manager", None)
+        if em is None:
+            return
+        try:
+            term = em.get_term_cfg(name)
+        except ValueError:          # popped from the manager (e.g. reset_* terms called explicitly) or absent
+            return
+        # Only the numeric ranges. The manager's SceneEntityCfg params were resolved against the scene (body_ids of
+        # base_link etc.); self.cfg's copies never were, so copying them over reset body_ids to slice(None) and
+        # randomize_com offset EVERY body's com by +-2.5 cm (run 2026-10-27_09-28-22, com_drift_mean 13x).
+        for k, v in self.cfg.events[name].params.items():
+            if hasattr(v, "resolve"):
+                continue
+            term.params[k] = copy.deepcopy(v)
+        inst = term.func
+        if hasattr(inst, "material_buckets"):
+            p = term.params
+            ranges = torch.tensor([p.get("static_friction_range", (1.0, 1.0)),
+                                   p.get("dynamic_friction_range", (1.0, 1.0)),
+                                   p.get("restitution_range", (0.0, 0.0))], device="cpu", dtype=torch.float32)
+            n = inst.material_buckets.shape[0]
+            b = ranges[:, 0] + (ranges[:, 1] - ranges[:, 0]) * torch.rand(n, 3, device="cpu")
+            if p.get("make_consistent", False):
+                b[:, 1] = torch.min(b[:, 0], b[:, 1])
+            inst.material_buckets = b.to(inst.material_buckets.dtype)
+
     def _apply_curriculum(self) -> None:
         self._apply_schedules()
         if not getattr(self.cfg, "curriculum_enabled", False):
@@ -2001,6 +2041,8 @@ class BipedEnv(DirectRLEnv):
         # Only rewrite event params when scale actually changed (saves dict allocations)
         if dr != self._curriculum_last_dr_scale:
             self._curriculum_last_dr_scale = dr
+            _touched = [n for n in ("push_robot", "randomize_mass", "randomize_actuator_gains", "randomize_friction",
+                                    "randomize_com", "randomize_payload") if n in self.cfg.events and _dr_applies(n)]
 
             if "push_robot" in self.cfg.events and _dr_applies("push_robot"):
                 px = self.cfg.curriculum_dr_max_push_x * dr
@@ -2045,6 +2087,11 @@ class BipedEnv(DirectRLEnv):
                     0.0, self.cfg.curriculum_dr_payload_max * dr
                 )
 
+            # The EventManager runs on its OWN deep copy of cfg.events (ManagerBase deep-copies its cfg), so the
+            # rewrites above only take effect once pushed into the manager's term configs.
+            for _name in _touched:
+                self._sync_event_term(_name)
+
         if cmd != self._curriculum_last_cmd_scale:
             self._curriculum_last_cmd_scale = cmd
             start_lo, start_hi = self.cfg.curriculum_cmd_start_lin_vel_x
@@ -2078,8 +2125,12 @@ class BipedEnv(DirectRLEnv):
         self.extras["log"]["Curriculum/action_delay_max_steps"] = (
             int(lo) + int(round((int(hi) - int(lo)) * self._dr_ramp("action_delay"))))
         if self.bam_actuators and getattr(self.bam_actuators[0].cfg, "kp_fw_range", None):
-            klo, khi = self.bam_actuators[0].cfg.kp_fw_range
-            self.extras["log"]["Curriculum/servo_kp_max"] = klo + (khi - klo) * self._dr_ramp("servo_stiffness")
+            _acfg = self.bam_actuators[0].cfg
+            klo, khi = float(_acfg.kp_fw_range[0]), float(_acfg.kp_fw_range[1])
+            k0 = min(max(float(getattr(_acfg, "kp_fw", klo)), klo), khi)
+            s = self._dr_ramp("servo_stiffness")
+            self.extras["log"]["Curriculum/servo_kp_max"] = k0 + (khi - k0) * s
+            self.extras["log"]["Curriculum/servo_kp_min"] = k0 + (klo - k0) * s
         self.extras["log"]["Curriculum/cmd_scale"]  = cmd
         self.extras["log"]["Curriculum/init_scale"] = init
 

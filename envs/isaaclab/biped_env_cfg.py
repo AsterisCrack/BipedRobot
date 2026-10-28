@@ -401,7 +401,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # them every reset. Editing the EventTerm params for com/payload does nothing; edit here.
     # (The reverse holds for mass/gains/friction/push: those are not in the list, so their
     # EventTerm params are live and these values are only documentation of the intended target.)
-    curriculum_dr_com_range: float = 0.01      # 2026-10-24 back to 0.01 (from 0.02): CAD COM; +-2 cm barely moved the gait in MuJoCo
+    curriculum_dr_com_range: float = 0.025  
     curriculum_dr_payload_max: float = 0.1    # 2026-10-24 from 0.1: the robot carries no payload; 3% of the 1.661 kg body
     # Command range limits
     curriculum_cmd_start_lin_vel_x: tuple = (0.0, 0.2)   # slow forward-only at start
@@ -449,6 +449,7 @@ class BipedEnvCfg(DirectRLEnvCfg):
     # std[channel] times a per-env amplitude U(0, 1). Redrawn at reset. Keys: imu_acc, gyro, joint_vel. {} = off.
     observation_vibration_std: dict = {}
     observation_vibration_hz: list = [3.0, 10.0]
+    observation_vibration_amp_range: list = [0.0, 1.0]   # per-env amplitude multiplier, drawn uniformly at reset
 
     # simulation
     sim: sim_utils.SimulationCfg = sim_utils.SimulationCfg(

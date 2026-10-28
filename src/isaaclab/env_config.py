@@ -57,7 +57,7 @@ _SCALAR_FIELDS = (
     "curriculum_cmd_ramp_steps", "curriculum_init_ramp_steps", "curriculum_dr_events",
     "action_delay_steps_range", "servo_obs_delay_steps", "imu_obs_delay_steps_range",
     "imu_accel_bias", "imu_gyro_bias", "mount_offset_rad", "imu_misalignment_deg",
-    "quantize_joint_obs", "action_map", "observation_vibration_hz",
+    "quantize_joint_obs", "action_map", "observation_vibration_hz", "observation_vibration_amp_range",
     "gait_clock_mode", "gait_clock_period_s", "gait_clock_stand_threshold", "gait_clock_period_min_s", "gait_clock_period_max_s",
     "standing_envs_start", "standing_envs_end", "standing_envs_ramp_steps",
     "action_rate_weight_start", "action_rate_weight_end", "action_rate_ramp_steps",

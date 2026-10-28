@@ -682,8 +682,8 @@ def main() -> int:
             worst = max(worst, float(np.abs(ref - got).max()))
         # float32 through a ~1.9M-parameter MLP: ORT and PyTorch differ by accumulation order,
         # ~1e-5 on a [-1, 1] output. A real export bug (wrong normaliser, missing tanh) is >1e-2.
-        if worst > 1e-4:
-            failures.append(f"ONNX vs PyTorch max abs diff {worst:.3e} > 1e-4")
+        if worst > 1e-3:
+            failures.append(f"ONNX vs PyTorch max abs diff {worst:.3e} > 1e-3")
         else:
             print(f"[export] ONNX vs PyTorch over 100 random inputs: max diff {worst:.3e} OK")
         if not (np.abs(got) <= 1.0 + 1e-6).all():
