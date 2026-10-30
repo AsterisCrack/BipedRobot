@@ -4,6 +4,10 @@
 Everything in this repo was written from scratch: the RL algorithms, the network backbones, the
 environments, the reward functions, the servo model and the gait generator.
 
+**Build one:** the CAD, print files, BOM, PCB and build guide are in
+[BipedRobotHardware](https://github.com/AsterisCrack/BipedRobotHardware). The on-robot runtime is
+[BipedRobotJetson](https://github.com/AsterisCrack/BipedRobotJetson).
+
 <p align="center">
   <img src="media/robot.jpeg" alt="The physical robot" width="23%"/>
   &nbsp;
@@ -295,7 +299,7 @@ BipedRobot/
 ├── envs/
 │   ├── isaaclab/            Isaac Lab env, env cfg, shared rewards, commands, randomization events
 │   ├── mujoco/              MuJoCo env (sim-to-sim checks, gate)
-│   └── assets/              Robot models (MJCF, USD, URDF)
+│   └── assets/              Simulation models (MJCF, USD) and Isaac Lab robot config
 ├── src/
 │   ├── isaaclab/            train, play, export_onnx, verify_onnx_bundle, diagnostics
 │   ├── mujoco/              policy_gate, sim2real viewer, sweeps
@@ -303,7 +307,8 @@ BipedRobot/
 ├── utils/                   Config loader, gait-table reader, command limit, action map, IK
 ├── tests/                   pytest suite
 ├── torch_rl_algorithms/     Submodule: RL algorithms and network backbones
-└── robot_motion_reference/  Submodule: Gait Studio + FBX → joint-trajectory retargeting
+├── robot_motion_reference/  Submodule: Gait Studio + FBX → joint-trajectory retargeting
+└── robot_hardware/          Submodule: BipedRobotHardware (URDF + meshes, CAD, BOM, PCB)
 ```
 
 | Further docs | |
@@ -321,6 +326,11 @@ python -m pytest tests -q --ignore=tests/test_env.py --ignore=tests/test_transfo
 ---
 
 ## Hardware and custom PCB
+
+Everything needed to build the robot (CAD in STEP and Fusion 360, print files, BOM with prices, the PCB's
+source and fabrication files, wiring and a build guide) is in
+**[BipedRobotHardware](https://github.com/AsterisCrack/BipedRobotHardware)**, under CERN-OHL-P-2.0. Its robot
+description (URDF + meshes) is the one this repo simulates: it is included as the `robot_hardware/` submodule.
 
 - 12 Feetech STS3215 smart servos with position, speed, load, voltage and temperature feedback
 - NVIDIA Jetson Orin Nano, 50 Hz control loop ([BipedRobotJetson](https://github.com/AsterisCrack/BipedRobotJetson))
@@ -361,4 +371,4 @@ by Disney Research's *Interactive Design of Stylized Walking Gaits for Robotic C
 
 ## License
 
-[MIT](LICENSE.txt)
+[MIT](LICENSE.txt). The hardware design in BipedRobotHardware is licensed separately under CERN-OHL-P-2.0.

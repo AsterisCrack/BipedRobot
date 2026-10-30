@@ -1,7 +1,7 @@
 """
 Isaac Sim Configuration for Biped Robot.
 
-This configuration mirrors the MuJoCo configuration found in `Robot_description/urdf/robot_mujoco.xml`.
+This configuration mirrors the MuJoCo configuration found in `robot_v2.xml`.
 It defines the robot asset, initial state, and actuator properties.
 """
 

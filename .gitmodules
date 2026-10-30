@@ -4,3 +4,7 @@
 [submodule "torch_rl_algorithms"]
 	path = torch_rl_algorithms
 	url = https://github.com/AsterisCrack/torch-rl-algorithms.git
+[submodule "robot_hardware"]
+	path = robot_hardware
+	url = https://github.com/AsterisCrack/BipedRobotHardware.git
+	shallow = true

@@ -345,13 +345,19 @@ critic layout), used by the CPU training scripts in `src/mujoco/`, not by the si
 
 ## Robot assets
 
-`assets/robotV2/`: `robot.usd` (Isaac Lab), `robot_v2.xml` (MuJoCo: radians, 12 motors, `imu_site`, floor),
-the generated `robot_v2.backlash.xml`, `Robot_description/` (URDF and meshes), `biped_robot.py`
+`assets/robotV2/`: `robot.usd` (Isaac Lab; references the URDF import in `usd/Robot/`), `robot_v2.xml`
+(MuJoCo: radians, 12 motors, `imu_site`, floor), the generated `robot_v2.backlash.xml`, `biped_robot.py`
 (`ArticulationCfg`, `_JOINT_LIMITS_DEG`) and `bam_actuator.py` (`BamActuator`, the servo model as an
 Isaac Lab actuator).
 
-Mesh paths in `robot_v2.xml` are relative to the file (`Robot_description/meshes/...`), and the generated
-`robot_v2.backlash.xml` is written next to it, so both load from any checkout.
+The URDF and meshes are not in this repo: they live in
+[BipedRobotHardware](https://github.com/AsterisCrack/BipedRobotHardware), included as the `robot_hardware/`
+submodule (`robot_hardware/robot_description/`). Mesh paths in `robot_v2.xml` are relative to the file
+(`../../../robot_hardware/robot_description/meshes/...`), and the generated `robot_v2.backlash.xml` is
+written next to it, so both load from any checkout that has the submodule.
+
+After changing the URDF in the hardware repo, copy the new inertials into `robot_v2.xml` and re-import the
+URDF in Isaac Sim to regenerate `usd/Robot/`.
 
 ---
 

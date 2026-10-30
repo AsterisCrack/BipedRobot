@@ -51,6 +51,7 @@ SCALE_MODES = ("symmetric", "asymmetric")
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 XML_REL = os.path.join("envs", "assets", "robotV2", "robot_v2.xml")
+MESHES_REL = os.path.join("robot_hardware", "robot_description", "meshes")   # BipedRobotHardware submodule
 ROBOT_PY_REL = os.path.join("envs", "assets", "robotV2", "biped_robot.py")
 
 # Policy joint order (== envs.mujoco.biped_env_v2.JOINT_NAMES, the table's joint names): L,R interleaved per type.
@@ -218,8 +219,8 @@ def _fk_model(root_dir: str):
         raise FileNotFoundError(f"robot MJCF not found: {xml}")
     with open(xml, encoding="utf-8") as fh:
         text = fh.read()
-    # The MJCF carries absolute mesh paths of the machine it was generated on: point them at this checkout.
-    meshes = os.path.join(os.path.dirname(xml), "Robot_description", "meshes").replace("\\", "/")
+    # from_xml_string has no base directory for the MJCF's relative mesh paths: make them absolute.
+    meshes = os.path.join(root_dir, MESHES_REL).replace("\\", "/")
     text = re.sub(r'(file=")[^"]*/meshes/', lambda m: m.group(1) + meshes + "/", text)
     return mujoco.MjModel.from_xml_string(text)
 
