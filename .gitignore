@@ -24,3 +24,5 @@ actuator/data/*/_raw_ok/
 actuator/data/*/mae.json
 
 config/ablations
+
+videos/reel

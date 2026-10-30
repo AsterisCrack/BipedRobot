@@ -20,7 +20,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from .biped_env_cfg import BipedEnvCfg
 from . import rewards
 from .physx_cache import PhysxPropertyCache
-from .mdp.commands import UniformVelocityCommand
+from .mdp.commands import UniformVelocityCommand, make_command_markers
 from utils.motion_reference import GaitTableReference, MotionReference, MotionReferenceConfig
 
 
@@ -104,6 +104,12 @@ class BipedEnv(DirectRLEnv):
             super().__init__(cfg, render_mode, **kwargs)
         finally:
             cfg.events.update(_explicit_reset_terms)
+        # With pushes and physics DR off (play) the reset terms were the only events, so DirectRLEnv saw an empty
+        # dict and built no EventManager. cfg.events is non-empty again now, and DirectRLEnv's reset / step paths
+        # then dereference self.event_manager (AttributeError). An empty manager keeps them valid.
+        if not hasattr(self, "event_manager"):
+            from isaaclab.managers import EventManager
+            self.event_manager = EventManager({}, self)
 
         # Masses / inertias / COMs / materials: one PhysX readback, then a write-through cache (see
         # physx_cache.py). The reset-time DR and Isaac Lab's body_com_pose_b re-read them ~every step.
@@ -586,33 +592,10 @@ class BipedEnv(DirectRLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-        # Visualization Markers
+        # Visualization markers: command (green) vs measured (blue) velocity, linear arrow + yaw arc,
+        # both on one scale (mdp/commands.py).
         if self.sim.has_gui():
-            # Target Velocity (Green)
-            marker_cfg = VisualizationMarkersCfg(
-                prim_path="/Visuals/CommandVelocity",
-                markers={
-                    "arrow": sim_utils.UsdFileCfg(
-                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                        scale=(0.5, 0.5, 0.5),
-                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
-                    ),
-                },
-            )
-            self.vis_cmd = VisualizationMarkers(marker_cfg)
-            
-            # Actual Velocity (Blue)
-            marker_cfg = VisualizationMarkersCfg(
-                prim_path="/Visuals/BaseVelocity",
-                markers={
-                    "arrow": sim_utils.UsdFileCfg(
-                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                        scale=(0.5, 0.5, 0.5),
-                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
-                    ),
-                },
-            )
-            self.vis_vel = VisualizationMarkers(marker_cfg)
+            self.vis_markers = make_command_markers()
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.actions = actions.clone()
@@ -722,13 +705,18 @@ class BipedEnv(DirectRLEnv):
         return obs, rew, terminated, truncated, info
 
     def _update_visualization(self):
-        self.command_generator.visualize(
-            self.vis_cmd, 
-            self.vis_vel, 
-            self.robot.data.root_pos_w, 
-            self.robot.data.root_quat_w, 
-            self.base_lin_vel_b
-        )
+        d = self.robot.data
+        self.command_generator.visualize(self.vis_markers, d.root_pos_w, d.root_quat_w,
+                                         d.root_lin_vel_w, d.root_ang_vel_w)
+
+    def apply_push(self, dv) -> None:
+        """Add a world-frame (dvx, dvy, dwz) kick to every env's base, as push_by_setting_velocity does
+        (play.py's Space push; the training pushes stay the push_robot event)."""
+        dv = torch.as_tensor(dv, dtype=torch.float32, device=self.device)
+        vel = self.robot.data.root_vel_w.clone()
+        vel[:, 0:2] += dv[0:2]
+        vel[:, 5] += dv[2]
+        self.robot.write_root_velocity_to_sim(vel)
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
         self.base_pos = self.robot.data.root_pos_w

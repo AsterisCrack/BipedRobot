@@ -170,12 +170,17 @@ def _load_sampler():
     """envs/isaaclab/mdp/commands.py with the Isaac-only imports stubbed while it loads."""
     imath = types.ModuleType("isaaclab.utils.math")
     imath.wrap_to_pi = lambda x: torch.atan2(torch.sin(x), torch.cos(x))
-    imath.quat_from_euler_xyz = imath.quat_apply = None
+    def quat_from_euler_xyz(roll, pitch, yaw):      # yaw-only is all the arrows use
+        h = 0.5 * yaw
+        z = torch.zeros_like(h)
+        return torch.stack([torch.cos(h), z, z, torch.sin(h)], dim=-1)
+    imath.quat_from_euler_xyz = quat_from_euler_xyz
     imark = types.ModuleType("isaaclab.markers")
-    imark.VisualizationMarkers = object
+    imark.VisualizationMarkers = imark.VisualizationMarkersCfg = object
+    isim = types.ModuleType("isaaclab.sim")
     mp = pytest.MonkeyPatch()
     for name, mod in (("isaaclab", types.ModuleType("isaaclab")), ("isaaclab.utils", types.ModuleType("isaaclab.utils")),
-                      ("isaaclab.utils.math", imath), ("isaaclab.markers", imark)):
+                      ("isaaclab.utils.math", imath), ("isaaclab.markers", imark), ("isaaclab.sim", isim)):
         mp.setitem(sys.modules, name, mod)
     try:
         spec = importlib.util.spec_from_file_location(

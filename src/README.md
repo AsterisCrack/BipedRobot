@@ -76,6 +76,7 @@ no action noise) through the same observation and actuation pipeline as training
 ```bash
 python src/isaaclab/play.py --task BipedRobotV2 --checkpoint checkpoints/<run>/step_<N>.pt
 python src/isaaclab/play.py --task BipedRobotV2 --checkpoint ... --pushes --num_envs 4
+python src/isaaclab/play.py --task BipedRobotV2 --checkpoint ... --teleop
 ```
 
 | Argument | Default | Description |
@@ -85,9 +86,15 @@ python src/isaaclab/play.py --task BipedRobotV2 --checkpoint ... --pushes --num_
 | `--config_path` | run's `config.yaml` | Otherwise `config/config.yaml` |
 | `--num_envs` | `1` | Robots to show |
 | `--pushes` | off | Keep the training pushes on to watch push recovery |
-| `--seed`, `--video`, `--video_length`, `--video_interval` | | Accepted for symmetry with `train.py`. `--seed` is not used, and `--video` only switches cameras and rendering on; `play.py` does not write clips |
+| `--teleop` | off | Drive the command from the keyboard or a gamepad ([controls](#manual-control-and-pushes)). The camera follows env 0 and episodes don't time out |
+| `--push_scale` | `1.0` | Size of the Space / pad A push, as a multiple of the training push range edge |
+| `--seed`, `--video`, `--video_length`, `--video_interval` | | Accepted for symmetry with `train.py`. `--seed` only seeds the Space push, and `--video` only switches cameras and rendering on; `play.py` does not write clips |
 
-Commands are sampled from the config's ranges. For a fixed command use `sim2real.py`.
+Commands are sampled from the config's ranges unless `--teleop` is on. For a fixed command use `sim2real.py`.
+
+Green is the command and blue is the measured base velocity. Both use one scale: an arrow for (vx, vy),
+0.4 m long at the range's top speed, and an arc around the base for wz (270 deg at the top |wz|,
+counter-clockwise for +wz). A green dot means the command has no translation. `sim2real.py` draws the same.
 
 ### `mujoco/sim2real.py`
 
@@ -97,6 +104,7 @@ a sim-to-sim check, and it needs no Isaac Lab. It supports the V2 robot only.
 ```bash
 python src/mujoco/sim2real.py --checkpoint checkpoints/<run>/step_<N>.pt --vx 0.1
 python src/mujoco/sim2real.py --checkpoint ... --headless --num_episodes 5
+python src/mujoco/sim2real.py --checkpoint ... --teleop
 ```
 
 | Argument | Default | Description |
@@ -109,7 +117,29 @@ python src/mujoco/sim2real.py --checkpoint ... --headless --num_episodes 5
 | `--num_episodes` | `0` | Episodes before exiting (0 = run until closed) |
 | `--render_fps` | `50` | Target frame rate with a viewer |
 | `--vx`, `--vy`, `--wz` | random | Fixed command per axis (m/s, m/s, rad/s) |
+| `--teleop` | off | Drive the command from the keyboard or a gamepad ([controls](#manual-control-and-pushes)); needs the viewer, overrides `--vx/--vy/--wz`, and the camera tracks the robot |
+| `--push_scale` | `1.0` | As in `play.py` |
 | `--legacy-imu` | off | Old Isaac accelerometer convention; only for checkpoints trained before the step-averaged IMU fix |
+
+### Manual control and pushes
+
+`play.py` and `sim2real.py` share these bindings (`utils/teleop.py`), the same as the Jetson web UI.
+Keys need the sim window focused.
+
+| Keyboard | Gamepad | Action |
+|---|---|---|
+| W / S | left stick up / down | forward / back |
+| A / D | left stick left / right | left / right |
+| Q / E | right stick left / right | turn left / right |
+| Z / X | LB / RB | speed level -10 % / +10 % (10-100 %, starts at 50 %) |
+| Space | A | random push (works without `--teleop` too) |
+
+A held key commands speed level x the training config's range edge on that side. On the gamepad,
+the level caps full stick deflection. The command is then limited exactly as in training
+(`limit_shape`). The level and command are shown top-left in MuJoCo, and in a "Teleop" window in
+Isaac. A push adds a world-frame velocity kick in a random direction, at the edge of the training
+push range (`events.push_robot`) times `--push_scale`, plus a random yaw kick. In Isaac, Space is
+normally Kit's Play/Pause hotkey; `play.py` unbinds it for the session.
 
 ### `mujoco/sweep_all.py`
 

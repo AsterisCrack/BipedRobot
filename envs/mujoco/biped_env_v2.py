@@ -814,6 +814,75 @@ class BipedEnvV2(BaseEnv):
         self.commands[:] = cmd
         return self.commands.copy()
 
+    def apply_push(self, dvx: float, dvy: float, dwz: float) -> None:
+        """Add a world-frame velocity kick to the base, as Isaac's push_by_setting_velocity does.
+        The free joint's angular velocity is in the body frame, so the world yaw kick is rotated in."""
+        self.data.qvel[0] += dvx
+        self.data.qvel[1] += dvy
+        self.data.qvel[3:6] += self._world_to_body_rot() @ np.array([0.0, 0.0, dwz], dtype=np.float32)
+
+    # ------------------------------------------------------------------
+    # Viewer overlay: command (green) vs measured (blue) velocity, one shared scale
+    # ------------------------------------------------------------------
+
+    _GREEN = np.array([0.1, 0.9, 0.1, 0.9], dtype=np.float32)
+    _BLUE = np.array([0.15, 0.35, 1.0, 0.9], dtype=np.float32)
+    hud_text: str | None = None     # set by sim2real; drawn top-left
+
+    def _overlay_text(self) -> str | None:
+        return self.hud_text
+
+    def _add_geom(self, scene, gtype, rgba, size=(0.0, 0.0, 0.0), pos=(0.0, 0.0, 0.0)):
+        if scene.ngeom >= scene.maxgeom:
+            return None
+        g = scene.geoms[scene.ngeom]
+        mujoco.mjv_initGeom(g, gtype, np.asarray(size, dtype=np.float64), np.asarray(pos, dtype=np.float64),
+                            np.eye(3).reshape(-1), rgba)
+        scene.ngeom += 1
+        return g
+
+    def _add_connector(self, scene, gtype, rgba, width, p0, p1):
+        g = self._add_geom(scene, gtype, rgba)
+        if g is not None:
+            mujoco.mjv_connector(g, gtype, width, np.asarray(p0, dtype=np.float64), np.asarray(p1, dtype=np.float64))
+
+    def _add_overlay_geoms(self, scene) -> None:
+        from utils.teleop import (ARC_RADIUS, ARC_RADIUS_GAP, ARC_SEGMENTS, STOP_THRESH, arc_points,
+                                  vis_scales)
+        k_lin, k_ang = vis_scales(self.command_limit()[0])
+        base = self.data.xpos[self._base_body_id].astype(np.float64)
+        R_bw = self.data.xmat[self._base_body_id].reshape(3, 3)
+        yaw = math.atan2(R_bw[1, 0], R_bw[0, 0])
+        c, s = math.cos(yaw), math.sin(yaw)
+        cmd = np.asarray(self.commands, dtype=np.float64)
+        v_cmd_w = np.array([c * cmd[0] - s * cmd[1], s * cmd[0] + c * cmd[1]])
+        v_meas_w = np.asarray(self.data.qvel[0:2], dtype=np.float64)
+        wz_meas = float((R_bw @ self.data.qvel[3:6])[2])
+
+        # Linear: an arrow from above the base; a dot when the command has no translation.
+        for v, rgba, dz, is_cmd in ((v_cmd_w, self._GREEN, 0.30, True), (v_meas_w, self._BLUE, 0.34, False)):
+            p0 = base + (0.0, 0.0, dz)
+            speed = float(np.linalg.norm(v))
+            if speed < STOP_THRESH:
+                if is_cmd:
+                    self._add_geom(scene, mujoco.mjtGeom.mjGEOM_SPHERE, rgba, size=(0.025, 0, 0), pos=p0)
+                continue
+            p1 = p0 + np.array([v[0], v[1], 0.0]) * k_lin
+            self._add_connector(scene, mujoco.mjtGeom.mjGEOM_ARROW, rgba, 0.012, p0, p1)
+
+        # Yaw rate: an arc from the robot's heading, counter-clockwise for +wz, ending in an arrowhead.
+        for wz, rgba, r in ((float(cmd[2]), self._GREEN, ARC_RADIUS), (wz_meas, self._BLUE, ARC_RADIUS + ARC_RADIUS_GAP)):
+            if abs(wz) < STOP_THRESH:
+                continue
+            pts = arc_points(yaw, wz * k_ang, ARC_SEGMENTS) * r
+            z = base[2] + 0.22
+            p = np.column_stack([base[0] + pts[:, 0], base[1] + pts[:, 1], np.full(len(pts), z)])
+            for a, b in zip(p[:-2], p[1:-1]):
+                self._add_connector(scene, mujoco.mjtGeom.mjGEOM_CAPSULE, rgba, 0.006, a, b)
+            tang = p[-1] - p[-2]
+            tang /= max(np.linalg.norm(tang), 1e-9)
+            self._add_connector(scene, mujoco.mjtGeom.mjGEOM_ARROW, rgba, 0.012, p[-2], p[-2] + tang * 0.05)
+
     # ------------------------------------------------------------------
     # Gymnasium interface
     # ------------------------------------------------------------------

@@ -54,7 +54,12 @@ class BaseEnv(gym.Env):
         # Update scene and render
         viewport = mujoco.MjrRect(0, 0, self.viewport_width, self.viewport_height)
         mujoco.mjv_updateScene(self.model, self.data, self.opt, None, self.cam, mujoco.mjtCatBit.mjCAT_ALL.value, self.scene)
+        self._add_overlay_geoms(self.scene)
         mujoco.mjr_render(viewport, self.scene, self.context)
+        text = self._overlay_text()
+        if text:
+            mujoco.mjr_overlay(mujoco.mjtFont.mjFONT_NORMAL, mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                               viewport, text, "", self.context)
 
         # Swap buffers and poll events
         glfw.swap_buffers(self.window)
@@ -63,6 +68,13 @@ class BaseEnv(gym.Env):
         if glfw.window_should_close(self.window):
             self.close()
             return
+
+    def _add_overlay_geoms(self, scene):
+        """Hook: append decorative geoms (arrows, markers) to the scene after mjv_updateScene."""
+
+    def _overlay_text(self) -> str | None:
+        """Hook: text drawn in the top-left corner of the window."""
+        return None
 
     def close(self):
         if self.window:
